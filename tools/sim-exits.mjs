@@ -11,14 +11,28 @@
 // a profit tier, the stop is assumed to fill first - the conservative
 // assumption, and the one that avoids flattering the result.
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
+import { createRequire } from 'node:module';
 
 const arg = (k, d) => { const i = process.argv.indexOf(`--${k}`); return i > -1 ? process.argv[i + 1] : d; };
 const MAX_BARS = parseInt(arg('max-bars', '2016'), 10);      // 7 days at 5m
 const SAMPLE   = parseInt(arg('sample', '20000'), 10);
 const DIR = arg('dir', 'data/klines');
 
-// Round-trip friction, matching src/config/costs.ts (15 bps per side).
-const COST_PER_SIDE = 0.0010 + 0.0002 + 0.0003;
+// Costs and the NEW ladder come from the app's own config, so changing
+// src/config/costs.ts or src/config/geometry.ts changes what this measures.
+const require = createRequire(import.meta.url);
+const esbuild = require('./_gen/vendor/node_modules/esbuild');
+const cfgBundle = await esbuild.build({
+  stdin: {
+    contents: "export { costPerSideRate } from './src/config/costs';" +
+              "export { GEOMETRY_CONFIG, resolveGeometry } from './src/config/geometry';",
+    resolveDir: process.cwd(), loader: 'ts',
+  },
+  bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'error',
+});
+const { costPerSideRate, GEOMETRY_CONFIG, resolveGeometry } = await import(
+  'data:text/javascript;base64,' + Buffer.from(cfgBundle.outputFiles[0].text).toString('base64'));
+const COST_PER_SIDE = costPerSideRate();
 
 // ---------- load bars ----------
 const src = readFileSync('src/services/binanceService.ts', 'utf8');
@@ -39,12 +53,14 @@ for (const sym of [...src.matchAll(/symbol: '([A-Z0-9]+)'/g)].map(m => m[1])) {
 }
 
 // ---------- the two ladders ----------
-// OLD: what the caps actually produced - identical for every altcoin.
+// OLD: what the caps actually produced before the geometry change - identical
+// for every altcoin. Deliberately frozen here as the historical baseline.
 const oldLadder = () => ({ stop: 3.2, t1: 3.8, t2: 7.5, t3: 12.0, bePct: 0.3 });
-// NEW: config/geometry.ts - 1.5x ATR stop, tiers at 1R / 2R / 3.5R.
+// NEW: whatever src/config/geometry.ts currently specifies.
 const newLadder = (atrPct) => {
-  const stop = Math.max(1.5, Math.min(15, atrPct * 1.5));
-  return { stop, t1: stop * 1.0, t2: stop * 2.0, t3: stop * 3.5, bePct: stop * 0.1 };
+  const g = resolveGeometry(atrPct);
+  return { stop: g.stopPct, t1: g.tier1Pct, t2: g.tier2Pct, t3: g.tier3Pct,
+           bePct: g.stopPct * GEOMETRY_CONFIG.breakevenFloorRMultiple };
 };
 
 /**
@@ -146,7 +162,10 @@ function run(name, makeLadder) {
   };
 }
 
-const results = [run('OLD (capped 3.2/3.8/7.5/12)', oldLadder), run('NEW (1.5x ATR, 1R/2R/3.5R)', newLadder)];
+const g = GEOMETRY_CONFIG;
+const newLabel = `NEW (${g.stopAtrMultiple}x ATR, ${g.tier1RMultiple}R/${g.tier2RMultiple}R/${g.tier3RMultiple}R)`;
+console.log(`costs ${(COST_PER_SIDE * 1e4).toFixed(0)}bp/side | ${newLabel} from src/config/geometry.ts\n`);
+const results = [run('OLD (capped 3.2/3.8/7.5/12)', oldLadder), run(newLabel, newLadder)];
 
 console.log('ladder                          n     win%   avgWin  avgLoss   expect    PF    avgHold  rot/day');
 console.log('-'.repeat(101));

@@ -1,129 +1,176 @@
-# CryptoStudyLab - Autonomous Quantitative Trading Engine
+# CryptoStudyLab
 
-An institutional-grade cryptocurrency swing trading and bankroll compounding system. This engine is built to maximize long-term portfolio growth through asymmetric risk-reward execution, dynamic risk-free trade ratcheting, and mathematical slot compounding.
+A browser-based **paper-trading lab** for crypto. It scans a fixed list of
+Binance USDT pairs, opens simulated positions when its scanner fires, manages
+them with a tiered exit ladder, and reports performance. No real orders are
+ever placed.
+
+Its purpose is to test whether a trading idea makes money **after costs**, not
+to trade. See [Status](#status) before drawing conclusions from its numbers.
 
 ---
 
-## 1. Core Architecture & Philosophy
+## Running it
 
-The system rejects gambling, emotional trading, and static calendar timers. It operates strictly on **Mathematical Expectancy**:
-
-$$\text{Expectancy} = (\text{Win Rate} \times \text{Avg Win}) - (\text{Loss Rate} \times \text{Avg Loss})$$
-
-Rather than capping profits or hoping trades work out, the engine balances **frequent cash banking** (to keep drawdowns tiny) with an **uncapped trailing runner** (to capture parabolic 40%+ crypto fat-tail trends).
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                   MARKET DATA INGESTION                     │
-│    Live Binance Spot & Futures Tickers, Order Flow Delta    │
-└──────────────────────────────┬──────────────────────────────┘
-                               │
-                               ▼
-┌─────────────────────────────────────────────────────────────┐
-│                 5-CHECKPOINT SCANNER ENGINE                 │
-│      RSI Momentum • 4H EMA Trend • Volume Surge • CVD       │
-│                Calculates Conviction Score (0-100)          │
-└──────────────────────────────┬──────────────────────────────┘
-                               │
-                               ▼
-┌─────────────────────────────────────────────────────────────┐
-│             AUTONOMOUS RISK & EXECUTION HUD                │
-│    1. BTC Flash-Crash Armor (Macro Health Filter)           │
-│    2. Sector Diversification Guard (Max 3 per category)     │
-│    3. Priority Queue: Highest Score & R:R Ratio First       │
-└──────────────────────────────┬──────────────────────────────┘
-                               │
-                               ▼
-┌─────────────────────────────────────────────────────────────┐
-│             10-SLOT COMPOUNDING BANKROLL                    │
-│             Tranche Size = Total Bankroll ÷ 10              │
-└──────────────────────────────┬──────────────────────────────┘
-                               │
-                               ▼
-┌─────────────────────────────────────────────────────────────┐
-│               STEP-LOCK TRAILING RATCHET CYCLE              │
-│  Entry   ──▶ Tier 1 (+4%)  ──▶ Tier 2 (+8%) ──▶ Tier 3 (+15%)
-│  Stop Loss    Stop: Breakeven    Stop: Tier 1    Stop: Tier 2
-│  (-4%)        (Zero Risk)        (Lock Profit)   (17% Trailing Runner)
-└─────────────────────────────────────────────────────────────┘
+```bash
+bun install          # or npm install
+bun run dev          # http://localhost:3000
+bun run lint         # type check (tsc --noEmit)
 ```
 
----
-
-## 2. Quantitative Scan Engine (5 Checkpoints)
-
-Every 5 seconds, the scanner evaluates all candidate assets across 5 distinct pillars. A coin must achieve a score of **80 or higher** to trigger:
-
-1. **Structural Market Alignment (20 pts)**:
-   - Price position relative to 4H 21 EMA, Daily MA7, and Daily EMA200.
-   - Rejects coins hitting overhead resistance ceilings.
-2. **Micro-Timeframe Confirmation (20 pts)**:
-   - Evaluates 1-hour candle prints and lower-wick absorption to prevent buying falling knives.
-3. **Whale Order Flow & Volume (20 pts)**:
-   - Real-time Cumulative Volume Delta (CVD) and Taker Buy vs. Sell volume ratio (>1.25x surge).
-4. **Multi-Timeframe Confluence (20 pts)**:
-   - Daily Trend (Bullish/Neutral) + 4H Trend (Expanding/Consolidating).
-5. **Trade Geometry & Risk-to-Reward (20 pts)**:
-   - Requires minimum 2.0:1 Reward-to-Risk ratio based on Average True Range (ATR) volatility.
+No environment variables are required. `.env.example` lists `GEMINI_API_KEY`
+and `APP_URL` from the AI Studio template; nothing in `src/` reads them.
 
 ---
 
-## 3. Auto-Pilot Safety & Allocation Engine
+## How it trades
 
-When Auto-Pilot is enabled, it continuously executes trades using three safety layers:
+All tunables live in `src/config/`. The values below are the current defaults.
 
-### A. The 10-Slot Compounding Rule
-* Total portfolio capital is strictly partitioned into **10 equal slots**.
-* `Tranche Size = Total Bankroll ÷ 10` (e.g., $100 bankroll = $10.00 tranches; $500 bankroll = $50.00 tranches).
-* **Why 10 Slots?**
-  * Maximum portfolio risk per trade is strictly capped at **0.40%** ($10\text{ slot} \times 4\%\text{ stop} = 0.40\%$).
-  * Prevents over-diversification index drag and illiquid coin exposure.
+### Market data
 
-### B. Bitcoin Flash-Crash Armor (`BtcMacroRegime`)
-* Because 90% of altcoins dump when Bitcoin experiences sudden drops, Auto-Pilot monitors BTC 1h and 24h momentum:
-  * `BULLISH_EXPANSION` / `HEALTHY_CONSOLIDATION`: Normal deployments active.
-  * `DEFENSIVE_PULLBACK`: Tightens threshold to Score $\ge 85$.
-  * `HEAVY_DUMP`: **Pauses all new Long entries** to protect cash until BTC stabilizes.
+- **Universe:** 36 hardcoded USDT pairs in `src/services/binanceService.ts`.
+  Pairs with no live Binance spot ticker (currently FTM, KAS and POPCAT) are
+  skipped rather than scanned at a stale price.
+- **Feed:** Binance `/api/v3/ticker/24hr`, refreshed every 30 seconds. This is
+  the only data source; there are no candles, no order book, no trade prints.
+- **Indicators:** every indicator the scanner shows (EMAs, MA7, RSI, ATR,
+  Bollinger, order-flow, 1H/15m/5m reads) is derived from that one 24-hour
+  snapshot. They are approximations, not values computed from real candles.
+  `AUDIT.md` section 2 shows they reduce almost entirely to the 24-hour
+  percent change.
 
-### C. Sector Diversification Guard
-* Caps active trades to **a maximum of 3 per sector** (e.g., max 3 Layer-1s, max 3 Memes, max 3 DeFi).
-* Prevents the entire portfolio from moving in tandem during sector-specific corrections.
+### Entries — `src/config/autopilot.ts`
 
-### D. Intelligent Priority Queue
-* When a slot opens, Auto-Pilot deploys into the candidate with:
-  1. Highest **Conviction Score** (90+ given top priority).
-  2. Highest **Reward-to-Risk (R:R) Ratio** as a tie-breaker.
+Auto-pilot checks for entries every 10 seconds and deploys when all of these hold:
+
+- Scanner score **≥ 75** with status TRIGGERED, FORMING or STAGING
+- Multi-timeframe grade not C or DISQUALIFIED, at least 2 of 4 timeframes aligned
+- **Long only** — shorts are disabled (`allowShorts: false`); they lost money in
+  both test samples
+- **Market-regime gates pass** (`enforceRegimeGates: true`):
+  - *Consolidation lock* — no entries when average 24h movement across the
+    universe is under 2%, or 2 or fewer coins are moving 3%+
+  - *BTC armor* — no entries when BTC is down more than 6.5% in 24 hours.
+    Separately, the scanner downgrades altcoin longs whenever BTC is down
+    more than 1.5% or looks weak, requiring a 90+ score to trigger
+  - *Loss-streak breaker* — 2 losing trades within 2 hours pauses entries for
+    60 minutes
+- **At most one deploy per fresh price snapshot, and one every 2 minutes**
+
+Position limits: 10 open positions, one per coin, at most 3 majors
+(BTC/ETH/BNB/SOL) and 2 memes. A coin closed within the last 20 minutes is
+skipped by auto-pilot (manual deploys ignore this).
+
+### Exits — `src/config/geometry.ts`
+
+Everything is expressed in **R**, where 1R is the stop distance.
+
+| Stage | Trigger | Action |
+|---|---|---|
+| Entry | — | Stop at **1.5 × ATR** below entry (bounded 1.5%–15%) |
+| Tier 1 | **+1R** | Bank 33%. Stop moves to entry **+0.1R** |
+| Tier 2 | **+2R** | Bank 33%. Stop moves to the Tier 1 price |
+| Tier 3 | **+3.5R** | Bank 17%. Remaining 17% trails 4% below the session high (2.5% once the trade is up 20%, 1.8% once up 35%), never below the Tier 2 price |
+
+Because the stop scales with each coin's volatility, a quiet coin gets a tight
+stop and a volatile one a wide stop. If a price gaps past a tier it is banked
+at the better price, capped at 3× the tier target so a bad price tick cannot
+bank an absurd gain.
+
+A position flat to within ±0.8% after 24 hours without reaching Tier 1 is
+closed to free the slot.
+
+### Sizing
+
+- **Risk-based:** each trade is sized so that hitting its stop loses **0.4% of
+  equity**, whatever the stop distance.
+- **Capped** at the slot size (equity ÷ 10, minimum $5), so a tight stop never
+  takes an oversized position.
+- Equity compounds: slot size tracks the current portfolio value.
+
+### Costs — `src/config/costs.ts`
+
+Every fill pays **15 bps per side** (10 fee + 2 half-spread + 3 slippage),
+charged on the fraction actually traded. A full round trip is 30 bps. Costs
+accumulate in each trade's `totalFeesUSD`.
 
 ---
 
-## 4. The Step-Lock Trailing Ratchet (Cycle Engine)
+## How performance is measured
 
-To solve the problem of hard-exiting too early or giving back gains on reversals:
+All statistics use the definitions in `src/services/metrics.ts`:
 
-| Stage / Trigger | Cash Banked | Protective Stop Adjustment | Protection Status |
-| :--- | :--- | :--- | :--- |
-| **Entry (0%)** | $0.00 | Initial Stop (-3.5% to -5.0%) | Defined Risk |
-| **Tier 1 Hit (+4%)** | Bank 33% of position | Stop moves to **Breakeven (+0.3%)** | **ZERO RISK LOCKED** |
-| **Tier 2 Hit (+8%)** | Bank 33% of position | Stop ratchets up to **Tier 1 Price (+4%)** | **STEP-LOCK TIER 1** |
-| **Tier 3 Hit (+15%)** | Bank 17% of position | Stop ratchets up to **Tier 2 Price (+8%)** | **STEP-LOCK TIER 2** |
-| **Post-Tier 3 (Runner)** | Remaining 17% active | **Dynamic 4% Trailing Floor** behind session peak | **UNCAPPED RUNNER** |
+- `pnlUSD` on a trade is **gross**. `totalFeesUSD` holds **all** its costs.
+- Every figure shown is on **net = pnlUSD − totalFeesUSD**.
+- A trade is a **win** if net > $0.01, a **loss** if net < −$0.01, otherwise a
+  **scratch**. Win rate = wins ÷ closed trades.
+- Profit factor and payoff ratio show **∞** when there are no losing trades.
+- Max drawdown is measured on realized net equity from its running peak.
+- Portfolio value, cash and profit are **calculated from the trade list**, not
+  stored — so they cannot drift out of sync with the trades.
 
-### Why This Produces Higher Long-Run Returns:
-1. **Zero-Risk Transition**: 58% of trades reach Tier 1, after which they can no longer produce a monetary loss.
-2. **Cash Velocity**: Banked cash ($0.40, $0.80, etc.) immediately flows back into the liquid bankroll, expanding future tranche sizes.
-3. **Trend Capture**: The 17% trailing runner rides massive market runs (+40% to +100%) without capping upside.
+`node tools/test-metrics.mjs` checks all of this against trades with
+hand-computed answers.
 
 ---
 
-## 5. Scaling Strategy (Future Growth Roadmap)
+## Storage
 
-When scaling this system from small tests to larger balances:
+Trades and settings are saved in the browser's **localStorage**. They survive
+closing the tab or browser, but exist only in that browser, and clearing site
+data deletes them.
 
-1. **Scale Tranche Size, NOT Coin Count**:
-   - Keep the system locked at **10 slots**.
-   - As bankroll reaches $1,000 $\rightarrow$ Tranche size = $100.
-   - As bankroll reaches $10,000 $\rightarrow$ Tranche size = $1,000.
-2. **Future Enhancements Backlog**:
-   - **Automated Zombie Recycling**: If an active position stagnates for 24+ hours at near 0% return, automatically cycle it out if a 90+ Score setup arrives.
-   - **Dynamic ATR Buffer**: Adjust trailing runner distance based on real-time 15m implied volatility (e.g. 3.5% in calm regimes, 5.5% in high-beta regimes).
-   - **Exchange API Execution**: Connect Binance Spot / Futures API keys for automated order placement.
+The code also writes to **Firestore**, but for this project every Firestore
+request is currently rejected (no sign-in method is enabled and the deployed
+rules require one), so localStorage is the only working store.
+
+> `firestore.rules` in this repo is **more permissive** than the rules actually
+> deployed. Do not run `firebase deploy --only firestore:rules` without
+> reviewing it first — it would replace the stricter live rules.
+
+---
+
+## Status
+
+**Nothing runs while the app is closed.** Prices, stops and targets are only
+checked while the tab is open and in the foreground. On reopening, each open
+position is evaluated once at the current price; whatever happened in between
+is missed. Paper results therefore depend on when the app was open.
+
+**The strategy has not shown an edge.** Replaying the real scanner over
+6 months (and checking against 24 more) found that its entries do not beat the
+market by more than trading costs. Wider, volatility-scaled exits roughly halve
+the rate of loss but do not make it profitable. Details:
+
+| Document | Contents |
+|---|---|
+| `AUDIT.md` | Full review of the original system and why it exited so quickly |
+| `STUDY_A_RESULTS.md` | Replay results: entry edge, score, exit geometry, out-of-sample checks |
+| `QUANT_BRIEF.md` | Short summary for review by a quant or trading engineer |
+
+---
+
+## Research tools — `tools/`
+
+These run the app's real scanner and exit logic offline against historical
+Binance data. Market data (~1.5 GB) is downloaded on demand and gitignored.
+
+```bash
+node tools/build-scanner.mjs                 # bundle the real scanner (re-run after changing it)
+node tools/fetch-klines.mjs --months 6       # download 5m candles
+node tools/replay.mjs                        # every entry auto-pilot would have taken
+node tools/study-a.mjs                       # do entries beat the market?
+node tools/study-score.mjs                   # does a higher score mean better trades?
+node tools/study-residual.mjs                # beta-neutral / longer-horizon variants
+node tools/sim-exits.mjs                     # old vs current exit geometry
+node tools/test-metrics.mjs                  # metric accuracy check
+node tools/diagnose-trades.mjs trades.json   # find corrupt records in an exported feed
+```
+
+To export your trade history for `diagnose-trades`, run this in the app's
+browser console and paste the result into a file:
+
+```js
+copy(localStorage.getItem('crypto_automated_trades_local_fallback'))
+```

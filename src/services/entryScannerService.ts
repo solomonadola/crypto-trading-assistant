@@ -1093,6 +1093,10 @@ export function scanLiveMarketEntries(coins: CryptoCoin[], mode: ScannerTradingM
       if (direction === 'LONG' && signalScore >= 70 && !isCeilingBlocked && !isSellerDumpingTrap) {
         status = 'FORMING';
         executionDecision = 'WAIT_CONFIRMATION';
+        // Auto-pilot deploys any FORMING signal scoring >= 75 that carries no
+        // disqualificationReason. Without one here, the "90+ during a BTC
+        // pullback" gate was bypassed and these deployed at 75.
+        disqualificationReason = `BTC pullback: altcoin longs need a 90+ score (currently ${signalScore}).`;
         aiRationale = `[Long Forming - Awaiting 90+ Conviction in Pullback] Current score is ${signalScore}/100. During a BTC pullback, the system enforces a strict 90+ conviction gate to prevent getting trapped by the majors.`;
       } else {
         status = 'INHIBITED';
