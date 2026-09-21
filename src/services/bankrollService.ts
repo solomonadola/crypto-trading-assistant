@@ -353,7 +353,7 @@ export function calculateStrategyVerification(
   const bankroll = calculateBankrollState(trades, customConfig);
   const closedTrades = trades.filter((t) => t.status !== 'OPEN');
   const sampleSize = closedTrades.length;
-  const targetSampleSize = 30;
+  const targetSampleSize = 300;   // enough for a first directional read; see AUDIT.md section 4
   const sampleProgressPct = Math.min(100, Math.round((sampleSize / targetSampleSize) * 100));
 
   // All figures on NET P&L (gross pnlUSD minus totalFeesUSD) with a single
@@ -449,10 +449,10 @@ export function calculateStrategyVerification(
   let verdictSummary = '';
   let recommendation = '';
 
-  if (sampleSize >= 20 && passedCount >= 5) {
+  if (sampleSize >= targetSampleSize && passedCount >= 5) {
     readinessStatus = 'VALIDATED_READY';
-    verdictSummary = `Statistical Validation Passed: ${sampleSize} verified trades logged with ${winRatePct}% win rate and ${payoffRatio}x asymmetry.`;
-    recommendation = 'Strategy has demonstrated verified mathematical edge across market cycles. Ready for conservative live position sizing.';
+    verdictSummary = `Paper Criteria Met: ${sampleSize} verified trades logged with ${winRatePct}% win rate and ${payoffRatio}x asymmetry.`;
+    recommendation = 'Enough paper trades for a first read. This is one period of paper results: confirm on a different period before risking real money.';
   } else if (sampleSize >= 5 && (expectancyUSD < 0 || maxDrawdownPct > 12)) {
     readinessStatus = 'DEFENSIVE_REGIME_WARNING';
     verdictSummary = `Defensive Regime Triggered: Drawdown (${maxDrawdownPct}%) or expectancy ($${expectancyUSD.toFixed(2)}) breached safety parameters.`;
@@ -460,7 +460,7 @@ export function calculateStrategyVerification(
   } else {
     readinessStatus = 'SAMPLE_IN_PROGRESS';
     verdictSummary = `Sampling Phase: ${sampleSize} of ${targetSampleSize} required closed trade cycles logged (${sampleProgressPct}% progress).`;
-    recommendation = 'Maintain fixed $10 micro-tranches until N ≥ 30 sample threshold is reached to confirm statistical stability.';
+    recommendation = `Keep paper trading until at least ${targetSampleSize} closed trades - fewer cannot distinguish a small edge from luck.`;
   }
 
   return {

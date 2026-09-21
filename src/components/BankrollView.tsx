@@ -191,7 +191,7 @@ export const BankrollView: React.FC<BankrollViewProps> = ({
                   <>
                     <span className="font-bold text-xs mt-1 truncate max-w-[50px]">{trade.symbol}</span>
                     <span className="text-[9px] mt-0.5 font-semibold">
-                      {isArmed ? 'ZERO RISK' : `${trade.pnlPercentage >= 0 ? '+' : ''}${trade.pnlPercentage}%`}
+                      {isArmed ? 'STOP AT BREAKEVEN' : `${trade.pnlPercentage >= 0 ? '+' : ''}${trade.pnlPercentage}%`}
                     </span>
                   </>
                 ) : (
@@ -287,7 +287,7 @@ export const BankrollView: React.FC<BankrollViewProps> = ({
                         ) : isArmed ? (
                           <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
                             <ShieldCheck className="w-3 h-3" />
-                            {t2Harvested ? 'STEP-LOCK TIER 1' : 'ZERO RISK LOCKED'}
+                            {t2Harvested ? 'STEP-LOCK TIER 1' : 'STOP AT BREAKEVEN'}
                           </span>
                         ) : null}
 
@@ -713,7 +713,7 @@ export const BankrollView: React.FC<BankrollViewProps> = ({
             {/* 5. Zero-Risk Ratchet Rate */}
             <div className="p-4 rounded-xl bg-stone-900 border border-stone-800 space-y-2">
               <div className="flex items-center justify-between">
-                <span className="text-xs font-semibold text-stone-400">Zero-Risk Ratchet Rate</span>
+                <span className="text-xs font-semibold text-stone-400">Breakeven-Stop Rate</span>
                 <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
                   verification.ratchetPassed ? 'bg-emerald-500/20 text-emerald-400' : 'bg-amber-500/20 text-amber-400'
                 }`}>
@@ -761,7 +761,7 @@ export const BankrollView: React.FC<BankrollViewProps> = ({
                 <span className="font-bold text-amber-300 block">1. If MFE is High (+6% to +10%) but Realized PnL is Low:</span>
                 <p className="text-stone-400 leading-relaxed">
                   Your entry timing was accurate, but trades are giving back profits before hitting Tier 2 (+7%). 
-                  <strong> Action:</strong> Lower your Tier 1 target to +3.0% and lock in the Zero-Risk Breakeven Ratchet sooner.
+                  <strong> Action:</strong> Lower your Tier 1 target to +3.0% and move the stop to breakeven sooner.
                 </p>
               </div>
 
@@ -770,7 +770,7 @@ export const BankrollView: React.FC<BankrollViewProps> = ({
                 <span className="font-bold text-amber-300 block">2. If MAE is High (-3% to -4%) on Many Positions:</span>
                 <p className="text-stone-400 leading-relaxed">
                   You are entering too early into falling momentum before the bottom forms. 
-                  <strong> Action:</strong> In the Live Signal Scanner, filter strictly for setups with Whale CVD &gt; 70% and wait for a 1-hour bullish candle close before pulling the trigger.
+                  <strong> Action:</strong> Raise the minimum score or wait for the regime gates to clear before deploying; the replay studies found higher-conviction entries did not perform better, so fewer trades is the more reliable lever.
                 </p>
               </div>
 

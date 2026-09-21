@@ -531,7 +531,7 @@ export function scanLiveMarketEntries(coins: CryptoCoin[], mode: ScannerTradingM
         : '4-Hour 21 EMA Pullback';
       archetypeDescription = mode === 'FUTURES_1_2D' && price >= dailyMa7
         ? 'Binance Futures trend-following long riding above the Daily MA(7) yellow line with buyer order flow and expanding momentum.'
-        : 'Institutional trend-following strategy that buys disciplined dip retracements into the 4-Hour 21 EMA with confirmed lower-wick absorption while the macro trend is bullish.';
+        : 'Trend-following strategy that buys disciplined dip retracements into the 4-Hour 21 EMA with confirmed lower-wick absorption while the macro trend is bullish.';
       
       const p1FailedByMa7 = mode === 'FUTURES_1_2D' && price < dailyMa7;
       const p1Passed = !p1FailedByMa7 && (
@@ -589,16 +589,16 @@ export function scanLiveMarketEntries(coins: CryptoCoin[], mode: ScannerTradingM
         : (orderFlow.buyRatioPct >= 48.0) ? 6 : 0;
       checkpoints.push({
         id: 'cp-p3-whale',
-        name: 'Whale Conviction & Order Flow Delta',
-        requiredRule: 'Whale Net Delta > $0 & Total Taker Buy Ratio >= 50.5%',
-        currentValue: `Whale: ${whaleNet >= 0 ? '+' : ''}${formatCashUSD(whaleNet)} (${orderFlow.whale?.whaleBuyRatioPct || 50}% Buy) | Total: ${formatOrderFlowUSD(orderFlow.netDeltaUSD)}`,
+        name: 'Order Flow (estimated)',
+        requiredRule: 'Est. large-order delta > $0 & est. buy ratio >= 50.5%',
+        currentValue: `Est. large-order: ${whaleNet >= 0 ? '+' : ''}${formatCashUSD(whaleNet)} (${orderFlow.whale?.whaleBuyRatioPct || 50}% Buy) | Total: ${formatOrderFlowUSD(orderFlow.netDeltaUSD)}`,
         passed: p3Passed,
         weight: 20,
         earnedScore: p3Score,
         pillarCategory: 'WHALE_FLOW',
         explanation: p3Passed
-          ? `Institutional whales (> $100k blocks) are net accumulators (+${formatCashUSD(whaleNet)}), reinforcing taker demand.`
-          : `Whale net delta is neutral or negative (${formatCashUSD(whaleNet)}). Smart money accumulation is not yet aggressive.`
+          ? `Estimated large-order flow is positive (+${formatCashUSD(whaleNet)}), derived from 24h price action.`
+          : `Estimated large-order flow is neutral or negative (${formatCashUSD(whaleNet)}).`
       });
 
       const p4Passed = confluenceRating === 'A+' || confluenceRating === 'A';
@@ -687,16 +687,16 @@ export function scanLiveMarketEntries(coins: CryptoCoin[], mode: ScannerTradingM
         : (volumeSurgeRatio >= 1.15 || orderFlow.netDeltaUSD > 0) ? 12 : 0;
       checkpoints.push({
         id: 'cp-p3-squeeze-whale',
-        name: 'Whale Conviction & Volume Surge',
-        requiredRule: 'Volume Surge >= 1.20x & Positive Whale Net Flow',
+        name: 'Order Flow & Volume (estimated)',
+        requiredRule: 'Volume ratio >= 1.20x & positive est. large-order flow',
         currentValue: `Surge: ${volumeSurgeRatio}x | Whale: ${whaleNet >= 0 ? '+' : ''}${formatCashUSD(whaleNet)} | Total: ${formatOrderFlowUSD(orderFlow.netDeltaUSD)}`,
         passed: p3Passed,
         weight: 20,
         earnedScore: p3Score,
         pillarCategory: 'WHALE_FLOW',
         explanation: p3Passed
-          ? `Breakout volume is expanding (${volumeSurgeRatio}x 24h average) with smart money whale accumulation (+${formatCashUSD(whaleNet)}).`
-          : `Volume surge is subdued (${volumeSurgeRatio}x) or whale inflow is lacking, signaling lower breakout velocity.`
+          ? `Volume ratio ${volumeSurgeRatio}x with positive estimated large-order flow (+${formatCashUSD(whaleNet)}).`
+          : `Volume ratio is subdued (${volumeSurgeRatio}x) or estimated large-order flow is not positive.`
       });
 
       const p4Passed = confluenceRating === 'A+' || confluenceRating === 'A';
@@ -780,16 +780,16 @@ export function scanLiveMarketEntries(coins: CryptoCoin[], mode: ScannerTradingM
         : (whaleNet >= -20000 || lowerWickAbsorptionPct >= 0.50) ? 12 : 0;
       checkpoints.push({
         id: 'cp-p3-dip-whale',
-        name: 'Whale Bid Absorption & Flow Divergence',
-        requiredRule: 'Whale Net Delta > $0 or Limit Bid Absorption on Dip',
-        currentValue: `Whale: ${whaleNet >= 0 ? '+' : ''}${formatCashUSD(whaleNet)} | Total: ${formatOrderFlowUSD(orderFlow.netDeltaUSD)} (${orderFlow.buyRatioPct}% Buy)`,
+        name: 'Dip Absorption (estimated)',
+        requiredRule: 'Est. large-order delta > $0 or est. dip absorption',
+        currentValue: `Est. large-order: ${whaleNet >= 0 ? '+' : ''}${formatCashUSD(whaleNet)} | Total: ${formatOrderFlowUSD(orderFlow.netDeltaUSD)} (${orderFlow.buyRatioPct}% Buy)`,
         passed: p3Passed,
         weight: 20,
         earnedScore: p3Score,
         pillarCategory: 'WHALE_FLOW',
         explanation: p3Passed
-          ? `Institutional limit orders stepped in to absorb sell volume (+${formatCashUSD(whaleNet)} whale flow).`
-          : `Heavy taker dumping persists (${orderFlow.sellRatioPct}% sell) without institutional absorption.`
+          ? `Estimated flow suggests the dip is being bought (+${formatCashUSD(whaleNet)} est. large-order flow).`
+          : `Estimated selling still dominates (est. ${orderFlow.sellRatioPct}% sell).`
       });
 
       const p4Passed = !isBleedingKnife && (distToEma200Pct >= -4.0 || dailyTrend !== 'BEARISH');
@@ -832,7 +832,7 @@ export function scanLiveMarketEntries(coins: CryptoCoin[], mode: ScannerTradingM
       archetypeName = 'Resistance Rejection Short';
       archetypeDescription = mode === 'FUTURES_1_2D'
         ? 'Binance Futures short strategy capitalizing on weak bounces rejected by Daily MA(7) or 24h ceiling resistance with high downside R:R.'
-        : 'Institutional short-side strategy targeting failed breakout attempts into overhead resistance ceilings with heavy sell delta.';
+        : 'Short-side strategy targeting failed breakout attempts into overhead resistance ceilings with heavy sell delta.';
 
       const p1Passed = mode === 'FUTURES_1_2D'
         ? (rangeLocationPct >= 60 || distToResistancePct <= 3.2 || (price <= dailyMa7 * 1.015 && price >= dailyMa7 * 0.95))
@@ -877,15 +877,15 @@ export function scanLiveMarketEntries(coins: CryptoCoin[], mode: ScannerTradingM
         : (orderFlow.netDeltaUSD < 0 || orderFlow.sellRatioPct >= 48.5) ? 16 : 10;
       checkpoints.push({
         id: 'cp-p3-short-res-whale',
-        name: 'Whale Distribution & Net Sell Delta',
-        requiredRule: 'Whale Net Selling OR Elevated Taker Sell Ratio',
-        currentValue: `Whale: ${whaleNet >= 0 ? '+' : ''}${formatCashUSD(whaleNet)} | Sell Vol: ${orderFlow.sellRatioPct}% (${formatOrderFlowUSD(orderFlow.netDeltaUSD)})`,
+        name: 'Sell Pressure (estimated)',
+        requiredRule: 'Est. large-order selling or est. sell ratio elevated',
+        currentValue: `Est. large-order: ${whaleNet >= 0 ? '+' : ''}${formatCashUSD(whaleNet)} | Sell Vol: ${orderFlow.sellRatioPct}% (${formatOrderFlowUSD(orderFlow.netDeltaUSD)})`,
         passed: p3Passed,
         weight: 20,
         earnedScore: p3Score,
         pillarCategory: 'WHALE_FLOW',
         explanation: p3Passed
-          ? `Order flow confirms active selling into resistance (${orderFlow.sellRatioPct}% sell volume / ${formatOrderFlowUSD(orderFlow.netDeltaUSD)} delta).`
+          ? `Estimated flow points to selling into resistance (est. ${orderFlow.sellRatioPct}% sell volume / ${formatOrderFlowUSD(orderFlow.netDeltaUSD)} delta).`
           : `Sellers have not established dominance at resistance; buy pressure remains elevated.`
       });
 
@@ -981,16 +981,16 @@ export function scanLiveMarketEntries(coins: CryptoCoin[], mode: ScannerTradingM
         : (orderFlow.netDeltaUSD < 0 || orderFlow.sellRatioPct >= 50.5) ? 12 : 0;
       checkpoints.push({
         id: 'cp-p3-breakdown-whale',
-        name: 'Whale Dumping & Aggressive Sell Volume',
-        requiredRule: 'Whale Sell Ratio >= 51.0% & Negative Net Cash Delta',
-        currentValue: `Whale: ${whaleNet >= 0 ? '+' : ''}${formatCashUSD(whaleNet)} | Sell: ${orderFlow.sellRatioPct}% (${formatOrderFlowUSD(orderFlow.netDeltaUSD)})`,
+        name: 'Sell Pressure (estimated)',
+        requiredRule: 'Est. large-order sell ratio >= 51.0% & negative est. delta',
+        currentValue: `Est. large-order: ${whaleNet >= 0 ? '+' : ''}${formatCashUSD(whaleNet)} | Sell: ${orderFlow.sellRatioPct}% (${formatOrderFlowUSD(orderFlow.netDeltaUSD)})`,
         passed: p3Passed,
         weight: 20,
         earnedScore: p3Score,
         pillarCategory: 'WHALE_FLOW',
         explanation: p3Passed
-          ? `Whales and taker sellers are actively dumping (${orderFlow.sellRatioPct}% sell volume / ${formatCashUSD(whaleNet)} whale delta).`
-          : `Sell pressure is not dominant. Whale delta is neutral.`
+          ? `Estimated selling is dominant (est. ${orderFlow.sellRatioPct}% sell volume / ${formatCashUSD(whaleNet)} est. large-order delta).`
+          : `Estimated sell pressure is not dominant.`
       });
 
       const isBreakdownConfirmed = (distToEma21Pct <= -0.5 || change24h <= -1.5) && !isTestingSupport;
@@ -1384,10 +1384,10 @@ export function calculateTradeQualityScore(signal: EntrySignalResult): {
   if (signal.direction === 'LONG') {
     if (whaleNet >= 300000) {
       score += 60;
-      highlights.push(`+$${Math.round(whaleNet / 1000)}K Whale Inflow (${whaleBuyPct.toFixed(1)}%)`);
+      highlights.push(`+$${Math.round(whaleNet / 1000)}K est. large-order inflow (${whaleBuyPct.toFixed(1)}%)`);
     } else if (whaleNet >= 100000) {
       score += 35;
-      highlights.push(`+$${Math.round(whaleNet / 1000)}K Whale Inflow`);
+      highlights.push(`+$${Math.round(whaleNet / 1000)}K est. large-order inflow`);
     } else if (whaleNet > 0) {
       score += 15;
     } else if (whaleNet < -100000) {
@@ -1410,7 +1410,7 @@ export function calculateTradeQualityScore(signal: EntrySignalResult): {
     const whaleSellUSD = signal.orderFlow?.whale?.whaleSellVolumeUSD || 0;
     if (whaleNet <= -200000 || whaleSellUSD > 500000) {
       score += 50;
-      highlights.push(`Heavy Whale Distribution`);
+      highlights.push(`Est. heavy large-order selling`);
     }
 
     if (takerSellPct >= 52.0) {

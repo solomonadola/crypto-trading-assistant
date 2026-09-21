@@ -1,4 +1,5 @@
 import React from 'react';
+import { EstimateNotice } from './EstimateNotice';
 import { 
   X, 
   ShieldAlert, 
@@ -169,8 +170,9 @@ export const SignalDetailModal: React.FC<SignalDetailModalProps> = ({
         {/* 5-Pillar Scoring Breakdown */}
         <div className="mt-5">
           <h4 className="text-xs font-semibold uppercase tracking-wider text-stone-400 mb-3">
-            Institutional 5-Pillar Checkpoint Audit
+            5-Pillar Checkpoint Breakdown
           </h4>
+          <EstimateNotice className="mb-3" />
           <div className="space-y-2.5">
             {signal.checkpoints.map((cp) => (
               <div 

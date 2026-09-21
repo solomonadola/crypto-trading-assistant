@@ -93,7 +93,7 @@ export function getExitReasonMeta(reason?: string, status?: string): ExitReasonM
   if (normalized.includes('ORDER_FLOW') || normalized.includes('DUMP')) {
     return {
       label: 'Order Flow Distribution',
-      description: 'Heavy institutional/whale selling pressure detected on the 5M order book.',
+      description: 'Closed on an estimated sell-pressure signal (calculated from 24h price action; no order book is used).',
       badgeClass: 'bg-cyan-500/15 text-cyan-300',
       borderClass: 'border-cyan-500/30',
       icon: <AlertCircle className="w-3.5 h-3.5 text-cyan-400" />

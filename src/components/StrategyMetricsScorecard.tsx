@@ -322,7 +322,7 @@ export const StrategyMetricsScorecard: React.FC<StrategyMetricsScorecardProps> =
               <div className="p-2 rounded-xl bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
                 <ShieldCheck className="w-4 h-4" />
               </div>
-              <span className="text-xs font-bold text-stone-200">6. Zero-Risk Ratchet Rate</span>
+              <span className="text-xs font-bold text-stone-200">6. Breakeven-Stop Rate</span>
             </div>
             <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
               verification.ratchetPassed 

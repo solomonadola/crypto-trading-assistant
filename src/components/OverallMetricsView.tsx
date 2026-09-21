@@ -950,7 +950,7 @@ export const OverallMetricsView: React.FC<OverallMetricsViewProps> = ({
               <div className="p-2 rounded-xl bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
                 <ShieldCheck className="w-4 h-4" />
               </div>
-              <span className="text-xs font-bold text-stone-200">6. Zero-Risk Lock Rate</span>
+              <span className="text-xs font-bold text-stone-200">6. Breakeven-Stop Rate</span>
             </div>
             <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
               verification.ratchetPassed 
@@ -964,7 +964,7 @@ export const OverallMetricsView: React.FC<OverallMetricsViewProps> = ({
           <div>
             <div className="flex items-baseline gap-2">
               <span className="text-3xl font-black text-emerald-400">{verification.zeroRiskRatchetRatePct}%</span>
-              <span className="text-xs text-stone-400 font-medium">Trades Locked at Zero-Risk</span>
+              <span className="text-xs text-stone-400 font-medium">Trades with stop at breakeven</span>
             </div>
             <p className="text-[11px] text-stone-300 mt-1">
               Trades reaching Step 1 (+4%): <strong className="text-emerald-400">{verification.zeroRiskRatchetRatePct}%</strong>
@@ -1418,7 +1418,7 @@ export const OverallMetricsView: React.FC<OverallMetricsViewProps> = ({
                 <th className="py-2.5 px-3 text-center">Tranches</th>
                 <th className="py-2.5 px-3 text-center">Win / Loss</th>
                 <th className="py-2.5 px-3 text-center">Win Rate %</th>
-                <th className="py-2.5 px-3 text-center">Zero-Risk Ratchets</th>
+                <th className="py-2.5 px-3 text-center">Breakeven Stops</th>
                 <th className="py-2.5 px-3 text-right">Net Realized PnL</th>
               </tr>
             </thead>

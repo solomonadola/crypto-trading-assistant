@@ -1,4 +1,5 @@
 import React from 'react';
+import { EstimateNotice } from './EstimateNotice';
 import { 
   TrendingUp, 
   TrendingDown, 
@@ -22,13 +23,14 @@ export const OrderFlowView: React.FC<OrderFlowViewProps> = ({ coins }) => {
 
   return (
     <div id="orderflow-view-root" className="space-y-6">
+      <EstimateNotice />
       
       {/* Global Order Flow Summary Banner */}
       <div className="rounded-2xl bg-gradient-to-r from-stone-900 via-stone-900 to-stone-950 border border-stone-800 p-4 sm:p-6">
         <div className="flex items-center gap-2 mb-1">
           <span className="flex h-2 w-2 rounded-full bg-amber-400"></span>
           <span className="text-xs font-semibold uppercase tracking-wider text-amber-400">
-            Real-Time Cumulative Volume Delta (CVD)
+            Estimated Buy/Sell Pressure
           </span>
         </div>
         <h2 className="text-xl sm:text-2xl font-bold tracking-tight text-stone-100">
@@ -154,7 +156,7 @@ export const OrderFlowView: React.FC<OrderFlowViewProps> = ({ coins }) => {
       <div className="p-4 rounded-2xl bg-stone-900 border border-stone-800">
         <h3 className="text-xs font-bold uppercase tracking-wider text-amber-400 mb-3 flex items-center gap-2">
           <Activity className="w-4 h-4" />
-          <span>Whale (&gt; $100k) vs Retail (&lt; $10k) Divergence Radar</span>
+          <span>Large vs Small Order Split (estimated)</span>
         </h3>
 
         <div className="overflow-x-auto">
@@ -163,10 +165,10 @@ export const OrderFlowView: React.FC<OrderFlowViewProps> = ({ coins }) => {
               <tr>
                 <th className="py-2.5 px-3">Asset</th>
                 <th className="py-2.5 px-3">24h Price</th>
-                <th className="py-2.5 px-3">Whale Buy %</th>
-                <th className="py-2.5 px-3">Retail Buy %</th>
-                <th className="py-2.5 px-3">Whale Delta ($)</th>
-                <th className="py-2.5 px-3">Smart Money Signal</th>
+                <th className="py-2.5 px-3">Est. Large-Order Buy %</th>
+                <th className="py-2.5 px-3">Est. Small-Order Buy %</th>
+                <th className="py-2.5 px-3">Est. Large-Order Delta</th>
+                <th className="py-2.5 px-3">Estimated Signal</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-stone-800/60">

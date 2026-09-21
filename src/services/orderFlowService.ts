@@ -131,28 +131,28 @@ export function calculateCoinOrderFlow(coin: CryptoCoin): OrderFlowMetrics {
   const divergenceSpreadPct = +(whaleBuyRatioPct - retailBuyRatioPct).toFixed(1);
   let divergenceType: 'BULLISH_INSTITUTIONAL_ABSORPTION' | 'BEARISH_INSTITUTIONAL_DISTRIBUTION' | 'CONVERGENT_BULLISH' | 'CONVERGENT_BEARISH' | 'BALANCED' = 'BALANCED';
   let convictionRating: 'HIGH_BULLISH' | 'BULLISH' | 'NEUTRAL' | 'BEARISH' | 'HIGH_BEARISH' = 'NEUTRAL';
-  let summaryBadge = `Balanced Whale/Retail Flow`;
-  let rationale = `Whale blocks (${whaleBuyRatioPct}% Buy) and retail orders (${retailBuyRatioPct}% Buy) are moving in relative balance.`;
+  let summaryBadge = `Balanced (estimated)`;
+  let rationale = `Estimated large orders (${whaleBuyRatioPct}% Buy) and retail orders (${retailBuyRatioPct}% Buy) are moving in relative balance.`;
 
   if (divergenceSpreadPct >= 4.0 && whaleBuyRatioPct >= 49.0) {
     divergenceType = 'BULLISH_INSTITUTIONAL_ABSORPTION';
     convictionRating = divergenceSpreadPct >= 8.0 ? 'HIGH_BULLISH' : 'BULLISH';
-    summaryBadge = `Institutional Absorption (+${divergenceSpreadPct}% over retail)`;
-    rationale = `Whale block orders (> $100k) are net buying (${whaleBuyRatioPct}%, ${formatOrderFlowUSD(whaleNetDeltaUSD)}) while retail is hesitant or selling (${retailBuyRatioPct}% buy). Smart money is absorbing the discount.`;
+    summaryBadge = `Est. large-order buying (+${divergenceSpreadPct}% over retail)`;
+    rationale = `Estimated large orders are net buying (${whaleBuyRatioPct}%, ${formatOrderFlowUSD(whaleNetDeltaUSD)}) while retail is hesitant or selling (${retailBuyRatioPct}% buy). Estimated from price action, not observed trades.`;
   } else if (divergenceSpreadPct <= -4.0 && whaleBuyRatioPct <= 51.0) {
     divergenceType = 'BEARISH_INSTITUTIONAL_DISTRIBUTION';
     convictionRating = divergenceSpreadPct <= -8.0 ? 'HIGH_BEARISH' : 'BEARISH';
-    summaryBadge = `Whale Distribution (${Math.abs(divergenceSpreadPct)}% under retail)`;
-    rationale = `Whales are net selling (${whaleSellRatioPct}%, ${formatOrderFlowUSD(whaleNetDeltaUSD)}) into retail FOMO buying (${retailBuyRatioPct}% buy). High risk of smart money distribution trap.`;
+    summaryBadge = `Est. large-order selling (${Math.abs(divergenceSpreadPct)}% under retail)`;
+    rationale = `Estimated large orders are net selling (${whaleSellRatioPct}%, ${formatOrderFlowUSD(whaleNetDeltaUSD)}) into retail FOMO buying (${retailBuyRatioPct}% buy). Estimated from price action, not observed trades.`;
   } else if (whaleBuyRatioPct >= 52.0 && retailBuyRatioPct >= 51.0) {
     divergenceType = 'CONVERGENT_BULLISH';
     convictionRating = 'BULLISH';
-    summaryBadge = `Broad-Market Inflow (Whales + Retail Buying)`;
+    summaryBadge = `Broad buying (estimated)`;
     rationale = `Both institutional block buyers (${whaleBuyRatioPct}%) and retail market participants (${retailBuyRatioPct}%) are actively accumulative.`;
   } else if (whaleBuyRatioPct <= 48.0 && retailBuyRatioPct <= 49.0) {
     divergenceType = 'CONVERGENT_BEARISH';
     convictionRating = 'BEARISH';
-    summaryBadge = `Coordinated Outflow (Whales + Retail Selling)`;
+    summaryBadge = `Broad selling (estimated)`;
     rationale = `Both institutional accounts (${whaleBuyRatioPct}%) and retail accounts (${retailBuyRatioPct}%) are actively liquidating.`;
   }
 

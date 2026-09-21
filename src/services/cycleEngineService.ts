@@ -166,8 +166,8 @@ export function evaluateTradeCycle(
       hasChanged = true;
       eventTriggered = 'TIER_1_HARVESTED';
       message = effectiveTier1Pct > updated.harvestTiers.tier1.targetPct + 2
-        ? `⚡ [Instant Pump Harvest] ${updated.symbol} surged +${effectiveTier1Pct}%! Banked $${harvestGain.toFixed(2)} at market peak. Breakeven armed (ZERO RISK).`
-        : `Tier 1 (+${updated.harvestTiers.tier1.targetPct}%) Harvested! Banked $${harvestGain.toFixed(2)}. Breakeven Ratchet armed at $${updated.ratchet.floorPrice} (ZERO RISK active).`;
+        ? `⚡ [Instant Pump Harvest] ${updated.symbol} surged +${effectiveTier1Pct}%! Banked $${harvestGain.toFixed(2)} at market peak. Stop moved to breakeven.`
+        : `Tier 1 (+${updated.harvestTiers.tier1.targetPct}%) Harvested! Banked $${harvestGain.toFixed(2)}. Breakeven Ratchet armed at $${updated.ratchet.floorPrice} (stop at breakeven).`;
     }
   }
 
@@ -278,7 +278,7 @@ export function evaluateTradeCycle(
       } else if (updated.ratchet?.isArmed) {
         updated.exitReason = 'RATCHET_BREAKEVEN_HIT';
         eventTriggered = 'RATCHET_ENGAGED';
-        message = `Zero-Risk Ratchet Triggered at $${livePrice}. Position safely closed with banked profits intact ($${realizedBanked.toFixed(2)}).`;
+        message = `Breakeven stop hit at $${livePrice}. Position closed; $${realizedBanked.toFixed(2)} was banked earlier.`;
       } else {
         updated.exitReason = 'STOP_LOSS_HIT';
         eventTriggered = 'STOPPED_OUT';
@@ -295,9 +295,9 @@ export function evaluateTradeCycle(
         updated.pnlUSD = -lossAmount;
         
         if (slippageGapPct > 0.5) {
-          message = `Stop Loss executed at $${livePrice} (-${totalLossPct.toFixed(2)}%, incl. ${slippageGapPct.toFixed(1)}% market slippage gap). Loss strictly isolated to -$${lossAmount.toFixed(2)}.`;
+          message = `Stop Loss executed at $${livePrice} (-${totalLossPct.toFixed(2)}%, incl. ${slippageGapPct.toFixed(1)}% market slippage gap). Loss -$${lossAmount.toFixed(2)}.`;
         } else {
-          message = `Stop Loss hit at $${livePrice} (-${Math.abs(updated.stopLossPct || 5)}%). Loss capped strictly at -$${lossAmount.toFixed(2)}.`;
+          message = `Stop Loss hit at $${livePrice} (-${Math.abs(updated.stopLossPct || 5)}%). Loss -$${lossAmount.toFixed(2)}.`;
         }
       }
       hasChanged = true;

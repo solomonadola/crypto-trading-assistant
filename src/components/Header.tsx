@@ -233,7 +233,7 @@ export const Header: React.FC<HeaderProps> = ({
           <button
             id="tab-orderflow"
             onClick={() => setActiveTab('orderflow')}
-            title="See whether big investors (whales) are buying or selling"
+            title="Estimated buy/sell pressure, calculated from 24h price action"
             className={`inline-flex items-center gap-2 px-3 py-1.5 text-xs font-medium rounded-lg whitespace-nowrap transition-colors ${
               activeTab === 'orderflow'
                 ? 'bg-amber-500/15 text-amber-400 border border-amber-500/30'
