@@ -14,8 +14,9 @@ import { scanLiveMarketEntries } from './_gen/scanner.mjs';
 
 const arg = (k, d) => { const i = process.argv.indexOf(`--${k}`); return i > -1 ? process.argv[i + 1] : d; };
 const OUT = arg('out', 'data/entries.json');
+const TOP_ONLY = process.argv.includes('--top-only');  // keep only rank 0 (what the bot deploys)
 const BARS_24H = 288;            // 288 x 5m = 24h rolling window
-const DIR = 'data/klines';
+const DIR = arg('dir', 'data/klines');
 
 // --- asset metadata straight from the app, so ids/names/symbols match ---
 const assetSrc = readFileSync('src/services/binanceService.ts', 'utf8');
@@ -96,9 +97,12 @@ for (let k = BARS_24H; k < clock.length; k++) {
   for (const [sym, s] of series) {
     const i = idx.get(sym).get(t);
     if (i === undefined || i < BARS_24H) continue;
-    const w = s.bars.slice(i - BARS_24H + 1, i + 1);       // rolling 24h, no future data
+    // Rolling 24h window, scanned in place - no future data, no allocation.
     let hi = -Infinity, lo = Infinity, qv = 0;
-    for (const b of w) { if (b.h > hi) hi = b.h; if (b.l < lo) lo = b.l; qv += b.qv; }
+    for (let j = i - BARS_24H + 1; j <= i; j++) {
+      const b = s.bars[j];
+      if (b.h > hi) hi = b.h; if (b.l < lo) lo = b.l; qv += b.qv;
+    }
     const price = s.bars[i].c;
     const prev = s.bars[i - BARS_24H].c;
     if (!(price > 0) || !(prev > 0) || !(qv > 0)) continue;
@@ -118,7 +122,8 @@ for (let k = BARS_24H; k < clock.length; k++) {
   const all = scanLiveMarketEntries(coins, 'FUTURES_1_2D');
   scanned += all.length;
   const eligible = all.filter(autoPilotWouldFire).sort(appSort);
-  for (let r = 0; r < eligible.length; r++) {
+  const keep = TOP_ONLY ? Math.min(1, eligible.length) : eligible.length;
+  for (let r = 0; r < keep; r++) {
     const sig = eligible[r];
     entries.push({
       rank: r,                       // 0 = the one the bot actually deploys
@@ -129,6 +134,7 @@ for (let k = BARS_24H; k < clock.length; k++) {
       stopPct: sig.tradePlan.stopLossPct, t1Pct: sig.tradePlan.tier1Pct,
       t2Pct: sig.tradePlan.tier2Pct, rr: sig.tradePlan.rewardRiskRatio,
       chg24h: +sig.priceChange24hPct.toFixed(2),
+      atrPct: sig.indicators.atrPct,   // lets the exit simulator rebuild either ladder
     });
   }
   if (++steps % 2000 === 0) {

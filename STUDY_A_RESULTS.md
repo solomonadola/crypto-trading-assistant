@@ -135,3 +135,68 @@ node tools/replay.mjs               # -> data/entries.json
 node tools/study-a.mjs              # forward returns vs 3 controls
 node tools/study-score.mjs          # score discrimination
 ```
+
+---
+
+# Addendum — exit geometry, measured
+
+**Run date:** 2026-09-21 · `tools/sim-exits.mjs`
+
+When ATR-scaled geometry landed, the commit message claimed it "cuts turnover"
+on theoretical grounds (barrier-touch time scales roughly with the square of
+distance). This measures that claim instead of asserting it.
+
+Method: entry set held fixed, only the exit ladder varies — one variable, per
+`AUDIT.md` §11. Barriers resolved on 5m bar high/low; when a bar touches both
+the stop and a tier, the stop is assumed to fill first.
+
+| Metric | In-sample (6mo, 2026) | Out-of-sample (24mo, 2024–25) |
+|---|---|---|
+| OLD expectancy / trade | −24.5 bp | −40.9 bp |
+| NEW expectancy / trade | **+54.4 bp** | **−82.5 bp** |
+| OLD profit factor | 0.87 | 0.79 |
+| NEW profit factor | 1.16 | 0.82 |
+| OLD hold / turnover | 29.6h · 0.8 rot/day | 20.5h · 1.2 rot/day |
+| NEW hold / turnover | 105.7h · 0.2 rot/day | 77.2h · 0.3 rot/day |
+| **Turnover reduction** | **72%** | **73%** |
+| **Hold lengthening** | **3.6×** | **3.8×** |
+| OLD bleed rate | −19.9 bp/day/slot | −47.9 bp/day/slot |
+| NEW bleed rate | +12.3 bp/day/slot | −25.6 bp/day/slot |
+
+## Verdict: mechanical claim confirmed, profit claim refuted
+
+**Turnover and hold time replicate almost exactly** across both samples. That
+part is geometry, not market behaviour, so it holds in any regime.
+
+**The in-sample profitability did not replicate.** +54.4 bp/trade became
+−82.5 bp/trade. Two tells were visible in-sample and should have been weighted
+more heavily at the time: 35.5% of NEW trades hit the 7-day TIMEOUT still open
+(so a third of the result was the mark-to-market, not the ladder), and a
+105-hour average hold is mostly four days of market exposure in a window
+already known to be momentum-friendly.
+
+**In book terms**, at 10 slots:
+
+- Old geometry: −0.48%/day ≈ **−13.5%/month**
+- New geometry: −0.26%/day ≈ **−7.4%/month**
+
+The change nearly halves the bleed rate and is worth keeping. It does not make
+the system profitable, and no exit rule can — the harvest ladder returns profit
+factor 1.001 on a zero-drift null, so all edge must come from the entry, and
+Study A showed the entry has none.
+
+Note that per-trade expectancy got *worse* (−40.9 → −82.5 bp) because each
+trade is now larger. What improved is the rate at which the loss is paid.
+
+## Caveat on a number in this output
+
+The OOS run prints "eligible 209,749 (3.1% of all symbol-steps)". That is an
+artifact of the `--top-only` flag capping storage at one entry per step, **not**
+a regime difference from the 76.8% gate-admission rate measured in Study A.
+
+## Reproduce
+
+```bash
+node tools/replay.mjs --dir data/klines2024 --out data/entries2024.json --top-only
+node tools/sim-exits.mjs --dir data/klines2024 --entries data/entries2024.json
+```
