@@ -56,16 +56,21 @@ export async function fetchBinanceTickers(): Promise<Map<string, BinanceFuturesT
       // The primary regularly takes several seconds; 3.5s pushed traffic to the fallback.
       const timeoutId = setTimeout(() => controller.abort(), 8000);
 
-      const response = await fetch(endpoint, {
-        signal: controller.signal
-      });
-      clearTimeout(timeoutId);
-
-      if (!response.ok) {
-        continue;
+      let data: BinanceFuturesTicker[];
+      try {
+        const response = await fetch(endpoint, {
+          signal: controller.signal
+        });
+        if (!response.ok) {
+          continue;
+        }
+        // The timeout must cover reading the body too: a server that sends
+        // headers and then stalls would otherwise hang this call - and the
+        // refresh loop waiting on it - indefinitely.
+        data = await response.json();
+      } finally {
+        clearTimeout(timeoutId);
       }
-
-      const data: BinanceFuturesTicker[] = await response.json();
       if (!Array.isArray(data) || data.length === 0) {
         continue;
       }

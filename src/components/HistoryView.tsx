@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
-import { netPnlUSD, outcome, netReturnPct, safeRatio, formatRatio } from '../services/metrics';
+import { netPnlUSD, outcome, netReturnPct, safeRatio, formatRatio, isCounted } from '../services/metrics';
 import { 
   History, 
   Search, 
@@ -167,7 +167,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
     if (isUserRefresh) setIsRefreshing(true);
     try {
       const closed = await loadCompletedTrades(isUserRefresh);
-      setCompletedTrades(closed);
+      setCompletedTrades(closed.filter(isCounted));   // excluded in Data Health
     } catch (err) {
       console.error('Failed to load completed trades history:', err);
     } finally {
@@ -184,7 +184,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
 
     // Also subscribe to real-time updates from trade records service
     const unsubscribe = subscribeToAutomatedTrades((allTrades) => {
-      const closed = allTrades.filter((t) => t.status !== 'OPEN');
+      const closed = allTrades.filter((t) => t.status !== 'OPEN' && isCounted(t));
       setCompletedTrades(closed);
     });
 

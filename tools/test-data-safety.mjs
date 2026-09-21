@@ -101,5 +101,34 @@ console.log('\n3. VITE_FIRESTORE_WRITES=off: nothing is written, local storage s
   check('trade kept in local storage', local.some((t) => t.id === 'r2'));
 }
 
+console.log('\n4. Data health check flags impossible records, and only those');
+{
+  const out = await esbuild.build({
+    stdin: { contents: "export * from './src/services/dataHealth';", resolveDir: process.cwd(), loader: 'ts' },
+    bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'error',
+  });
+  const { checkTrade, checkDataHealth } = await import('data:text/javascript;base64,' + Buffer.from(out.outputFiles[0].text).toString('base64'));
+  const base = { status: 'STOPPED', direction: 'LONG', totalFeesUSD: 0.03, realizedCashBankedUSD: 0 };
+  // The real TAO record before correction.
+  const tao = { ...base, id: 'tao', symbol: 'TAO', entryPrice: 266.4, currentPrice: 266.6, positionSizeUSD: 15.34,
+                pnlUSD: 11.64, realizedCashBankedUSD: 11.64, totalFeesUSD: 0.0153 };
+  const codes = (t) => checkTrade(t).map((i) => i.code).sort().join(',');
+  check('TAO phantom profit -> critical', codes(tao) === 'BANKED_TOO_HIGH,IMPOSSIBLE_PNL', codes(tao));
+  // A legitimate full ladder on a 15% stop: 0.33*15 + 0.33*30 + 0.17*52.5 = 23.8% banked.
+  const bigWin = { ...base, id: 'big', symbol: 'BONK', entryPrice: 1, currentPrice: 1.45, positionSizeUSD: 3,
+                   pnlUSD: 0.95, realizedCashBankedUSD: 0.71 };
+  check('legitimate 1.6R ladder win -> not flagged', codes(bigWin) === '', codes(bigWin));
+  const forced = { ...base, id: 'f', symbol: 'LDO', entryPrice: 1, currentPrice: 1, positionSizeUSD: 10, pnlUSD: 0,
+                   exitReason: 'EXCESS_SLOT_REBALANCED' };
+  check('old clean-up close -> info', codes(forced) === 'FORCED_CLOSE');
+  const wrongVenue = { ...base, id: 'w', symbol: 'FTM', entryPrice: 0.7, exitPrice: 0.1, positionSizeUSD: 10, pnlUSD: -0.4 };
+  check('7x price change -> critical', codes(wrongVenue) === 'PRICE_JUMP', codes(wrongVenue));
+  const normal = { ...base, id: 'n', symbol: 'SOL', entryPrice: 100, currentPrice: 103, positionSizeUSD: 10, pnlUSD: 0.3 };
+  check('normal trade -> clean', codes(normal) === '');
+  const r = checkDataHealth([tao, { ...tao, id: 'tao2', excludedFromStats: true }, forced, normal]);
+  check('excluded records not counted as outstanding', r.criticalCounted === 1 && r.excludedCount === 1,
+        `critical counted ${r.criticalCounted}, excluded ${r.excludedCount}`);
+}
+
 console.log(`\n${fails === 0 ? 'ALL DATA-SAFETY CHECKS PASS' : fails + ' CHECK(S) FAILED'}`);
 process.exit(fails ? 1 : 0);

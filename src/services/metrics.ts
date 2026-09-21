@@ -57,6 +57,11 @@ export function netReturnPct(t: AutomatedTradeRecord): number {
   return (netPnlUSD(t) / pos) * 100;
 }
 
+/** False for trades excluded from statistics in the Data Health panel. */
+export function isCounted(t: AutomatedTradeRecord): boolean {
+  return !t.excludedFromStats;
+}
+
 export function isClosed(t: AutomatedTradeRecord): boolean {
   return t.status !== 'OPEN';
 }

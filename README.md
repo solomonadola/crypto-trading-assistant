@@ -118,6 +118,15 @@ hand-computed answers.
 
 ---
 
+## Data health
+
+The **Cloud Database** tab checks every trade record and lists any that cannot be
+right (profit far larger than the price move allows, more banked than the exit
+ladder can bank, a more-than-3x price jump) or that were not produced by the
+market. A record can be **excluded from statistics**: it stays in the history
+but no longer counts toward P&L, win rate or any other figure. If any such
+record is still counted, the status strip links to it.
+
 ## Storage
 
 Trades and settings are saved in the browser's **localStorage**. They survive
@@ -181,7 +190,8 @@ node tools/study-residual.mjs                # beta-neutral / longer-horizon var
 node tools/sim-exits.mjs                     # old vs current exit geometry
 node tools/test-metrics.mjs                  # metric accuracy check
 node tools/test-catchup.mjs                  # replay of time spent away
-node tools/test-data-safety.mjs              # no forced closes; read-only switch blocks all writes
+node tools/test-data-safety.mjs              # no forced closes; read-only switch; data health rules
+node tools/test-network.mjs                  # a stalled Binance response cannot hang the refresh
 node tools/diagnose-trades.mjs trades.json   # find corrupt records in an exported feed
 ```
 

@@ -25,6 +25,9 @@ import {
 import { scanLiveMarketEntries, deploySignalToAutomatedFeed } from './services/entryScannerService';
 import { catchUpOpenTrades } from './services/catchUpService';
 import { StatusStrip, CatchUpStatus } from './components/StatusStrip';
+import { DataHealthPanel } from './components/DataHealthPanel';
+import { checkDataHealth } from './services/dataHealth';
+import { isCounted } from './services/metrics';
 import { calculateBankrollState } from './services/bankrollService';
 import { AUTOPILOT_CONFIG } from './config/autopilot';
 import {
@@ -64,7 +67,11 @@ function formatGap(ms: number): string {
 
 export default function App() {
   const [coins, setCoins] = useState<CryptoCoin[]>([]);
-  const [trades, setTrades] = useState<AutomatedTradeRecord[]>([]);
+  // Full history, including trades excluded in the Data Health panel.
+  const [allTrades, setAllTrades] = useState<AutomatedTradeRecord[]>([]);
+  // What every screen and statistic uses: excluded trades left out.
+  const trades = useMemo(() => allTrades.filter(isCounted), [allTrades]);
+  const dataHealth = useMemo(() => checkDataHealth(allTrades), [allTrades]);
   const [tradingMode, setTradingMode] = useState<ScannerTradingMode>('FUTURES_1_2D');
   const [activeTab, setActiveTab] = useState<ActiveTab>('scanner');
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
@@ -112,7 +119,7 @@ export default function App() {
   // Subscribe to trade feed (Firestore or LocalStorage)
   useEffect(() => {
     const unsubscribe = subscribeToAutomatedTrades((loadedTrades) => {
-      setTrades(loadedTrades);
+      setAllTrades(loadedTrades);
     });
     return () => unsubscribe();
   }, []);
@@ -121,6 +128,7 @@ export default function App() {
   useEffect(() => {
     fetchLiveMarketCoins().then((liveCoins) => {
       setCoins(liveCoins);
+      setLastPriceUpdateAt(getLastTickerFetchTime() || null);
     }).catch((err) => {
       console.warn('Failed to load initial Binance market coins:', err);
     });
@@ -375,7 +383,7 @@ export default function App() {
 
     try {
       const deployed = await deploySignalToAutomatedFeed(signal, bankroll.trancheSizeUSD);
-      setTrades((prev) => [deployed, ...prev.filter((t) => t.id !== deployed.id)]);
+      setAllTrades((prev) => [deployed, ...prev.filter((t) => t.id !== deployed.id)]);
       showNotification(`Deployed $${deployed.positionSizeUSD.toFixed(2)} into ${signal.symbol} (${signal.archetypeName})!`, 'success');
     } catch (e: any) {
       console.error('Failed to deploy signal:', e);
@@ -511,7 +519,7 @@ export default function App() {
       lastDeploySnapshotRef.current = snapshotIdRef.current;
       deploySignalToAutomatedFeed(qualified, bankroll.trancheSizeUSD)
         .then((newTrade) => {
-          setTrades((prev) => [newTrade, ...prev.filter((t) => t.id !== newTrade.id)]);
+          setAllTrades((prev) => [newTrade, ...prev.filter((t) => t.id !== newTrade.id)]);
           const symUpper = qualified.symbol.toUpperCase();
           const isMajor = MAJOR_COINS.has(symUpper);
           const isMeme = MEME_COINS.has(symUpper);
@@ -534,6 +542,23 @@ export default function App() {
   }, [isAutoPilot, autoPilotScanTick, bankroll.canOpenNewTrade, bankroll.activeTradesCount, bankroll.liquidCashUSD, bankroll.trancheSizeUSD, bankroll.deployedCapitalUSD, bankroll.totalPortfolioValueUSD, signals, trades, pacingInfo, showNotification]);
 
 
+  // Exclude a trade from statistics (or include it again). The record is kept;
+  // it just stops counting toward P&L, win rate and the other figures.
+  const handleSetExcluded = async (trade: AutomatedTradeRecord, excluded: boolean) => {
+    const updated: AutomatedTradeRecord = {
+      ...trade,
+      excludedFromStats: excluded,
+      // Firestore rejects undefined field values, so clear with '' rather than undefined.
+      excludedReason: excluded ? 'Excluded from statistics in the Data Health panel' : '',
+    };
+    await updateTradeRecord(updated, true);
+    setAllTrades((prev) => prev.map((t) => (t.id === trade.id ? updated : t)));
+    showNotification(
+      excluded ? `${trade.symbol} trade excluded from statistics.` : `${trade.symbol} trade counted in statistics again.`,
+      'info'
+    );
+  };
+
   // Close trade manually
   const handleCloseTrade = async (trade: AutomatedTradeRecord, reason: string) => {
     const updated: AutomatedTradeRecord = {
@@ -544,7 +569,7 @@ export default function App() {
       exitPrice: trade.currentPrice || trade.entryPrice,
     };
     await updateTradeRecord(updated, true);
-    setTrades((prev) => prev.map((t) => (t.id === trade.id ? updated : t)));
+    setAllTrades((prev) => prev.map((t) => (t.id === trade.id ? updated : t)));
     showNotification(`Closed position for ${trade.symbol}. Slot freed and cash returned to bankroll.`, 'info');
   };
 
@@ -558,7 +583,7 @@ export default function App() {
       exitPrice: trade.currentPrice || trade.entryPrice,
     };
     await updateTradeRecord(updated, true);
-    setTrades((prev) => prev.map((t) => (t.id === trade.id ? updated : t)));
+    setAllTrades((prev) => prev.map((t) => (t.id === trade.id ? updated : t)));
     showNotification(`Recycled stagnant trade ${trade.symbol} to liquid treasury cash!`, 'success');
   };
 
@@ -594,6 +619,8 @@ export default function App() {
         isRefreshing={isRefreshing}
         pacingInfo={pacingInfo}
         lastCatchUp={lastCatchUp}
+        suspectRecords={dataHealth.criticalCounted}
+        onOpenDataHealth={() => setActiveTab('firebase')}
       />
 
       {/* Main Content Area */}
@@ -669,7 +696,7 @@ export default function App() {
           <div className="p-8 rounded-2xl bg-stone-900 border border-stone-800 text-center space-y-4 max-w-xl mx-auto my-8">
             <h3 className="text-xl font-bold text-stone-100">Firebase & Cloud Infrastructure Panel</h3>
             <p className="text-xs sm:text-sm text-stone-400 leading-relaxed">
-              CryptoStudy Lab connects to Google Cloud Firestore with real-time multi-device synchronization and default-deny security rules.
+              The shared trade history is stored in Google Cloud Firestore, so every browser running the app sees the same trades.
             </p>
             <div className="flex items-center justify-center gap-3 pt-2">
               <button
@@ -686,6 +713,10 @@ export default function App() {
               </button>
             </div>
           </div>
+        )}
+
+        {activeTab === 'firebase' && (
+          <DataHealthPanel report={dataHealth} onSetExcluded={handleSetExcluded} />
         )}
       </main>
 

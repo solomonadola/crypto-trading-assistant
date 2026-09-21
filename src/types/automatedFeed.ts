@@ -194,6 +194,11 @@ export interface AutomatedTradeRecord {
   maeUSD?: number; // Dollar max drawdown experienced
 
   exitReason?: string; // Exact trigger or rule that closed the position
+  /** Set from the Data Health panel: kept in history, left out of every statistic. */
+  excludedFromStats?: boolean;
+  excludedReason?: string;
+  /** Explanation written when a record was corrected by hand. */
+  correctionNote?: string;
   marketRegimeAtEntry?: string; // Market regime state when entry was executed
   btcTrendAtEntry?: string; // BTC trend state at entry time
   executionVenue?: 'BINANCE_SPOT_LIVE' | 'BINANCE_TESTNET' | 'SIMULATED_ENGINE';

@@ -16,6 +16,9 @@ interface StatusStripProps {
   isRefreshing: boolean;
   pacingInfo: AutoPilotPacingInfo;
   lastCatchUp: CatchUpStatus | null;
+  /** Impossible-looking records still counted in the statistics. */
+  suspectRecords?: number;
+  onOpenDataHealth?: () => void;
 }
 
 type Tone = 'good' | 'warn' | 'bad' | 'neutral' | 'info';
@@ -95,7 +98,7 @@ const Item: React.FC<{ tone: Tone; title?: string; className?: string; children:
  * current, why is auto-pilot (not) trading, where is my data actually saved,
  * and what happened while the app was closed.
  */
-export const StatusStrip: React.FC<StatusStripProps> = ({ lastPriceUpdateAt, isRefreshing, pacingInfo, lastCatchUp }) => {
+export const StatusStrip: React.FC<StatusStripProps> = ({ lastPriceUpdateAt, isRefreshing, pacingInfo, lastCatchUp, suspectRecords = 0, onOpenDataHealth }) => {
   const [now, setNow] = useState(() => Date.now());
   const [mountedAt] = useState(() => Date.now());
   const [expanded, setExpanded] = useState(false);
@@ -175,6 +178,19 @@ export const StatusStrip: React.FC<StatusStripProps> = ({ lastPriceUpdateAt, isR
         </button>
 
         <Item tone={storage.tone} title={storage.detail}>{storage.label}</Item>
+
+        {suspectRecords > 0 && (
+          <button
+            type="button"
+            onClick={onOpenDataHealth}
+            className="inline-flex min-w-0 items-center gap-1.5 rounded text-left text-amber-300 hover:text-amber-200 focus:outline-none focus-visible:ring-1 focus-visible:ring-amber-400"
+          >
+            <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${DOT.bad}`} aria-hidden="true" />
+            <span className="truncate underline decoration-amber-500/40 underline-offset-2">
+              {suspectRecords} suspect record{suspectRecords === 1 ? '' : 's'} in your stats
+            </span>
+          </button>
+        )}
 
         <Item
           tone={catchUpTone}

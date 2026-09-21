@@ -141,10 +141,14 @@ export async function fetchBars(symbol: string, fromMs: number, toMs: number): P
       const url = `${endpoint}?symbol=${encodeURIComponent(symbol.toUpperCase())}USDT&interval=${interval}&startTime=${start}&endTime=${toMs}&limit=1000`;
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 6000);
-      const res = await fetch(url, { signal: controller.signal });
-      clearTimeout(timer);
-      if (!res.ok) continue;
-      const rows: unknown = await res.json();
+      let rows: unknown;
+      try {
+        const res = await fetch(url, { signal: controller.signal });
+        if (!res.ok) continue;
+        rows = await res.json();   // timeout covers the body as well as the headers
+      } finally {
+        clearTimeout(timer);
+      }
       if (!Array.isArray(rows)) continue;
       const bars = rows
         .map((r: any[]) => ({ t: Number(r[0]), o: +r[1], h: +r[2], l: +r[3], c: +r[4] }))
