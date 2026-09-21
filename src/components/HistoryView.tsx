@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import { netPnlUSD, outcome, netReturnPct, safeRatio, formatRatio } from '../services/metrics';
 import { 
   History, 
   Search, 
@@ -193,24 +194,26 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
   // Aggregate KPI Statistics
   const stats = useMemo(() => {
     const total = completedTrades.length;
-    const wins = completedTrades.filter((t) => (t.pnlUSD || 0) > 0);
-    const losses = completedTrades.filter((t) => (t.pnlUSD || 0) < 0);
-    const breakevens = completedTrades.filter((t) => (t.pnlUSD || 0) === 0);
+    // Shared definitions (services/metrics.ts): net of fees, one breakeven band.
+    const wins = completedTrades.filter((t) => outcome(t) === 'WIN');
+    const losses = completedTrades.filter((t) => outcome(t) === 'LOSS');
+    const breakevens = completedTrades.filter((t) => outcome(t) === 'BREAKEVEN');
 
     const winCount = wins.length;
     const lossCount = losses.length;
     const winRatePct = total > 0 ? +((winCount / total) * 100).toFixed(1) : 0;
 
-    const totalNetPnLUSD = +completedTrades.reduce((acc, t) => acc + (t.pnlUSD || 0), 0).toFixed(2);
+    // Was labelled Net but summed gross pnlUSD with no fees removed.
+    const totalNetPnLUSD = +completedTrades.reduce((acc, t) => acc + netPnlUSD(t), 0).toFixed(2);
     const totalBankedCashUSD = +completedTrades.reduce((acc, t) => acc + (t.realizedCashBankedUSD || 0), 0).toFixed(2);
     const totalFeesUSD = +completedTrades.reduce((acc, t) => acc + (t.totalFeesUSD || 0), 0).toFixed(2);
 
-    const grossWinUSD = wins.reduce((acc, t) => acc + (t.pnlUSD || 0), 0);
-    const grossLossUSD = Math.abs(losses.reduce((acc, t) => acc + (t.pnlUSD || 0), 0));
-    const profitFactor = grossLossUSD > 0 ? +(grossWinUSD / grossLossUSD).toFixed(2) : grossWinUSD > 0 ? 99.9 : 0;
+    const grossWinUSD = wins.reduce((acc, t) => acc + netPnlUSD(t), 0);
+    const grossLossUSD = Math.abs(losses.reduce((acc, t) => acc + netPnlUSD(t), 0));
+    const profitFactor = +safeRatio(grossWinUSD, grossLossUSD).toFixed(2);
 
-    const avgWinPct = wins.length > 0 ? +(wins.reduce((acc, t) => acc + (t.pnlPercentage || 0), 0) / wins.length).toFixed(2) : 0;
-    const avgLossPct = losses.length > 0 ? +(losses.reduce((acc, t) => acc + (t.pnlPercentage || 0), 0) / losses.length).toFixed(2) : 0;
+    const avgWinPct = wins.length > 0 ? +(wins.reduce((acc, t) => acc + netReturnPct(t), 0) / wins.length).toFixed(2) : 0;
+    const avgLossPct = losses.length > 0 ? +(losses.reduce((acc, t) => acc + netReturnPct(t), 0) / losses.length).toFixed(2) : 0;
 
     // Reason frequency counts
     const reasonsMap = new Map<string, number>();
@@ -403,7 +406,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
           <div className="p-3 rounded-xl bg-stone-950/60 border border-stone-800/70">
             <span className="text-[10px] uppercase font-semibold text-stone-400 block mb-1">Profit Factor</span>
             <div className={`text-lg sm:text-xl font-bold font-mono ${stats.profitFactor >= 1.5 ? 'text-emerald-400' : 'text-stone-300'}`}>
-              {stats.profitFactor.toFixed(2)}x
+              {formatRatio(stats.profitFactor)}x
             </div>
             <span className="text-[10px] text-stone-500">
               Wins/Losses Ratio
@@ -607,9 +610,10 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
           {/* Historical Trade Records List */}
           <div className="space-y-2.5">
             {filteredTrades.map((trade) => {
-              const isProfit = (trade.pnlUSD || 0) > 0;
-              const isLoss = (trade.pnlUSD || 0) < 0;
-              const pnlPct = trade.pnlPercentage ?? 0;
+              const net = netPnlUSD(trade);
+              const isProfit = outcome(trade) === 'WIN';
+              const isLoss = outcome(trade) === 'LOSS';
+              const pnlPct = netReturnPct(trade);
               const exitMeta = getExitReasonMeta(trade.exitReason, trade.status);
               const durationStr = formatDuration(trade.openedAtTimestamp, trade.closedAtTimestamp);
               const isExpanded = expandedTradeId === trade.id;
@@ -699,7 +703,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
                         <div className={`text-[11px] font-mono font-medium ${
                           isProfit ? 'text-emerald-400/80' : isLoss ? 'text-rose-400/80' : 'text-stone-400'
                         }`}>
-                          {(trade.pnlUSD || 0) >= 0 ? '+' : ''}${(trade.pnlUSD || 0).toFixed(2)} USD
+                          {net >= 0 ? '+' : ''}${net.toFixed(2)} USD
                         </div>
                       </div>
 

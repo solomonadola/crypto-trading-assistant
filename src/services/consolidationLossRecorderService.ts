@@ -1,4 +1,5 @@
 import { AutomatedTradeRecord } from '../types/automatedFeed';
+import { outcome, netPnlUSD, netReturnPct } from './metrics';
 import { evaluateLiquiditySession } from './marketRegimeService';
 
 export interface ConsolidationLossEpisode {
@@ -137,9 +138,9 @@ export function analyzeConsolidationLosses(
     const bucket = hourlyMap.get(hour);
     if (bucket) {
       bucket.trades.push(t);
-      if (t.pnlUSD < 0) {
+      if (outcome(t) === 'LOSS') {
         bucket.losses.push(t);
-      } else if (t.pnlUSD > 0) {
+      } else if (outcome(t) === 'WIN') {
         bucket.wins.push(t);
       }
     }
@@ -217,8 +218,8 @@ export function analyzeConsolidationLosses(
     const lossCount = b.losses.length;
     const winCount = b.wins.length;
     const winRatePct = totalTrades > 0 ? +((winCount / totalTrades) * 100).toFixed(1) : 0;
-    const netPnLUSD = +b.trades.reduce((acc, t) => acc + (t.pnlUSD || 0), 0).toFixed(2);
-    const totalLossUSD = +b.losses.reduce((acc, t) => acc + Math.abs(t.pnlUSD || 0), 0).toFixed(2);
+    const netPnLUSD = +b.trades.reduce((acc, t) => acc + netPnlUSD(t), 0).toFixed(2);
+    const totalLossUSD = +b.losses.reduce((acc, t) => acc + Math.abs(netPnlUSD(t)), 0).toFixed(2);
     const lossRatePct = totalTrades > 0 ? +((lossCount / totalTrades) * 100).toFixed(1) : 0;
 
     const targetDate = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), h, 0, 0));
@@ -318,7 +319,7 @@ export function analyzeConsolidationLosses(
  * Helper to turn a group of trades into an episode if it represents a consolidation loss
  */
 function evaluateAndPushCluster(cluster: AutomatedTradeRecord[], output: ConsolidationLossEpisode[]) {
-  const losses = cluster.filter(t => t.pnlUSD < 0);
+  const losses = cluster.filter(t => outcome(t) === 'LOSS');
   if (losses.length < 1) return; // Only interested in loss periods
 
   const startTrade = cluster[0];
@@ -333,8 +334,8 @@ function evaluateAndPushCluster(cluster: AutomatedTradeRecord[], output: Consoli
   const durationMs = Math.max(15 * 60 * 1000, endTime - startTime);
   const durationMinutes = Math.round(durationMs / (60 * 1000));
 
-  const totalLossUSD = +losses.reduce((acc, t) => acc + t.pnlUSD, 0).toFixed(2);
-  const avgLossPct = +(losses.reduce((acc, t) => acc + t.pnlPercentage, 0) / losses.length).toFixed(2);
+  const totalLossUSD = +losses.reduce((acc, t) => acc + netPnlUSD(t), 0).toFixed(2);
+  const avgLossPct = +(losses.reduce((acc, t) => acc + netReturnPct(t), 0) / losses.length).toFixed(2);
 
   const coinsAffected = Array.from(new Set(losses.map(t => t.symbol)));
   const startHour = startDate.getUTCHours();

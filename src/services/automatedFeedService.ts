@@ -8,6 +8,7 @@ import {
   onSnapshot 
 } from 'firebase/firestore';
 import { db, isQuotaBlocked, markQuotaExceeded, reportFirestoreResult } from '../lib/firebase';
+import { outcome } from './metrics';
 import { AutomatedTradeRecord, AutomatedFeedAuditStats, StrategyVerificationReport } from '../types/automatedFeed';
 import { CryptoCoin } from '../types';
 import { evaluateTradeCycle } from './cycleEngineService';
@@ -576,8 +577,9 @@ export function calculateFeedAuditStats(trades: AutomatedTradeRecord[]): Automat
   const openTrades = trades.filter(t => t.status === 'OPEN');
   const closedTrades = trades.filter(t => t.status !== 'OPEN');
 
-  const winTrades = closedTrades.filter(t => (t.pnlUSD || 0) > 0);
-  const lossTrades = closedTrades.filter(t => (t.pnlUSD || 0) < 0);
+  // Unused elsewhere, but aligned with services/metrics.ts so it cannot disagree if wired up.
+  const winTrades = closedTrades.filter(t => outcome(t) === 'WIN');
+  const lossTrades = closedTrades.filter(t => outcome(t) === 'LOSS');
   const winCount = winTrades.length;
   const lossCount = lossTrades.length;
 

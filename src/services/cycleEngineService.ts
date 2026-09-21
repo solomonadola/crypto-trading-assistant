@@ -150,7 +150,7 @@ export function evaluateTradeCycle(
       const effectiveTier1Pct = gap1.pct;
       // Net of the exit cost on the fraction actually traded (33% of notional).
       const t1Cost = sideCostUSD(posSize * 0.33);
-      const harvestGain = +((posSize * 0.33 * (effectiveTier1Pct / 100)) - t1Cost).toFixed(2);
+      const harvestGain = +(posSize * 0.33 * (effectiveTier1Pct / 100)).toFixed(2);   // gross; cost tracked in totalFeesUSD
       updated.totalFeesUSD = +((updated.totalFeesUSD || 0) + t1Cost).toFixed(4);
       realizedBanked += harvestGain;
       updated.realizedCashBankedUSD = +realizedBanked.toFixed(2);
@@ -184,7 +184,7 @@ export function evaluateTradeCycle(
       }
       const effectiveTier2Pct = gap2.pct;
       const t2Cost = sideCostUSD(posSize * 0.33);
-      const harvestGain = +((posSize * 0.33 * (effectiveTier2Pct / 100)) - t2Cost).toFixed(2);
+      const harvestGain = +(posSize * 0.33 * (effectiveTier2Pct / 100)).toFixed(2);
       updated.totalFeesUSD = +((updated.totalFeesUSD || 0) + t2Cost).toFixed(4);
       realizedBanked += harvestGain;
       updated.realizedCashBankedUSD = +realizedBanked.toFixed(2);
@@ -214,7 +214,7 @@ export function evaluateTradeCycle(
       }
       const effectiveTier3Pct = gap3.pct;
       const t3Cost = sideCostUSD(posSize * 0.17);
-      const harvestGain = +((posSize * 0.17 * (effectiveTier3Pct / 100)) - t3Cost).toFixed(2);
+      const harvestGain = +(posSize * 0.17 * (effectiveTier3Pct / 100)).toFixed(2);
       updated.totalFeesUSD = +((updated.totalFeesUSD || 0) + t3Cost).toFixed(4);
       realizedBanked += harvestGain;
       updated.realizedCashBankedUSD = +realizedBanked.toFixed(2);
@@ -267,7 +267,9 @@ export function evaluateTradeCycle(
       // Closing the remaining open fraction costs one more side of friction.
       const exitCost = sideCostUSD(posSize * activePortion);
       updated.totalFeesUSD = +((updated.totalFeesUSD || 0) + exitCost).toFixed(4);
-      updated.pnlUSD = +(realizedBanked + (posSize * activePortion * (currentReturnPct / 100)) - exitCost).toFixed(2);
+      // pnlUSD stays GROSS. Friction lives only in totalFeesUSD; netting it here as
+      // well subtracted it twice once bankrollService deducted totalFeesUSD.
+      updated.pnlUSD = +(realizedBanked + (posSize * activePortion * (currentReturnPct / 100))).toFixed(2);
 
       if (updated.harvestTiers?.tier3.status === 'HARVESTED') {
         updated.exitReason = 'TRAILING_RUNNER_EXIT';
@@ -289,7 +291,7 @@ export function evaluateTradeCycle(
           : (livePrice < stopPrice && entryP > 0 ? +(((stopPrice - livePrice) / entryP) * 100).toFixed(2) : 0);
 
         const totalLossPct = Math.abs(updated.stopLossPct || 5) + slippageGapPct;
-        const lossAmount = +((posSize * (totalLossPct / 100)) + exitCost).toFixed(2);
+        const lossAmount = +(posSize * (totalLossPct / 100)).toFixed(2);
         updated.pnlUSD = -lossAmount;
         
         if (slippageGapPct > 0.5) {

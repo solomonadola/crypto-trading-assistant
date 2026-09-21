@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { outcome } from '../services/metrics';
 import { 
   X, 
   Clock, 
@@ -45,7 +46,7 @@ export const ConsolidationLossAuditModal: React.FC<ConsolidationLossAuditModalPr
   if (!isOpen) return null;
 
   const handleManualRecord = () => {
-    const recentLosses = trades.filter(t => t.status !== 'OPEN' && (t.pnlUSD || 0) < 0).slice(0, 3);
+    const recentLosses = trades.filter(t => t.status !== 'OPEN' && outcome(t) === 'LOSS').slice(0, 3);
     const now = Date.now();
     const twoHoursAgo = now - 2 * 60 * 60 * 1000;
     

@@ -1,4 +1,5 @@
 import { CryptoCoin } from '../types';
+import { outcome, netPnlUSD } from './metrics';
 import { EntrySignalResult } from '../types/entryScanner';
 import { AutomatedTradeRecord } from '../types/automatedFeed';
 
@@ -316,12 +317,12 @@ export function evaluateRecentLossCircuitBreaker(trades: AutomatedTradeRecord[])
     if (t.status === 'OPEN') return false;
     const closedAt = t.closedAtTimestamp || (t.openedAtTimestamp ? t.openedAtTimestamp + 3600000 : 0);
     const isRecent = closedAt >= twoHoursAgo;
-    const isLoss = (t.pnlUSD !== undefined && t.pnlUSD < -0.05) || t.exitReason === 'STOP_LOSS_HIT';
+    const isLoss = outcome(t) === 'LOSS' || t.exitReason === 'STOP_LOSS_HIT';
     return isRecent && isLoss;
   }).sort((a, b) => (b.closedAtTimestamp || 0) - (a.closedAtTimestamp || 0));
 
   const count = recentLosses.length;
-  const totalLossUSD = +(recentLosses.reduce((acc, t) => acc + Math.abs(t.pnlUSD || 0), 0)).toFixed(2);
+  const totalLossUSD = +(recentLosses.reduce((acc, t) => acc + Math.abs(netPnlUSD(t)), 0)).toFixed(2);
 
   // If 2 or more losses within the 2-hour window, trip the circuit breaker
   if (count >= 2) {

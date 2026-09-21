@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { formatRatio, netPnlUSD, netReturnPct } from '../services/metrics';
 import { 
   Layers, 
   Lock, 
@@ -318,9 +319,9 @@ export const BankrollView: React.FC<BankrollViewProps> = ({
                     <div className="text-right">
                       <span className="text-[10px] text-stone-500 uppercase block">Current PnL</span>
                       <span className={`text-base font-extrabold ${
-                        trade.pnlUSD >= 0 ? 'text-emerald-400' : 'text-rose-400'
+                        netPnlUSD(trade) >= 0 ? 'text-emerald-400' : 'text-rose-400'
                       }`}>
-                        {trade.pnlUSD >= 0 ? '+' : ''}${Math.abs(trade.pnlUSD) < 0.10 && Math.abs(trade.pnlUSD) > 0 ? trade.pnlUSD.toFixed(3) : trade.pnlUSD.toFixed(2)} ({trade.pnlPercentage >= 0 ? '+' : ''}{trade.pnlPercentage}%)
+                        {netPnlUSD(trade) >= 0 ? '+' : ''}${Math.abs(netPnlUSD(trade)) < 0.10 && Math.abs(netPnlUSD(trade)) > 0 ? netPnlUSD(trade).toFixed(3) : netPnlUSD(trade).toFixed(2)} ({netReturnPct(trade) >= 0 ? '+' : ''}{netReturnPct(trade).toFixed(2)}%)
                       </span>
                     </div>
 
@@ -462,7 +463,8 @@ export const BankrollView: React.FC<BankrollViewProps> = ({
       {activeSubTab === 'CLOSED' && (
         <div className="space-y-3">
           {closedTrades.map((trade) => {
-            const isProfit = trade.pnlUSD >= 0;
+            const net = netPnlUSD(trade);
+            const isProfit = net >= 0;
 
             return (
               <div
@@ -492,7 +494,7 @@ export const BankrollView: React.FC<BankrollViewProps> = ({
                   <span className={`font-bold text-sm block ${
                     isProfit ? 'text-emerald-400' : 'text-rose-400'
                   }`}>
-                    {isProfit ? '+' : ''}${trade.pnlUSD.toFixed(2)} ({trade.pnlPercentage >= 0 ? '+' : ''}{trade.pnlPercentage}%)
+                    {isProfit ? '+' : ''}${net.toFixed(2)} ({netReturnPct(trade) >= 0 ? '+' : ''}{netReturnPct(trade).toFixed(2)}%)
                   </span>
                   <span className="text-[10px] text-stone-500">
                     Banked: ${trade.realizedCashBankedUSD?.toFixed(2) || '0.00'}
@@ -658,7 +660,7 @@ export const BankrollView: React.FC<BankrollViewProps> = ({
                 </span>
               </div>
               <div className="flex items-baseline gap-2">
-                <span className="text-2xl font-black text-emerald-400">{verification.payoffRatio}:1</span>
+                <span className="text-2xl font-black text-emerald-400">{formatRatio(verification.payoffRatio)}:1</span>
                 <span className="text-xs text-stone-400">(${verification.avgWinUSD} vs ${verification.avgLossUSD})</span>
               </div>
               <p className="text-[11px] text-stone-400">
@@ -677,7 +679,7 @@ export const BankrollView: React.FC<BankrollViewProps> = ({
                 </span>
               </div>
               <div className="flex items-baseline gap-2">
-                <span className="text-2xl font-black text-amber-400">{verification.profitFactor}</span>
+                <span className="text-2xl font-black text-amber-400">{formatRatio(verification.profitFactor)}</span>
                 <span className="text-xs text-stone-400">(${verification.grossProfitUSD} / ${verification.grossLossUSD})</span>
               </div>
               <p className="text-[11px] text-stone-400">

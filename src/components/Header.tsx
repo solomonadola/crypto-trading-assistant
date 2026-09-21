@@ -1,4 +1,5 @@
 import React from 'react';
+import { formatRatio } from '../services/metrics';
 import { 
   Zap, 
   Activity, 
@@ -90,7 +91,7 @@ export const Header: React.FC<HeaderProps> = ({
             <span className="font-semibold text-stone-300">Bot Results:</span>
             <span className="font-bold text-emerald-400" title="Win Rate">{verification.winRatePct}% Win Rate</span>
             <span className="text-stone-600">·</span>
-            <span className="font-bold text-amber-400" title="Win-to-Loss Ratio: Wins are 2.5x larger than losses">{verification.payoffRatio}:1 Win/Loss</span>
+            <span className="font-bold text-amber-400" title="Win-to-Loss Ratio: Wins are 2.5x larger than losses">{formatRatio(verification.payoffRatio)}:1 Win/Loss</span>
             <span className="text-[10px] text-stone-400 underline decoration-stone-600 underline-offset-2 ml-1">
               View Stats
             </span>

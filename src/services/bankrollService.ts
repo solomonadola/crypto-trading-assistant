@@ -1,4 +1,5 @@
 import { AutomatedTradeRecord, BankrollConfig, BankrollState, BankrollSlotInfo, ZombieTradeConfig } from '../types/automatedFeed';
+import { netPnlUSD, safeRatio, closeTime, BREAKEVEN_BAND_USD } from './metrics';
 
 export const DEFAULT_ZOMBIE_CONFIG: ZombieTradeConfig = {
   enabled: true,
@@ -175,12 +176,13 @@ export function calculateBankrollState(
   const deployedCapitalUSD = openTrades.reduce((acc, t) => acc + (t.positionSizeUSD || trancheSize), 0);
 
   // 2. Realized Cash & Closed PnL (with safety guard against corrupted legacy unit mismatches or anomalous feed jumps)
+  // Banked harvest cash as recorded. This was clamped to 20% of position,
+  // which ATR geometry now legitimately exceeds (tiers at 1R/2R/3.5R bank up
+  // to ~1.6R, and R can reach 15%). The bad-tick source it was guarding
+  // against is bounded at write time by capGapHarvest instead.
   const sanitizedRealizedBanked = (t: AutomatedTradeRecord) => {
-    const rawBanked = Number(t.realizedCashBankedUSD) || 0;
-    const posSize = t.positionSizeUSD || trancheSize;
-    // Banked harvest cash across tiers cannot exceed 20% of position size (e.g. max $2.00 on a $10 tranche)
-    const maxHarvest = posSize * 0.20;
-    return Math.max(0, Math.min(maxHarvest, rawBanked));
+    const rawBanked = Number(t.realizedCashBankedUSD);
+    return Number.isFinite(rawBanked) && rawBanked > 0 ? rawBanked : 0;
   };
 
   // Closed P&L is reported as recorded.
@@ -354,20 +356,21 @@ export function calculateStrategyVerification(
   const targetSampleSize = 30;
   const sampleProgressPct = Math.min(100, Math.round((sampleSize / targetSampleSize) * 100));
 
-  // Consistent win / loss / breakeven threshold (+/- $0.01)
-  const winTrades = closedTrades.filter((t) => (t.pnlUSD || 0) > 0.01);
-  const lossTrades = closedTrades.filter((t) => (t.pnlUSD || 0) < -0.01);
-  const breakevenTrades = closedTrades.filter((t) => Math.abs(t.pnlUSD || 0) <= 0.01);
+  // All figures on NET P&L (gross pnlUSD minus totalFeesUSD) with a single
+  // breakeven band - see services/metrics.ts. Previously this classified on
+  // gross P&L, so a trade that made $0.02 before fees and lost $0.02 after them
+  // was counted as a win, and win rate / payoff / profit factor all shifted.
+  const nets = closedTrades.map(netPnlUSD);
+  const winNets = nets.filter((n) => n > BREAKEVEN_BAND_USD);
+  const lossNets = nets.filter((n) => n < -BREAKEVEN_BAND_USD);
 
-  const winCount = winTrades.length;
-  const lossCount = lossTrades.length;
-  const breakevenCount = breakevenTrades.length;
+  const winCount = winNets.length;
+  const lossCount = lossNets.length;
+  const breakevenCount = sampleSize - winCount - lossCount;
 
-  // Win / Loss Ratio: completed winning trades divided by completed losing trades
-  const winLossRatio = lossCount > 0 
-    ? +(winCount / lossCount).toFixed(2) 
-    : (winCount > 0 ? winCount : 0);
-  
+  // Ratios use safeRatio: with no losses they are Infinity. They previously
+  // fell back to a DOLLAR amount (avg win, or gross profit) displayed as a ratio.
+  const winLossRatio = +safeRatio(winCount, lossCount).toFixed(2);
   const winLossRatioFormatted = lossCount > 0
     ? `${winLossRatio.toFixed(2)}:1`
     : winCount > 0
@@ -378,65 +381,51 @@ export function calculateStrategyVerification(
   const targetWinRatePct = 50.0;
   const winRatePassed = sampleSize > 0 && winRatePct >= targetWinRatePct;
 
-  const totalWinUSD = winTrades.reduce((acc, t) => acc + (t.pnlUSD || 0), 0);
-  const totalLossUSD = Math.abs(lossTrades.reduce((acc, t) => acc + (t.pnlUSD || 0), 0));
+  const totalWinUSD = winNets.reduce((a, n) => a + n, 0);
+  const totalLossUSD = Math.abs(lossNets.reduce((a, n) => a + n, 0));
+  const rawAvgWin = winCount > 0 ? totalWinUSD / winCount : 0;
+  const rawAvgLoss = lossCount > 0 ? totalLossUSD / lossCount : 0;
+  const avgWinUSD = +rawAvgWin.toFixed(2);
+  const avgLossUSD = +rawAvgLoss.toFixed(2);
 
-  const avgWinUSD = winCount > 0 ? +(totalWinUSD / winCount).toFixed(2) : 0;
-  const avgLossUSD = lossCount > 0 ? +(totalLossUSD / lossCount).toFixed(2) : 0;
-
-  // Payoff Ratio (Asymmetry: Avg Win / Avg Loss)
-  const payoffRatio = avgLossUSD > 0 
-    ? +(avgWinUSD / avgLossUSD).toFixed(2) 
-    : (avgWinUSD > 0 ? +(avgWinUSD).toFixed(2) : 0);
+  // Payoff Ratio (Avg Win / Avg Loss), from unrounded averages.
+  const payoffRatio = +safeRatio(rawAvgWin, rawAvgLoss).toFixed(2);
   const targetPayoffRatio = 2.50;
   const payoffPassed = sampleSize > 0 && payoffRatio >= targetPayoffRatio;
 
-  // Profit Factor (Gross Realized Gains / Gross Realized Losses)
+  // Profit Factor (gross winning net P&L / gross losing net P&L).
   const grossProfitUSD = +totalWinUSD.toFixed(2);
   const grossLossUSD = +totalLossUSD.toFixed(2);
 
-  // Total Fees and Realized Profit: consistent with bankroll state
   const totalFeesUSD = bankroll.totalFeesPaidUSD;
   const netRealizedPnLUSD = bankroll.realizedProfitUSD;
   const startingCapitalUSD = bankroll.initialBudgetUSD;
 
-  const profitFactor = grossLossUSD > 0 
-    ? +(grossProfitUSD / grossLossUSD).toFixed(2) 
-    : (grossProfitUSD > 0 ? +(grossProfitUSD).toFixed(2) : 0);
+  const profitFactor = +safeRatio(totalWinUSD, totalLossUSD).toFixed(2);
   const targetProfitFactor = 1.80;
   const profitFactorPassed = sampleSize > 0 && profitFactor >= targetProfitFactor;
 
-  // Max Drawdown: peak-to-trough from running closed cumulative PnL
-  let runningPnL = 0;
-  let peakPnL = 0;
-  let maxDrawdownDollar = 0;
-
-  const sortedClosed = [...closedTrades].sort(
-    (a, b) => (a.closedAtTimestamp || a.openedAtTimestamp || 0) - (b.closedAtTimestamp || b.openedAtTimestamp || 0)
-  );
+  // Max Drawdown on realized net equity, measured from the running PEAK equity
+  // (starting capital + cumulative net). Previously measured against starting
+  // capital and on gross P&L.
+  let equity = startingCapitalUSD;
+  let peakEquity = startingCapitalUSD;
+  let maxDrawdownFrac = 0;
+  const sortedClosed = [...closedTrades].sort((a, b) => closeTime(a) - closeTime(b));
   for (const t of sortedClosed) {
-    runningPnL += (t.pnlUSD || 0);
-    if (runningPnL > peakPnL) {
-      peakPnL = runningPnL;
-    }
-    const dd = peakPnL - runningPnL;
-    if (dd > maxDrawdownDollar) {
-      maxDrawdownDollar = dd;
-    }
+    equity += netPnlUSD(t);
+    if (equity > peakEquity) peakEquity = equity;
+    const dd = peakEquity > 0 ? (peakEquity - equity) / peakEquity : 0;
+    if (dd > maxDrawdownFrac) maxDrawdownFrac = dd;
   }
-  const maxDrawdownPct = startingCapitalUSD > 0 ? +(Math.min(100, (maxDrawdownDollar / startingCapitalUSD) * 100)).toFixed(1) : 0;
+  const maxDrawdownPct = +Math.min(100, maxDrawdownFrac * 100).toFixed(1);
   const targetMaxDrawdownPct = 8.0;
   const drawdownPassed = sampleSize > 0 ? maxDrawdownPct <= targetMaxDrawdownPct : false;
 
-  // Mathematical Expectancy per $10 tranche (Strict real calculation, no mock numbers):
-  const winRateDec = sampleSize > 0 ? (winCount / sampleSize) : 0;
-  const lossRateDec = sampleSize > 0 ? (lossCount / sampleSize) : 0;
-  const effectiveAvgWin = avgWinUSD;
-  const effectiveAvgLoss = avgLossUSD;
-  const avgFeePerTranche = sampleSize > 0 ? +(totalFeesUSD / sampleSize).toFixed(3) : 0;
-  const expectancyUSD = sampleSize > 0
-    ? +((winRateDec * effectiveAvgWin) - (lossRateDec * effectiveAvgLoss) - avgFeePerTranche).toFixed(2)
-    : 0;
+  // Expectancy = mean net P&L per closed trade. Fees are already inside net;
+  // this previously subtracted an average fee on top, which double-counted
+  // them and divided open-trade fees by the closed-trade count.
+  const expectancyUSD = sampleSize > 0 ? +(nets.reduce((a, n) => a + n, 0) / sampleSize).toFixed(2) : 0;
   const targetExpectancyUSD = 0.50; // +$0.50 per $10 slot (+5.0% edge per rotation)
   const expectancyPassed = sampleSize > 0 && expectancyUSD >= targetExpectancyUSD;
 

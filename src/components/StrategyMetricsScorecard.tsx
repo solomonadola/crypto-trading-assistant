@@ -1,4 +1,5 @@
 import React from 'react';
+import { formatRatio } from '../services/metrics';
 import { 
   ShieldCheck, 
   Target, 
@@ -198,7 +199,7 @@ export const StrategyMetricsScorecard: React.FC<StrategyMetricsScorecardProps> =
 
           <div>
             <div className="flex items-baseline gap-2">
-              <span className="text-3xl font-black text-amber-400">{verification.payoffRatio}x</span>
+              <span className="text-3xl font-black text-amber-400">{formatRatio(verification.payoffRatio)}x</span>
               <span className="text-xs text-stone-400 font-medium">Asymmetry Multiple</span>
             </div>
             <p className="text-xs text-stone-400 mt-1">
@@ -231,7 +232,7 @@ export const StrategyMetricsScorecard: React.FC<StrategyMetricsScorecardProps> =
 
           <div>
             <div className="flex items-baseline gap-2">
-              <span className="text-3xl font-black text-emerald-400">{verification.profitFactor}</span>
+              <span className="text-3xl font-black text-emerald-400">{formatRatio(verification.profitFactor)}</span>
               <span className="text-xs text-stone-400 font-medium">Gross Ratio</span>
             </div>
             <p className="text-xs text-stone-400 mt-1">

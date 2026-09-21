@@ -46,6 +46,7 @@ import {
   exportTradesToJSON 
 } from '../services/bankrollService';
 import { formatCashUSD } from '../services/orderFlowService';
+import { netPnlUSD, outcome, netReturnPct, closeTime, isClosed, formatRatio } from '../services/metrics';
 import { 
   analyzeConsolidationLosses, 
   ConsolidationLossAuditReport 
@@ -64,6 +65,8 @@ export const OverallMetricsView: React.FC<OverallMetricsViewProps> = ({
   onResetTrades
 }) => {
   const verification = useMemo(() => calculateStrategyVerification(trades), [trades]);
+  // Charts previously hardcoded 100.0 and ignored the configured budget.
+  const baseCapital = bankroll?.initialBudgetUSD || 100;
   const [isConsolidationAuditOpen, setIsConsolidationAuditOpen] = useState(false);
   const [auditRefreshKey, setAuditRefreshKey] = useState(0);
 
@@ -73,7 +76,9 @@ export const OverallMetricsView: React.FC<OverallMetricsViewProps> = ({
 
   // Interactive What-If Simulator State
   const [simWinRate, setSimWinRate] = useState<number>(verification.winRatePct || 60);
-  const [simPayoffRR, setSimPayoffRR] = useState<number>(verification.payoffRatio || 2.5);
+  const [simPayoffRR, setSimPayoffRR] = useState<number>(
+    Number.isFinite(verification.payoffRatio) && verification.payoffRatio > 0 ? verification.payoffRatio : 2.5
+  );
   const [simTradeCount, setSimTradeCount] = useState<number>(50);
 
   // Filter & breakdown per asset
@@ -84,6 +89,7 @@ export const OverallMetricsView: React.FC<OverallMetricsViewProps> = ({
       trades: number;
       wins: number;
       losses: number;
+      closed: number;
       pnl: number;
       avgRR: number;
       ratchetHits: number;
@@ -96,24 +102,27 @@ export const OverallMetricsView: React.FC<OverallMetricsViewProps> = ({
         trades: 0,
         wins: 0,
         losses: 0,
+        closed: 0,
         pnl: 0,
         avgRR: 0,
         ratchetHits: 0,
       };
 
       existing.trades += 1;
-      if (t.status !== 'OPEN') {
-        const pnl = t.pnlUSD || 0;
-        existing.pnl += pnl;
-        if (pnl > 0.01) existing.wins += 1;
-        else if (pnl < -0.01) existing.losses += 1;
+      if (isClosed(t)) {
+        existing.closed += 1;
+        existing.pnl += netPnlUSD(t);
+        const o = outcome(t);
+        if (o === 'WIN') existing.wins += 1;
+        else if (o === 'LOSS') existing.losses += 1;
         if (t.ratchet?.isArmed) existing.ratchetHits += 1;
       }
       map.set(t.symbol, existing);
     });
 
     return Array.from(map.values()).map((item) => {
-      const winRate = item.trades > 0 ? (item.wins / Math.max(1, item.wins + item.losses)) * 100 : 0;
+      // Same definition as the headline win rate: wins / closed trades.
+      const winRate = item.closed > 0 ? (item.wins / item.closed) * 100 : 0;
       return {
         ...item,
         winRate: +winRate.toFixed(1),
@@ -125,31 +134,30 @@ export const OverallMetricsView: React.FC<OverallMetricsViewProps> = ({
   // Equity Curve Cumulative Timeline
   const equityCurveData = useMemo(() => {
     let runningPnL = 0;
-    const closed = trades
-      .filter((t) => t.status !== 'OPEN')
-      .sort((a, b) => (a.closedAtTimestamp || 0) - (b.closedAtTimestamp || 0));
+    const closed = trades.filter(isClosed).sort((a, b) => closeTime(a) - closeTime(b));
 
     const points = [
       {
         name: 'Start',
-        equity: 100.0,
+        equity: baseCapital,
         netPnL: 0,
         trade: 'Initial Treasury',
       }
     ];
 
     closed.forEach((t, idx) => {
-      runningPnL += (t.pnlUSD || 0);
+      const net = netPnlUSD(t);
+      runningPnL += net;
       points.push({
         name: `T${idx + 1} (${t.symbol})`,
-        equity: +(100 + runningPnL).toFixed(2),
+        equity: +(baseCapital + runningPnL).toFixed(2),
         netPnL: +runningPnL.toFixed(2),
-        trade: `${t.symbol} ${t.direction || 'LONG'} (${t.pnlUSD && t.pnlUSD >= 0 ? '+' : ''}$${t.pnlUSD?.toFixed(2)})`,
+        trade: `${t.symbol} ${t.direction || 'LONG'} (${net >= 0 ? '+' : ''}$${net.toFixed(2)})`,
       });
     });
 
     return points;
-  }, [trades]);
+  }, [trades, baseCapital]);
 
   // Active chart view toggle: 'daily' (Daily Performance) | 'equity' (Portfolio Equity Curve) | 'roi' (Cumulative ROI)
   const [activeChartTab, setActiveChartTab] = useState<'daily' | 'equity' | 'roi'>('daily');
@@ -158,7 +166,7 @@ export const OverallMetricsView: React.FC<OverallMetricsViewProps> = ({
 
   // Daily Performance timeline calculating portfolio value fluctuations day-by-day based on trade history data
   const dailyPerformanceData = useMemo(() => {
-    const startingCapital = 100.0;
+    const startingCapital = baseCapital;
     if (!trades || trades.length === 0) {
       const todayLabel = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
       return [
@@ -215,7 +223,10 @@ export const OverallMetricsView: React.FC<OverallMetricsViewProps> = ({
     const dayMap = new Map<string, DayBucket>();
 
     sortedTrades.forEach((t) => {
-      const ts = t.closedAtTimestamp || t.openedAtTimestamp;
+      // Realized performance only: open trades were bucketed by open date with
+      // P&L 0, inflating each day's trade count and diluting its win rate.
+      if (!isClosed(t)) return;
+      const ts = closeTime(t);
       if (!ts) return;
       const d = new Date(ts);
       const isoDate = d.toISOString().split('T')[0];
@@ -235,10 +246,11 @@ export const OverallMetricsView: React.FC<OverallMetricsViewProps> = ({
 
       const bucket = dayMap.get(isoDate)!;
       bucket.tradesCount += 1;
-      const pnl = t.status !== 'OPEN' ? (t.pnlUSD || 0) : 0;
+      const pnl = netPnlUSD(t);
       bucket.tradePnls.push(pnl);
-      if (pnl > 0.005) bucket.wins += 1;
-      else if (pnl < -0.005) bucket.losses += 1;
+      const o = outcome(t);
+      if (o === 'WIN') bucket.wins += 1;
+      else if (o === 'LOSS') bucket.losses += 1;
       if (bucket.symbols.length < 5 && !bucket.symbols.includes(t.symbol)) {
         bucket.symbols.push(t.symbol);
       }
@@ -280,7 +292,7 @@ export const OverallMetricsView: React.FC<OverallMetricsViewProps> = ({
       wins: 0,
       losses: 0,
       winRate: 0,
-      symbols: 'Initial $100 Treasury'
+      symbols: `Initial $${startingCapital.toFixed(2)} Treasury`
     });
 
     sortedDays.forEach((day) => {
@@ -317,7 +329,7 @@ export const OverallMetricsView: React.FC<OverallMetricsViewProps> = ({
     });
 
     return points;
-  }, [trades, bankroll?.totalPortfolioValueUSD]);
+  }, [trades, bankroll?.totalPortfolioValueUSD, baseCapital]);
 
   // Aggregate daily statistics for quick insights
   const dailyStats = useMemo(() => {
@@ -326,7 +338,7 @@ export const OverallMetricsView: React.FC<OverallMetricsViewProps> = ({
       return {
         currentValue: +(bankroll?.totalPortfolioValueUSD || 100).toFixed(2),
         peakValue: +(bankroll?.totalPortfolioValueUSD || 100).toFixed(2),
-        troughValue: 100.0,
+        troughValue: baseCapital,
         bestDay: { date: 'N/A', pnl: 0, pct: 0 },
         worstDay: { date: 'N/A', pnl: 0, pct: 0 },
         greenDays: 0,
@@ -336,8 +348,8 @@ export const OverallMetricsView: React.FC<OverallMetricsViewProps> = ({
       };
     }
 
-    let peak = 100.0;
-    let trough = 100.0;
+    let peak = baseCapital;
+    let trough = baseCapital;
     let best = activeDays[0];
     let worst = activeDays[0];
     let totalPnL = 0;
@@ -369,16 +381,14 @@ export const OverallMetricsView: React.FC<OverallMetricsViewProps> = ({
       totalDays: activeDays.length,
       avgDailyPnL: +(totalPnL / activeDays.length).toFixed(2)
     };
-  }, [dailyPerformanceData, bankroll?.totalPortfolioValueUSD]);
+  }, [dailyPerformanceData, bankroll?.totalPortfolioValueUSD, baseCapital]);
 
   // Cumulative ROI Timeline of completed trades over time (derived strictly from real closed trades)
   const cumulativeRoiData = useMemo(() => {
     let runningPnL = 0;
-    const closed = trades
-      .filter((t) => t.status !== 'OPEN')
-      .sort((a, b) => (a.closedAtTimestamp || 0) - (b.closedAtTimestamp || 0));
+    const closed = trades.filter(isClosed).sort((a, b) => closeTime(a) - closeTime(b));
 
-    const startingCapital = 100.0;
+    const startingCapital = baseCapital;
     const points = [
       {
         name: 'Start',
@@ -386,16 +396,17 @@ export const OverallMetricsView: React.FC<OverallMetricsViewProps> = ({
         cumulativeRoiPct: 0.0,
         tradeRoiPct: 0.0,
         netPnL: 0.0,
-        trade: 'Initial Baseline ($100.00)',
+        trade: `Initial Baseline ($${startingCapital.toFixed(2)})`,
         symbol: 'START',
       }
     ];
 
     closed.forEach((t, idx) => {
-      const pnl = t.pnlUSD || 0;
+      const pnl = netPnlUSD(t);
       runningPnL += pnl;
       const cumulativeRoiPct = +((runningPnL / startingCapital) * 100).toFixed(2);
-      const tradeRoiPct = +(t.pnlPercentage ?? ((pnl / (t.positionSizeUSD || 10)) * 100)).toFixed(2);
+      // pnlPercentage is the price move at exit, not the trade's return.
+      const tradeRoiPct = +netReturnPct(t).toFixed(2);
       const dateLabel = t.closedAtTimestamp 
         ? new Date(t.closedAtTimestamp).toLocaleDateString([], { month: 'short', day: 'numeric' })
         : `T${idx + 1}`;
@@ -412,7 +423,7 @@ export const OverallMetricsView: React.FC<OverallMetricsViewProps> = ({
     });
 
     return points;
-  }, [trades]);
+  }, [trades, baseCapital]);
 
   // Simulated expected value calculation
   const simTrancheSize = 10;
@@ -610,7 +621,7 @@ export const OverallMetricsView: React.FC<OverallMetricsViewProps> = ({
             </div>
           </div>
           <div className="flex items-baseline gap-2 pt-1">
-            <span className="text-3xl font-black text-emerald-400">{verification.profitFactor}</span>
+            <span className="text-3xl font-black text-emerald-400">{formatRatio(verification.profitFactor)}</span>
             <span className="text-xs text-stone-400">Target ≥ 1.75</span>
           </div>
           <p className="text-xs text-stone-300">
@@ -800,7 +811,7 @@ export const OverallMetricsView: React.FC<OverallMetricsViewProps> = ({
 
           <div>
             <div className="flex items-baseline gap-2">
-              <span className="text-3xl font-black text-amber-400">{verification.payoffRatio}:1</span>
+              <span className="text-3xl font-black text-amber-400">{formatRatio(verification.payoffRatio)}:1</span>
               <span className="text-xs text-stone-400 font-medium">Win-to-Loss Ratio</span>
             </div>
             <p className="text-[11px] text-stone-300 mt-1">
@@ -837,7 +848,7 @@ export const OverallMetricsView: React.FC<OverallMetricsViewProps> = ({
 
           <div>
             <div className="flex items-baseline gap-2">
-              <span className="text-3xl font-black text-emerald-400">{verification.profitFactor}</span>
+              <span className="text-3xl font-black text-emerald-400">{formatRatio(verification.profitFactor)}</span>
               <span className="text-xs text-stone-400 font-medium">Profit Factor</span>
             </div>
             <p className="text-[11px] text-stone-300 mt-1">

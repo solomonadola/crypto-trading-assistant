@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { netPnlUSD, outcome, netReturnPct, formatRatio } from '../services/metrics';
 import { 
   BarChart3, 
   Layers, 
@@ -51,9 +52,9 @@ export const AutomatedFeedView: React.FC<AutomatedFeedViewProps> = ({
   const filteredTrades = trades.filter((t) => {
     if (historyFilter === 'ALL') return t.status !== 'OPEN';
     if (historyFilter === 'OPEN') return t.status === 'OPEN';
-    if (historyFilter === 'WINS') return t.status !== 'OPEN' && (t.pnlUSD || 0) > 0.01;
-    if (historyFilter === 'LOSSES') return t.status !== 'OPEN' && (t.pnlUSD || 0) < -0.01;
-    if (historyFilter === 'BREAKEVEN') return t.status !== 'OPEN' && Math.abs(t.pnlUSD || 0) <= 0.01;
+    if (historyFilter === 'WINS') return t.status !== 'OPEN' && outcome(t) === 'WIN';
+    if (historyFilter === 'LOSSES') return t.status !== 'OPEN' && outcome(t) === 'LOSS';
+    if (historyFilter === 'BREAKEVEN') return t.status !== 'OPEN' && outcome(t) === 'BREAKEVEN';
     return true;
   });
 
@@ -116,7 +117,7 @@ export const AutomatedFeedView: React.FC<AutomatedFeedViewProps> = ({
 
           <div className="p-3 rounded-xl bg-stone-950/80 border border-stone-800/80">
             <span className="text-[10px] text-stone-400 uppercase font-semibold block">Payoff Ratio</span>
-            <span className="text-base font-black text-amber-400">{verification.payoffRatio}x</span>
+            <span className="text-base font-black text-amber-400">{formatRatio(verification.payoffRatio)}x</span>
             <span className="text-[10px] text-stone-400 block mt-0.5">Target ≥ 2.50x</span>
           </div>
 
@@ -235,9 +236,10 @@ export const AutomatedFeedView: React.FC<AutomatedFeedViewProps> = ({
           {/* Trade Records List */}
           <div className="space-y-2.5">
             {filteredTrades.map((trade) => {
-              const isProfit = (trade.pnlUSD || 0) > 0.05;
-              const isBreakeven = Math.abs(trade.pnlUSD || 0) <= 0.05;
-              const isLoss = (trade.pnlUSD || 0) < -0.05;
+              const net = netPnlUSD(trade);
+              const isProfit = outcome(trade) === 'WIN';
+              const isBreakeven = outcome(trade) === 'BREAKEVEN';
+              const isLoss = outcome(trade) === 'LOSS';
               const isOpen = trade.status === 'OPEN';
 
               return (
@@ -275,7 +277,7 @@ export const AutomatedFeedView: React.FC<AutomatedFeedViewProps> = ({
                         <span>Entry: <strong className="text-stone-300">${trade.entryPrice}</strong></span>
                         <span>Exit: <strong className="text-stone-300">${trade.currentPrice}</strong></span>
                         <span className="text-rose-400/90 text-[11px]">
-                          Binance Fee: -${(trade.totalFeesUSD || 0.02).toFixed(3)}
+                          Binance Fee: -${(trade.totalFeesUSD || 0).toFixed(3)}
                         </span>
                       </div>
                     </div>
@@ -292,10 +294,10 @@ export const AutomatedFeedView: React.FC<AutomatedFeedViewProps> = ({
                           ? 'text-stone-300'
                           : 'text-rose-400'
                       }`}>
-                        {isOpen ? 'Open Unrealized' : (trade.pnlUSD >= 0 ? '+' : '') + `$${(trade.pnlUSD || 0).toFixed(2)}`}
+                        {isOpen ? 'Open Unrealized' : (net >= 0 ? '+' : '') + `$${net.toFixed(2)}`}
                       </span>
                       <span className="text-xs text-stone-400 block font-mono">
-                        {trade.pnlPercentage >= 0 ? '+' : ''}{(trade.pnlPercentage || 0).toFixed(1)}% yield
+                        {netReturnPct(trade) >= 0 ? '+' : ''}{netReturnPct(trade).toFixed(1)}% yield
                       </span>
                     </div>
 
