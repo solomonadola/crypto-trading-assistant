@@ -1,0 +1,58 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidTrade(data) {
+      return data is map &&
+        data.id is string && data.id.size() <= 128 &&
+        data.symbol is string && data.symbol.size() <= 32 &&
+        data.coinId is string && data.coinId.size() <= 64 &&
+        (data.status in ['OPEN', 'COMPLETED', 'STOPPED', 'CLOSED_TAKE_PROFIT', 'CLOSED_STOP_LOSS', 'CLOSED_SIGNAL_REVERSAL', 'CLOSED_TIME_DECAY', 'CLOSED_ORDER_FLOW_DUMP', 'CLOSED_MANUAL']) &&
+        (data.direction in ['LONG', 'SHORT']) &&
+        data.entryPrice is number &&
+        data.currentPrice is number;
+    }
+
+    // Owner is whoever created the record. Existing documents predate the
+    // ownerUid field; they stay readable and writable by any signed-in user so
+    // the migration is non-breaking, but new documents must claim an owner.
+    function isOwner(data) {
+      return !('ownerUid' in data) || data.ownerUid == request.auth.uid;
+    }
+
+    // Automated Trade Feed Collection
+    //
+    // Previously: read/create/update/delete were all allowed unauthenticated.
+    // `allow delete: if isValidId(tradeId)` only checked the id was a
+    // well-formed string, which made it equivalent to `allow delete: if true` -
+    // anyone holding the projectId (it ships in the client bundle) could wipe
+    // the collection or inject fabricated trades via the REST API.
+    match /crypto_automated_trades/{tradeId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn()
+                    && isValidId(tradeId)
+                    && isValidTrade(request.resource.data)
+                    && isOwner(request.resource.data);
+      allow update: if isSignedIn()
+                    && isValidId(tradeId)
+                    && isValidTrade(request.resource.data)
+                    && isOwner(resource.data);
+      allow delete: if isSignedIn()
+                    && isValidId(tradeId)
+                    && isOwner(resource.data);
+    }
+  }
+}

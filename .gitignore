@@ -1,0 +1,20 @@
+node_modules/
+build/
+dist/
+coverage/
+.DS_Store
+*.log
+.env*
+!.env.example
+
+# --- Research harness ---
+# Market data + derived artifacts. All reproducible:
+#   node tools/build-scanner.mjs
+#   node tools/fetch-klines.mjs --months 6
+#   node tools/replay.mjs
+# ~1.5GB of klines, so never commit it.
+data/
+
+# Generated scanner bundle + vendored esbuild (see tools/build-scanner.mjs).
+tools/_gen/scanner.mjs
+tools/_gen/vendor/

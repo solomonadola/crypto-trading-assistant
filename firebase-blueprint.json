@@ -1,0 +1,30 @@
+{
+  "entities": {
+    "AutomatedTradeRecord": {
+      "title": "Automated Trade Record",
+      "description": "A systematic quantitative paper trade with asymmetric 1/3rd harvest tiers and breakeven ratchets",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "symbol": { "type": "string", "maxLength": 32 },
+        "coinId": { "type": "string", "maxLength": 64 },
+        "coinName": { "type": "string", "maxLength": 64 },
+        "direction": { "type": "string", "enum": ["LONG", "SHORT"] },
+        "action": { "type": "string", "enum": ["BUY", "SELL"] },
+        "status": { "type": "string", "enum": ["OPEN", "COMPLETED", "STOPPED", "CLOSED_TAKE_PROFIT", "CLOSED_STOP_LOSS", "CLOSED_SIGNAL_REVERSAL", "CLOSED_TIME_DECAY", "CLOSED_ORDER_FLOW_DUMP", "CLOSED_MANUAL"] },
+        "entryPrice": { "type": "number" },
+        "currentPrice": { "type": "number" },
+        "positionSizeUSD": { "type": "number" },
+        "pnlUSD": { "type": "number" },
+        "pnlPercentage": { "type": "number" }
+      },
+      "required": ["id", "symbol", "coinId", "status", "entryPrice"]
+    }
+  },
+  "firestore": {
+    "/crypto_automated_trades/{tradeId}": {
+      "schema": "AutomatedTradeRecord",
+      "description": "Collection of simulated and live automated trade records and performance logs"
+    }
+  }
+}
