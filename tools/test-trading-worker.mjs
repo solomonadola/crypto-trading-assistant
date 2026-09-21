@@ -11,7 +11,9 @@ const esbuild = require('./_gen/vendor/node_modules/esbuild');
 const FAKE_FIRESTORE = `
   const log = (c) => (globalThis.__fsCalls = globalThis.__fsCalls || []).push(c);
   const snap = (docs) => ({ empty: docs.length === 0, docs: docs.map((d) => ({ id: d.id, data: () => d })),
-    forEach(fn) { this.docs.forEach(fn); } });
+    forEach(fn) { this.docs.forEach(fn); },
+    docChanges() { return this.docs.map((doc) => ({ type: 'added', doc })); } });
+  const count = (n) => { globalThis.__reads = (globalThis.__reads || 0) + Math.max(1, n); };
   globalThis.__snap = snap;
   export const getFirestore = () => ({});
   export const collection = (_db, name) => ({ name });
@@ -20,12 +22,20 @@ const FAKE_FIRESTORE = `
   export const setDoc = async (ref, data) => { maybeFail(); log({ op: 'set', id: ref.id, data }); };
   export const updateDoc = async (ref, data) => { maybeFail(); log({ op: 'update', id: ref.id, data }); };
   export const deleteDoc = async (ref) => { log({ op: 'delete', id: ref.id }); };
-  export const getDocs = async () => snap(globalThis.__fsDocs || []);
+  export const getDocs = async () => { const d = globalThis.__fsDocs || []; count(d.length); return snap(d); };
   export const getDocFromServer = async () => ({});
   export const onSnapshot = (_ref, next) => { (globalThis.__listeners = globalThis.__listeners || []).push(next); return () => {}; };
-  export const query = (c) => c;
-  export const where = () => ({});
-  export const getDocsFromServer = async () => snap((globalThis.__fsDocs || []).filter((d) => d.status === 'OPEN'));
+  export const where = (field, op, value) => ({ field, op, value });
+  export const query = (c, ...filters) => ({ ...c, filters });
+  export const serverTimestamp = () => ({ serverTs: true });
+  export const Timestamp = { fromMillis: (ms) => ({ ms }) };
+  export const getDocsFromServer = async (q) => {
+    if (globalThis.__fsHold) await globalThis.__fsHold;
+    const status = (q.filters || []).find((f) => f.field === 'status');
+    const d = (globalThis.__fsDocs || []).filter((x) => !status || x.status === status.value);
+    count(d.length);
+    return snap(d);
+  };
 `;
 
 let build = 0;
@@ -76,7 +86,7 @@ globalThis.fetch = async (url) => {
   return { ok: false, json: async () => null };
 };
 const deliver = (docs) => { globalThis.__fsDocs = docs; (globalThis.__listeners || []).forEach((l) => l(globalThis.__snap(docs))); };
-const reset = () => { globalThis.__fsWriteFail = null; globalThis.__fsCalls = []; globalThis.__listeners = []; globalThis.__fsDocs = []; globalThis.localStorage?.clear(); };
+const reset = () => { globalThis.__fsHold = null; globalThis.__reads = 0; globalThis.__fsWriteFail = null; globalThis.__fsCalls = []; globalThis.__listeners = []; globalThis.__fsDocs = []; globalThis.localStorage?.clear(); };
 const settle = () => new Promise((r) => setTimeout(r, 30));
 const writes = () => globalThis.__fsCalls || [];
 
@@ -115,7 +125,8 @@ console.log('\n2. No trading before Firestore has delivered the trades');
 {
   reset();
   prices = { SOL: 95, ETH: 101 };
-  globalThis.__fsDocs = [trade('sol', 'SOL')];     // readable, but no snapshot yet
+  let release;
+  globalThis.__fsHold = new Promise((r) => { release = r; });   // database slow to answer
   const w = await load(false);
   w.startTradingWorker(1e9);
   await settle();
@@ -123,8 +134,10 @@ console.log('\n2. No trading before Firestore has delivered the trades');
   check('tick skipped', r.skipped === true && /Firestore/.test(r.reason), r.reason);
   check('no Firestore writes', writes().length === 0, JSON.stringify(writes()));
 
-  console.log('\n3. After the snapshot: a stop at the live price closes the trade');
-  deliver([trade('sol', 'SOL'), trade('eth', 'ETH')]);
+  console.log('\n3. After the database answers: a stop at the live price closes the trade');
+  globalThis.__fsDocs = [trade('sol', 'SOL'), trade('eth', 'ETH')];
+  release();
+  await settle();
   const r2 = await w.executeTradingTick();
   check('tick ran', r2.success === true, r2.reason || r2.error || '');
   const closed = writes().find((c) => c.id === 'sol' && c.data?.status === 'STOPPED');
@@ -211,7 +224,6 @@ console.log('\n7. Never more than 10 open: the database is checked, not just thi
 {
   reset();
   const w = await load(false);
-  const unsub = w.subscribeToAutomatedTrades(() => {});
   // The database has 10 open; this copy has only seen 2 of them.
   const ten = ['A','B','C','D','E','F','G','H','I','J'].map((x) => trade(x, x + 'X'));
   globalThis.__fsDocs = ten;
@@ -222,7 +234,6 @@ console.log('\n7. Never more than 10 open: the database is checked, not just thi
   globalThis.__fsDocs = ten.slice(0, 3);
   const dup = await w.executeSimulatedTrade(trade('dup', 'CX', { openedAtTimestamp: NOW }));
   check('coin already open in the database refused', dup === false);
-  unsub();
 }
 
 console.log('\n8. A failed save is queued and retried, not left in one browser');
@@ -230,7 +241,7 @@ console.log('\n8. A failed save is queued and retried, not left in one browser')
   reset();
   const w = await load(false);
   const unsub = w.subscribeToAutomatedTrades(() => {});
-  deliver([]);
+  await settle();
   globalThis.__fsWriteFail = 'unavailable';
   const ok = await w.executeSimulatedTrade(trade('q1', 'QQQ', { openedAtTimestamp: NOW - 3600_000 }));
   check('trade opened locally', ok === true);
@@ -239,12 +250,11 @@ console.log('\n8. A failed save is queued and retried, not left in one browser')
   await settle();
   check('kept by the merge while queued', w.loadLocalTrades().some((t) => t.id === 'q1'));
   globalThis.__fsWriteFail = null;
-  deliver([]);   // next snapshot flushes the queue
-  await settle();
+  await w.syncOpenTradesWithLivePrices(new Map(), w.loadLocalTrades());   // the 30s refresh
   check('written on retry', writes().some((c) => c.op === 'set' && c.id === 'q1'));
   check('queue empty', w.getPendingWriteCount() === 0);
 
-  // With no snapshot arriving, the 30s refresh retries it.
+  // A failed close is retried the same way.
   globalThis.__fsWriteFail = 'unavailable';
   await w.updateAutomatedTrade({ ...w.loadLocalTrades()[0], status: 'STOPPED' }, true);
   check('failed close queued', w.getPendingWriteCount() === 1);
@@ -259,16 +269,43 @@ console.log('\n9. Database first at startup');
   reset();
   const w = await load(false);
   localStorage.setItem('crypto_automated_trades_local_fallback', JSON.stringify([trade('stale', 'OLD', { status: 'COMPLETED' })]));
+  let release;
+  globalThis.__fsHold = new Promise((r) => { release = r; });
   const unsub = w.subscribeToAutomatedTrades(() => {});
+  await settle();
   check('not acting on the saved copy before Firestore answers', w.isTradeListAuthoritative() === false);
   (globalThis.__listeners || []).forEach((l) => l({ ...globalThis.__snap([]), metadata: { fromCache: true } }));
   check('an offline cache snapshot does not count as the answer', w.isTradeListAuthoritative() === false);
   check('...and does not wipe the list', w.loadLocalTrades().length === 1);
-  deliver([trade('real', 'SOL')]);
+  globalThis.__fsDocs = [trade('real', 'SOL')];
+  release();
+  await settle();
   check('acts once Firestore has answered', w.isTradeListAuthoritative() === true);
   const ids = w.loadLocalTrades().map((t) => t.id);
   check('list is now exactly the database', ids.length === 1 && ids[0] === 'real', ids.join(','));
   unsub();
+}
+
+console.log('\n10. Free-tier reads: the history is not re-read on every load');
+{
+  reset();
+  const w = await load(false);
+  globalThis.__fsDocs = Array.from({ length: 300 }, (_, i) => trade('h' + i, 'H' + i, { status: 'COMPLETED' }));
+  const a = w.subscribeToAutomatedTrades(() => {});
+  const b = w.subscribeToAutomatedTrades(() => {});   // e.g. the History tab
+  await settle();
+  check('two views, one full read (300 reads, not 600)', globalThis.__reads === 300, String(globalThis.__reads));
+  check('listener asks only for changes', (globalThis.__listeners || []).length === 1);
+  a(); b();
+  globalThis.__reads = 0;
+  const c = w.subscribeToAutomatedTrades(() => {});  // reopening with a saved copy
+  await settle();
+  check('reopening reads nothing up front', globalThis.__reads === 0, String(globalThis.__reads));
+  const changed = trade('h5', 'H5', { status: 'COMPLETED', pnlUSD: 1.23 });
+  deliver([changed]);
+  check('a change arrives through the listener', w.loadLocalTrades().find((t) => t.id === 'h5')?.pnlUSD === 1.23);
+  check('history intact', w.loadLocalTrades().length === 300);
+  c();
 }
 
 console.log(`\n${fails === 0 ? 'ALL WORKER CHECKS PASS' : fails + ' CHECK(S) FAILED'}`);

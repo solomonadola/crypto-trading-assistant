@@ -3,12 +3,14 @@ import {
   query,
   where,
   getDocsFromServer,
-  getDocs, 
-  setDoc, 
-  doc, 
-  updateDoc, 
-  deleteDoc, 
-  onSnapshot 
+  getDocs,
+  setDoc,
+  doc,
+  updateDoc,
+  deleteDoc,
+  onSnapshot,
+  serverTimestamp,
+  Timestamp,
 } from 'firebase/firestore';
 import { db, isQuotaBlocked, markQuotaExceeded, reportFirestoreResult, getFirestoreHealth, FIRESTORE_WRITES_ENABLED } from '../lib/firebase';
 import { outcome } from './metrics';
@@ -188,8 +190,8 @@ export async function flushPendingWrites(): Promise<number> {
       const t = local.get(id);
       if (!t) { setPending(id, null); continue; }
       try {
-        if (pending[id] === 'create') await setDoc(doc(db, TRADES_COLLECTION, id), t);
-        else await updateDoc(doc(db, TRADES_COLLECTION, id), { ...t });
+        if (pending[id] === 'create') await setDoc(doc(db, TRADES_COLLECTION, id), stamped(t));
+        else await updateDoc(doc(db, TRADES_COLLECTION, id), stamped(t));
         setPending(id, null);
         written++;
       } catch (err) {
@@ -238,19 +240,21 @@ export function mergeRemoteTrades(
 ): AutomatedTradeRecord[] {
   const localById = new Map(local.map((t) => [t.id, t]));
   const remoteIds = new Set(remote.map((t) => t.id));
-  const merged = remote.map((r) => {
-    const l = localById.get(r.id);
-    if (l && pendingIds.has(r.id)) return l;   // our change has not landed yet
-    if (!l || r.status !== 'OPEN') return r;
-    if (l.status !== 'OPEN') return l;
-    if (filledTiers(r) > filledTiers(l)) return r;
-    return { ...l, excludedFromStats: r.excludedFromStats, excludedReason: r.excludedReason };
-  });
+  const merged = remote.map((r) => pickTrade(r, localById.get(r.id), pendingIds));
   for (const l of local) {
     if (remoteIds.has(l.id)) continue;
     if (pendingIds.has(l.id) || now - (l.openedAtTimestamp || 0) < 5 * 60_000) merged.push(l);
   }
   return merged;
+}
+
+/** Which version of one trade to keep: Firestore's (r) or this copy's (l). See mergeRemoteTrades. */
+function pickTrade(r: AutomatedTradeRecord, l: AutomatedTradeRecord | undefined, pendingIds: Set<string>): AutomatedTradeRecord {
+  if (l && pendingIds.has(r.id)) return l;   // our change has not landed yet
+  if (!l || r.status !== 'OPEN') return r;
+  if (l.status !== 'OPEN') return l;
+  if (filledTiers(r) > filledTiers(l)) return r;
+  return { ...l, excludedFromStats: r.excludedFromStats, excludedReason: r.excludedReason };
 }
 
 function sortTrades(trades: AutomatedTradeRecord[]): AutomatedTradeRecord[] {
@@ -358,81 +362,212 @@ export async function fetchAutomatedTrades(forceNetwork: boolean = false): Promi
   return sanitized;
 }
 
+// ---------------------------------------------------------------- sync
+//
+// Reads are the free-tier constraint (50,000 a day), and every document a
+// query returns is one read. Listening to the whole collection re-read the
+// entire history - about 70 new trades a day, 2,000 a month - on every page
+// load, again for every extra subscriber (the History tab opened a second
+// listener) and again for a forced refresh. Within a couple of months a
+// handful of page loads a day would have used the whole quota.
+//
+// Now there is one listener per copy, however many views subscribe, and it
+// only asks for trades changed since this copy last synced. Every write
+// stamps updatedAt with the server's clock. The whole collection is read
+// only when this copy has nothing saved (a new browser, a server start), or
+// once a week to pick up deletions, which a changes-only query cannot see.
+// Anything that edits trades outside the app must set updatedAt too, or the
+// change only arrives with the weekly full read.
+
+const SYNC_CURSOR_KEY = 'crypto_automated_trades_sync_cursor';
+const FULL_SYNC_AT_KEY = 'crypto_automated_trades_full_sync_at';
+const FULL_SYNC_EVERY_MS = 7 * 86_400_000;
+const CURSOR_MARGIN_MS = 5 * 60_000;        // covers clock differences between copies
+const LISTENER_RENEW_MS = 12 * 3_600_000;   // keeps a long-running listener's result set small
+const SYNC_RETRY_MS = 60_000;
+
+function stamped(t: AutomatedTradeRecord): Record<string, unknown> {
+  return { ...t, updatedAt: serverTimestamp() };
+}
+
+function updatedAtMs(data: Record<string, unknown>): number {
+  const u = data.updatedAt as { toMillis?: () => number } | number | undefined;
+  if (typeof u === 'number') return u;
+  return typeof u?.toMillis === 'function' ? u.toMillis() : 0;
+}
+
+/** The trade as stored locally: the server timestamp is sync bookkeeping only. */
+function fromDoc(data: Record<string, unknown>): AutomatedTradeRecord {
+  const { updatedAt: _u, ...rest } = data;
+  return rest as unknown as AutomatedTradeRecord;
+}
+
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return Promise.race([
+    p,
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Firestore read timed out (offline)')), ms)),
+  ]);
+}
+
+function handleSyncError(err: unknown): void {
+  reportFirestoreResult(err);
+  const msg = err instanceof Error ? err.message : String(err);
+  if (msg.toLowerCase().includes('resource-exhausted') || msg.toLowerCase().includes('quota')) markQuotaExceeded();
+  console.warn('[Sync] Firestore unavailable; using the saved copy and retrying:', err);
+}
+
+// Read-only copies never write their own changes to Firestore, so their view
+// of the database is held separately and shown as-is.
+const readOnlyView = new Map<string, AutomatedTradeRecord>();
+
+function applyFullList(remote: AutomatedTradeRecord[]): void {
+  if (!FIRESTORE_WRITES_ENABLED) {
+    readOnlyView.clear();
+    remote.forEach((t) => readOnlyView.set(t.id, t));
+    notifySubscribers(sortTrades([...readOnlyView.values()]));
+    return;
+  }
+  const pendingIds = new Set(Object.keys(getPending()));
+  const merged = sortTrades(sanitizeActiveTrades(mergeRemoteTrades(remote, loadLocalTrades(), Date.now(), pendingIds)));
+  safeSetLocalStorage(LOCAL_STORAGE_KEY, JSON.stringify(merged));
+  notifySubscribers(merged);
+  if (pendingIds.size) flushPendingWrites().catch(() => {});
+}
+
+function applyChanges(changed: AutomatedTradeRecord[]): void {
+  if (!FIRESTORE_WRITES_ENABLED) {
+    changed.forEach((t) => readOnlyView.set(t.id, t));
+    notifySubscribers(sortTrades([...readOnlyView.values()]));
+    return;
+  }
+  const pendingIds = new Set(Object.keys(getPending()));
+  const local = loadLocalTrades();
+  const byId = new Map(local.map((t, i) => [t.id, i]));
+  for (const r of changed) {
+    const i = byId.get(r.id);
+    if (i === undefined) local.push(r);
+    else local[i] = pickTrade(r, local[i], pendingIds);
+  }
+  const merged = sortTrades(sanitizeActiveTrades(local));
+  safeSetLocalStorage(LOCAL_STORAGE_KEY, JSON.stringify(merged));
+  notifySubscribers(merged);
+  if (pendingIds.size) flushPendingWrites().catch(() => {});
+}
+
+let stopListener: (() => void) | null = null;
+let renewTimer: ReturnType<typeof setTimeout> | null = null;
+let retryTimer: ReturnType<typeof setTimeout> | null = null;
+let syncGeneration = 0;
+
+function stopSync(): void {
+  syncGeneration++;
+  stopListener?.();
+  stopListener = null;
+  if (renewTimer) clearTimeout(renewTimer);
+  if (retryTimer) clearTimeout(retryTimer);
+  renewTimer = retryTimer = null;
+}
+
+function scheduleRetry(): void {
+  if (retryTimer || subscribers.size === 0) return;
+  retryTimer = setTimeout(() => {
+    retryTimer = null;
+    if (subscribers.size > 0) startSync().catch(() => {});
+  }, SYNC_RETRY_MS);
+}
+
+async function startSync(): Promise<void> {
+  stopSync();
+  if (isQuotaBlocked()) { scheduleRetry(); return; }
+  const gen = syncGeneration;
+  const now = Date.now();
+  let cursor = Number(safeGetLocalStorage(SYNC_CURSOR_KEY)) || 0;
+  const lastFull = Number(safeGetLocalStorage(FULL_SYNC_AT_KEY)) || 0;
+  const hasSaved = safeGetLocalStorage(LOCAL_STORAGE_KEY) !== null;
+  const needFull = !FIRESTORE_WRITES_ENABLED || !hasSaved || !cursor || now - lastFull > FULL_SYNC_EVERY_MS;
+
+  if (needFull) {
+    try {
+      const snap = await withTimeout(getDocsFromServer(collection(db, TRADES_COLLECTION)), 15_000);
+      if (gen !== syncGeneration) return;
+      const remote: AutomatedTradeRecord[] = [];
+      snap.forEach((d) => remote.push(fromDoc(d.data())));
+      reportFirestoreResult();
+      if (!firstSnapshotAt) firstSnapshotAt = Date.now();
+      applyFullList(remote);
+      cursor = now;
+      safeSetLocalStorage(SYNC_CURSOR_KEY, String(cursor));
+      safeSetLocalStorage(FULL_SYNC_AT_KEY, String(now));
+    } catch (err) {
+      if (gen !== syncGeneration) return;
+      handleSyncError(err);
+      scheduleRetry();
+      return;
+    }
+  }
+
+  const since = Timestamp.fromMillis(Math.max(0, cursor - CURSOR_MARGIN_MS));
+  const q = query(collection(db, TRADES_COLLECTION), where('updatedAt', '>', since));
+  stopListener = onSnapshot(q, (snapshot) => {
+    // Offline, the SDK can answer from its own cache. That is not the
+    // database's answer, so it must not mark this copy as synced.
+    if (snapshot.metadata?.fromCache && !firstSnapshotAt) return;
+    reportFirestoreResult();
+    if (!firstSnapshotAt) firstSnapshotAt = Date.now();
+    const changed: AutomatedTradeRecord[] = [];
+    let newest = cursor;
+    snapshot.docChanges().forEach((c) => {
+      if (c.type === 'removed') return;
+      const data = c.doc.data();
+      newest = Math.max(newest, updatedAtMs(data));
+      changed.push(fromDoc(data));
+    });
+    if (newest > cursor) {
+      cursor = newest;
+      safeSetLocalStorage(SYNC_CURSOR_KEY, String(cursor));
+    }
+    if (changed.length) applyChanges(changed);
+  }, (err) => {
+    stopListener = null;
+    handleSyncError(err);
+    scheduleRetry();
+  });
+  renewTimer = setTimeout(() => { if (subscribers.size > 0) startSync().catch(() => {}); }, LISTENER_RENEW_MS);
+}
+
 /**
- * Subscribes to real-time trade feed updates (Firestore or LocalStorage)
+ * Subscribes to the trade list. The first subscriber starts the one shared
+ * Firestore sync; later ones join it; the last to leave stops it.
  */
 export function subscribeToAutomatedTrades(callback: (trades: AutomatedTradeRecord[]) => void): () => void {
+  const first = subscribers.size === 0;
   subscribers.add(callback);
   if (!subscribedAt) subscribedAt = Date.now();
 
   // Shown at once so the screen is not empty, but not acted on until
   // Firestore answers (isTradeListAuthoritative).
-  fetchAutomatedTrades(false).then((t) => callback(t)).catch(console.error);
+  const saved = !FIRESTORE_WRITES_ENABLED && readOnlyView.size
+    ? sortTrades([...readOnlyView.values()])
+    : sortTrades(loadLocalTrades());
+  Promise.resolve().then(() => callback(saved));
 
-  // Firestore real-time listener if available and quota not exceeded
-  let unsubscribeFirestore: (() => void) | null = null;
-  if (!isQuotaBlocked()) {
-    try {
-      const colRef = collection(db, TRADES_COLLECTION);
-      unsubscribeFirestore = onSnapshot(colRef, (snapshot) => {
-        // Offline, the SDK can deliver a snapshot from its own (possibly empty)
-        // cache. That is not the database's answer: merging it would drop
-        // every saved trade.
-        if (snapshot.metadata?.fromCache && !firstSnapshotAt) return;
-        reportFirestoreResult();   // a delivered snapshot means reads are working
-        if (!firstSnapshotAt) firstSnapshotAt = Date.now();
-        {
-          const trades: AutomatedTradeRecord[] = [];
-          snapshot.forEach((docSnap) => trades.push(docSnap.data() as AutomatedTradeRecord));
-          // Read-only copies keep their own history (their changes never
-          // reach Firestore), so only the display follows the snapshot.
-          if (!FIRESTORE_WRITES_ENABLED) {
-            callback(sortTrades(sanitizeActiveTrades(trades)));
-            return;
-          }
-          const pendingIds = new Set(Object.keys(getPending()));
-          const merged = sortTrades(sanitizeActiveTrades(mergeRemoteTrades(trades, loadLocalTrades(), Date.now(), pendingIds)));
-          safeSetLocalStorage(LOCAL_STORAGE_KEY, JSON.stringify(merged));
-          notifySubscribers(merged);
-          if (pendingIds.size) flushPendingWrites().catch(() => {});
-        }
-      }, (err) => {
-        reportFirestoreResult(err);
-        const msg = err instanceof Error ? err.message : String(err);
-        if (msg.toLowerCase().includes('resource-exhausted') || msg.toLowerCase().includes('quota')) {
-          markQuotaExceeded();
-        }
-        if (unsubscribeFirestore) {
-          unsubscribeFirestore();
-          unsubscribeFirestore = null;
-        }
-        console.warn('Firestore subscription fallback to local events:', err);
-      });
-    } catch {}
-  }
+  if (first) startSync().catch(console.error);
 
-  // LocalStorage cross-tab sync listener
+  // Other tabs of this browser
   const handleStorage = (e: StorageEvent) => {
     if (e.key === LOCAL_STORAGE_KEY && e.newValue) {
       try {
         const parsed = JSON.parse(e.newValue);
-        if (Array.isArray(parsed)) {
-          const sanitized = sanitizeActiveTrades(parsed);
-          callback(sanitized);
-        }
+        if (Array.isArray(parsed)) callback(sanitizeActiveTrades(parsed));
       } catch {}
     }
   };
-  if (typeof window !== 'undefined') {
-    window.addEventListener('storage', handleStorage);
-  }
+  if (typeof window !== 'undefined') window.addEventListener('storage', handleStorage);
 
   return () => {
     subscribers.delete(callback);
-    if (unsubscribeFirestore) unsubscribeFirestore();
-    if (typeof window !== 'undefined') {
-      window.removeEventListener('storage', handleStorage);
-    }
+    if (subscribers.size === 0) stopSync();
+    if (typeof window !== 'undefined') window.removeEventListener('storage', handleStorage);
   };
 }
 
@@ -532,7 +667,7 @@ export async function executeSimulatedTrade(trade: AutomatedTradeRecord): Promis
     setPending(trade.id, 'create');
   } else if (FIRESTORE_WRITES_ENABLED) {
     try {
-      await setDoc(doc(db, TRADES_COLLECTION, trade.id), trade);
+      await setDoc(doc(db, TRADES_COLLECTION, trade.id), stamped(trade));
       reportFirestoreResult();
     } catch (err) {
       reportFirestoreResult(err);
@@ -568,7 +703,7 @@ export async function updateAutomatedTrade(trade: AutomatedTradeRecord, syncToFi
   } else if (FIRESTORE_WRITES_ENABLED && shouldSync) {
     try {
       const docRef = doc(db, TRADES_COLLECTION, trade.id);
-      await updateDoc(docRef, { ...trade });
+      await updateDoc(docRef, stamped(trade));
       setPending(trade.id, null);
     } catch (err) {
       reportFirestoreResult(err);
@@ -801,8 +936,10 @@ export const resetTradesToDefault = resetAutomatedTrades;
 /**
  * Loads all completed historical trades from the trade records service
  */
-export async function fetchCompletedTrades(forceNetwork: boolean = false): Promise<AutomatedTradeRecord[]> {
-  const allTrades = await fetchAutomatedTrades(forceNetwork);
+// forceNetwork is ignored: the shared listener keeps the saved list current,
+// and a forced read of the whole collection cost one read per trade ever made.
+export async function fetchCompletedTrades(_forceNetwork: boolean = false): Promise<AutomatedTradeRecord[]> {
+  const allTrades = await fetchAutomatedTrades(false);
   return allTrades.filter((t) => t.status !== 'OPEN');
 }
 export const loadCompletedTrades = fetchCompletedTrades;

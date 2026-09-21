@@ -198,6 +198,38 @@ record; the browser's saved copy is only a working cache of it:**
   both pass; the worker plus stand-down browsers keeps that to one writer.) Reads can be slow
 to start; the status strip shows whether Firestore has actually answered.
 
+### Firebase free tier
+
+The free tier allows 50,000 reads, 20,000 writes and 1 GiB of storage a day,
+for **one database per project** (the first one created). Every document a
+query returns counts as a read, so the app reads the history as little as
+possible:
+
+- **One listener per copy**, shared by every view, asking only for trades
+  changed since the last sync (each write stamps `updatedAt` with the
+  server's clock).
+- **The whole history is read** only by a copy with nothing saved (a new
+  browser, a server start) and once a week (to catch deletions). A reload or
+  reopening reads nothing up front.
+- Anything that edits trades outside the app must set `updatedAt`, or copies
+  only see the change at their weekly full read.
+
+Expected use at about 70 trades a day with the worker running:
+
+| | per day | free limit |
+|---|---|---|
+| Writes: opens, exit-ladder events, 10-minute checkpoints of ~10 open trades | ~1,700 | 20,000 |
+| Reads: worker listener + open-slot check before each deploy | ~2,400 | |
+| Reads: each browser tab left open all day | ~1,700 | |
+| Reads: each full history read (server start, new browser, weekly) | 1 per trade stored (341 now, ~2,000 more a month) | |
+| **Typical total** (worker + two open tabs, no restarts) | **~6,000** | 50,000 |
+
+Storage is about 3 KB per trade, around 6 MB a month. Usage is shown in the
+Firebase console under Firestore > Usage. If the quota is reached, browsers
+keep working from their saved list and queue their writes; the 24/7 worker
+pauses rather than trade on a list it cannot confirm. Both resume once the
+quota resets (midnight Pacific).
+
 > **Every copy of the app shares the production database**, including a local
 > dev server. For development or testing, put `VITE_FIRESTORE_WRITES=off` in
 > `.env.local`: the app still loads the shared history, but everything it does

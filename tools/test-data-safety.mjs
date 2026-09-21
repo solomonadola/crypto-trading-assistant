@@ -24,7 +24,9 @@ const FAKE_FIRESTORE = `
   export const onSnapshot = () => () => {};
   export const query = (c) => c;
   export const where = () => ({});
-  export const getDocsFromServer = async () => ({ empty: true, docs: [], forEach() {} });
+  export const getDocsFromServer = async () => ({ empty: true, docs: [], forEach() {}, docChanges: () => [] });
+  export const serverTimestamp = () => ({ serverTs: true });
+  export const Timestamp = { fromMillis: (ms) => ({ ms }) };
 `;
 
 async function load(writesOff) {
