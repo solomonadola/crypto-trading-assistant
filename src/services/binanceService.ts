@@ -107,46 +107,45 @@ interface AssetDefinition {
   launch_year: number;
   consensus: string;
   description: string;
-  basePrice: number;
 }
 
 export const TOP_ASSETS: AssetDefinition[] = [
-  { id: 'bitcoin', symbol: 'BTC', name: 'Bitcoin', category: 'Layer 1', image: 'https://assets.coingecko.com/coins/images/1/large/bitcoin.png', launch_year: 2009, consensus: 'Proof of Work', description: 'Decentralized digital currency and primary store of value.', basePrice: 80400 },
-  { id: 'ethereum', symbol: 'ETH', name: 'Ethereum', category: 'Layer 1', image: 'https://assets.coingecko.com/coins/images/279/large/ethereum.png', launch_year: 2015, consensus: 'Proof of Stake', description: 'Global decentralized computing platform for smart contracts and dApps.', basePrice: 3150 },
-  { id: 'solana', symbol: 'SOL', name: 'Solana', category: 'Layer 1', image: 'https://assets.coingecko.com/coins/images/4128/large/solana.png', launch_year: 2020, consensus: 'Proof of History', description: 'High-throughput Layer 1 blockchain optimized for sub-second execution and low fees.', basePrice: 108.5 },
-  { id: 'binancecoin', symbol: 'BNB', name: 'BNB', category: 'Layer 1', image: 'https://assets.coingecko.com/coins/images/825/large/bnb-icon2_2x.png', launch_year: 2017, consensus: 'Proof of Staked Authority', description: 'Native utility ecosystem asset powering the BNB Chain network.', basePrice: 580 },
-  { id: 'ripple', symbol: 'XRP', name: 'XRP', category: 'Layer 1', image: 'https://assets.coingecko.com/coins/images/44/large/xrp-symbol-white-128.png', launch_year: 2012, consensus: 'Federated Byzantine Agreement', description: 'Real-time gross settlement system for cross-border institutional remittances.', basePrice: 0.58 },
-  { id: 'dogecoin', symbol: 'DOGE', name: 'Dogecoin', category: 'Meme', image: 'https://assets.coingecko.com/coins/images/5/large/dogecoin.png', launch_year: 2013, consensus: 'Proof of Work', description: 'Peer-to-peer open-source cryptocurrency and global retail liquidity sentiment barometer.', basePrice: 0.085 },
-  { id: 'cardano', symbol: 'ADA', name: 'Cardano', category: 'Layer 1', image: 'https://assets.coingecko.com/coins/images/975/large/cardano.png', launch_year: 2017, consensus: 'Ouroboros PoS', description: 'Evidence-based Layer 1 blockchain built on peer-reviewed academic research.', basePrice: 0.36 },
-  { id: 'avalanche-2', symbol: 'AVAX', name: 'Avalanche', category: 'Layer 1', image: 'https://assets.coingecko.com/coins/images/12559/large/Avalanche_Circle_RedWhite_Trans.png', launch_year: 2020, consensus: 'Avalanche Consensus', description: 'Subnet-driven Layer 1 smart contract platform with sub-second finality.', basePrice: 9.75 },
-  { id: 'chainlink', symbol: 'LINK', name: 'Chainlink', category: 'Oracle', image: 'https://assets.coingecko.com/coins/images/877/large/chainlink-new-logo.png', launch_year: 2017, consensus: 'Decentralized Oracle Network', description: 'Industry standard decentralized oracle network connecting smart contracts to off-chain data.', basePrice: 11.95 },
-  { id: 'sui', symbol: 'SUI', name: 'Sui', category: 'Layer 1', image: 'https://assets.coingecko.com/coins/images/26375/large/sui_asset.jpeg', launch_year: 2023, consensus: 'Mysticeti / Narwhal', description: 'Object-centric high-throughput Layer 1 designed by former Meta engineers.', basePrice: 0.82 },
-  { id: 'near', symbol: 'NEAR', name: 'NEAR Protocol', category: 'Layer 1', image: 'https://assets.coingecko.com/coins/images/10365/large/near.png', launch_year: 2020, consensus: 'Nightshade PoS', description: 'Sharded Layer 1 blockchain designed for user usability and consumer AI scaling.', basePrice: 4.8 },
-  { id: 'aptos', symbol: 'APT', name: 'Aptos', category: 'Layer 1', image: 'https://assets.coingecko.com/coins/images/26455/large/aptos_round.png', launch_year: 2022, consensus: 'AptosBFT', description: 'Layer 1 utilizing the Move programming language for parallel execution.', basePrice: 8.5 },
-  { id: 'uniswap', symbol: 'UNI', name: 'Uniswap', category: 'DeFi', image: 'https://assets.coingecko.com/coins/images/12504/large/uniswap-uni.png', launch_year: 2018, consensus: 'Ethereum ERC-20', description: 'Leading decentralized automated market maker (AMM) protocol.', basePrice: 7.2 },
-  { id: 'render-token', symbol: 'RENDER', name: 'Render', category: 'AI & Data', image: 'https://assets.coingecko.com/coins/images/11636/large/rndr.png', launch_year: 2020, consensus: 'Solana SPL', description: 'Decentralized GPU rendering and AI compute distribution network.', basePrice: 1.51 },
-  { id: 'injective-protocol', symbol: 'INJ', name: 'Injective', category: 'DeFi', image: 'https://assets.coingecko.com/coins/images/12882/large/Secondary_Symbol.png', launch_year: 2020, consensus: 'Tendermint PoS', description: 'Interoperable Layer 1 specifically optimized for decentralized finance orderbooks.', basePrice: 7.85 },
-  { id: 'pepe', symbol: 'PEPE', name: 'Pepe', category: 'Meme', image: 'https://assets.coingecko.com/coins/images/29850/large/pepe-token.png', launch_year: 2023, consensus: 'Ethereum ERC-20', description: 'High-beta deflationary retail momentum meme token traded actively on Binance Futures.', basePrice: 0.0000085 },
-  { id: 'arbitrum', symbol: 'ARB', name: 'Arbitrum', category: 'Layer 2', image: 'https://assets.coingecko.com/coins/images/16547/large/arbitrum_logo.png', launch_year: 2023, consensus: 'Optimistic Rollup', description: 'Leading Ethereum Layer 2 scaling suite using optimistic rollups with deep liquidity.', basePrice: 0.52 },
-  { id: 'optimism', symbol: 'OP', name: 'Optimism', category: 'Layer 2', image: 'https://assets.coingecko.com/coins/images/25244/large/Optimism.png', launch_year: 2022, consensus: 'OP Stack Rollup', description: 'Collective governance and scalability platform powering the Superchain ecosystem.', basePrice: 1.45 },
-  { id: 'celestia', symbol: 'TIA', name: 'Celestia', category: 'Infrastructure', image: 'https://assets.coingecko.com/coins/images/31967/large/tia.png', launch_year: 2023, consensus: 'Data Availability Tendermint', description: 'First modular blockchain network that securely scales data availability for rollups.', basePrice: 5.15 },
-  { id: 'fetch-ai', symbol: 'FET', name: 'Artificial Superintelligence', category: 'AI & Data', image: 'https://assets.coingecko.com/coins/images/5681/large/Fetch.jpg', launch_year: 2019, consensus: 'Cosmos PoS', description: 'Decentralized autonomous AI agent compute alliance and machine learning protocol.', basePrice: 1.25 },
-  { id: 'fantom', symbol: 'FTM', name: 'Sonic (Fantom)', category: 'Layer 1', image: 'https://assets.coingecko.com/coins/images/4001/large/Fantom_round.png', launch_year: 2018, consensus: 'Lachesis aBFT', description: 'Ultra-fast sub-second DAG consensus Layer 1 transitioning to Sonic execution.', basePrice: 0.68 },
-  { id: 'sei-network', symbol: 'SEI', name: 'Sei', category: 'Layer 1', image: 'https://assets.coingecko.com/coins/images/28205/large/Sei_Logo_-_Transparent.png', launch_year: 2023, consensus: 'Twin-Turbo Consensus', description: 'Sector-specific Layer 1 blockchain specialized for trading exchanges and order books.', basePrice: 0.38 },
-  { id: 'kaspa', symbol: 'KAS', name: 'Kaspa', category: 'Layer 1', image: 'https://assets.coingecko.com/coins/images/28898/large/kaspa-icon-exchanges.png', launch_year: 2021, consensus: 'GHOSTDAG PoW', description: 'Instant blockDAG proof-of-work digital silver cryptocurrency with high throughput.', basePrice: 0.125 },
-  { id: 'aave', symbol: 'AAVE', name: 'Aave', category: 'DeFi', image: 'https://assets.coingecko.com/coins/images/12645/large/AAVE.png', launch_year: 2020, consensus: 'Ethereum ERC-20', description: 'Pioneering non-custodial decentralized liquidity market protocol and lending standard.', basePrice: 155.0 },
-  { id: 'dogwifhat', symbol: 'WIF', name: 'dogwifhat', category: 'Meme', image: 'https://assets.coingecko.com/coins/images/33566/large/dogwifhat.jpg', launch_year: 2023, consensus: 'Solana SPL', description: 'Top Solana-native community momentum asset with heavy Binance perpetual futures liquidity.', basePrice: 2.35 },
-  { id: 'shiba-inu', symbol: 'SHIB', name: 'Shiba Inu', category: 'Meme', image: 'https://assets.coingecko.com/coins/images/11939/large/shiba.png', launch_year: 2020, consensus: 'Ethereum ERC-20', description: 'Global decentralized meme ecosystem featuring Shibarium Layer 2 and DEX utility.', basePrice: 0.000018 },
-  { id: 'polkadot', symbol: 'DOT', name: 'Polkadot', category: 'Layer 1', image: 'https://assets.coingecko.com/coins/images/12171/large/polkadot.png', launch_year: 2020, consensus: 'Nominated PoS', description: 'Heterogeneous multi-chain architecture connecting specialized parachains.', basePrice: 4.35 },
-  { id: 'lido-dao', symbol: 'LDO', name: 'Lido DAO', category: 'DeFi', image: 'https://assets.coingecko.com/coins/images/13573/large/Lido_DAO.png', launch_year: 2020, consensus: 'Ethereum ERC-20', description: 'Liquid staking protocol providing capital efficiency for proof-of-stake blockchains.', basePrice: 1.15 },
-  { id: 'bittensor', symbol: 'TAO', name: 'Bittensor', category: 'AI & Data', image: 'https://assets.coingecko.com/coins/images/30349/large/Bittensor_Token_Logo.png', launch_year: 2023, consensus: 'Subtensor Yuma', description: 'Decentralized open-source machine learning intelligence network with high volatility beta.', basePrice: 510.0 },
-  { id: 'ethena', symbol: 'ENA', name: 'Ethena', category: 'DeFi', image: 'https://assets.coingecko.com/coins/images/36528/large/ethena.png', launch_year: 2024, consensus: 'Ethereum ERC-20', description: 'Synthetic dollar protocol and delta-neutral internet bond ecosystem.', basePrice: 0.55 },
-  { id: 'bonk', symbol: 'BONK', name: 'Bonk', category: 'Meme', image: 'https://assets.coingecko.com/coins/images/28600/large/bonk.jpg', launch_year: 2022, consensus: 'Solana SPL', description: 'High-velocity Solana-native dog coin with prominent Binance perpetual volume.', basePrice: 0.000022 },
-  { id: 'jupiter-exchange-solana', symbol: 'JUP', name: 'Jupiter', category: 'DeFi', image: 'https://assets.coingecko.com/coins/images/34188/large/jup.png', launch_year: 2024, consensus: 'Solana SPL', description: 'Dominant decentralized liquidity aggregator and perpetual exchange on Solana.', basePrice: 0.88 },
-  { id: 'popcat', symbol: 'POPCAT', name: 'Popcat', category: 'Meme', image: 'https://assets.coingecko.com/coins/images/33760/large/popcat.png', launch_year: 2023, consensus: 'Solana SPL', description: 'Top trending meme asset on Binance Futures with high percentage swings.', basePrice: 1.12 },
-  { id: 'blockstack', symbol: 'STX', name: 'Stacks', category: 'Layer 2', image: 'https://assets.coingecko.com/coins/images/2069/large/Stacks_Logo_Primary_Color_Purple.png', launch_year: 2018, consensus: 'Proof of Transfer', description: 'Bitcoin Layer 2 smart contract execution and DeFi settlement layer.', basePrice: 1.75 },
-  { id: 'worldcoin-org', symbol: 'WLD', name: 'Worldcoin', category: 'AI & Data', image: 'https://assets.coingecko.com/coins/images/31062/large/worldcoin.png', launch_year: 2023, consensus: 'Optimism OP Stack', description: 'Global proof-of-personhood biometric and decentralized AI verification network.', basePrice: 1.85 },
-  { id: 'floki', symbol: 'FLOKI', name: 'FLOKI', category: 'Meme', image: 'https://assets.coingecko.com/coins/images/16746/large/FLOKI.png', launch_year: 2021, consensus: 'Ethereum ERC-20', description: 'Utility meme token powering Valhalla metaverse, crypto education, and DeFi.', basePrice: 0.00014 }
+  { id: 'bitcoin', symbol: 'BTC', name: 'Bitcoin', category: 'Layer 1', image: 'https://assets.coingecko.com/coins/images/1/large/bitcoin.png', launch_year: 2009, consensus: 'Proof of Work', description: 'Decentralized digital currency and primary store of value.' },
+  { id: 'ethereum', symbol: 'ETH', name: 'Ethereum', category: 'Layer 1', image: 'https://assets.coingecko.com/coins/images/279/large/ethereum.png', launch_year: 2015, consensus: 'Proof of Stake', description: 'Global decentralized computing platform for smart contracts and dApps.' },
+  { id: 'solana', symbol: 'SOL', name: 'Solana', category: 'Layer 1', image: 'https://assets.coingecko.com/coins/images/4128/large/solana.png', launch_year: 2020, consensus: 'Proof of History', description: 'High-throughput Layer 1 blockchain optimized for sub-second execution and low fees.' },
+  { id: 'binancecoin', symbol: 'BNB', name: 'BNB', category: 'Layer 1', image: 'https://assets.coingecko.com/coins/images/825/large/bnb-icon2_2x.png', launch_year: 2017, consensus: 'Proof of Staked Authority', description: 'Native utility ecosystem asset powering the BNB Chain network.' },
+  { id: 'ripple', symbol: 'XRP', name: 'XRP', category: 'Layer 1', image: 'https://assets.coingecko.com/coins/images/44/large/xrp-symbol-white-128.png', launch_year: 2012, consensus: 'Federated Byzantine Agreement', description: 'Real-time gross settlement system for cross-border institutional remittances.' },
+  { id: 'dogecoin', symbol: 'DOGE', name: 'Dogecoin', category: 'Meme', image: 'https://assets.coingecko.com/coins/images/5/large/dogecoin.png', launch_year: 2013, consensus: 'Proof of Work', description: 'Peer-to-peer open-source cryptocurrency and global retail liquidity sentiment barometer.' },
+  { id: 'cardano', symbol: 'ADA', name: 'Cardano', category: 'Layer 1', image: 'https://assets.coingecko.com/coins/images/975/large/cardano.png', launch_year: 2017, consensus: 'Ouroboros PoS', description: 'Evidence-based Layer 1 blockchain built on peer-reviewed academic research.' },
+  { id: 'avalanche-2', symbol: 'AVAX', name: 'Avalanche', category: 'Layer 1', image: 'https://assets.coingecko.com/coins/images/12559/large/Avalanche_Circle_RedWhite_Trans.png', launch_year: 2020, consensus: 'Avalanche Consensus', description: 'Subnet-driven Layer 1 smart contract platform with sub-second finality.' },
+  { id: 'chainlink', symbol: 'LINK', name: 'Chainlink', category: 'Oracle', image: 'https://assets.coingecko.com/coins/images/877/large/chainlink-new-logo.png', launch_year: 2017, consensus: 'Decentralized Oracle Network', description: 'Industry standard decentralized oracle network connecting smart contracts to off-chain data.' },
+  { id: 'sui', symbol: 'SUI', name: 'Sui', category: 'Layer 1', image: 'https://assets.coingecko.com/coins/images/26375/large/sui_asset.jpeg', launch_year: 2023, consensus: 'Mysticeti / Narwhal', description: 'Object-centric high-throughput Layer 1 designed by former Meta engineers.' },
+  { id: 'near', symbol: 'NEAR', name: 'NEAR Protocol', category: 'Layer 1', image: 'https://assets.coingecko.com/coins/images/10365/large/near.png', launch_year: 2020, consensus: 'Nightshade PoS', description: 'Sharded Layer 1 blockchain designed for user usability and consumer AI scaling.' },
+  { id: 'aptos', symbol: 'APT', name: 'Aptos', category: 'Layer 1', image: 'https://assets.coingecko.com/coins/images/26455/large/aptos_round.png', launch_year: 2022, consensus: 'AptosBFT', description: 'Layer 1 utilizing the Move programming language for parallel execution.' },
+  { id: 'uniswap', symbol: 'UNI', name: 'Uniswap', category: 'DeFi', image: 'https://assets.coingecko.com/coins/images/12504/large/uniswap-uni.png', launch_year: 2018, consensus: 'Ethereum ERC-20', description: 'Leading decentralized automated market maker (AMM) protocol.' },
+  { id: 'render-token', symbol: 'RENDER', name: 'Render', category: 'AI & Data', image: 'https://assets.coingecko.com/coins/images/11636/large/rndr.png', launch_year: 2020, consensus: 'Solana SPL', description: 'Decentralized GPU rendering and AI compute distribution network.' },
+  { id: 'injective-protocol', symbol: 'INJ', name: 'Injective', category: 'DeFi', image: 'https://assets.coingecko.com/coins/images/12882/large/Secondary_Symbol.png', launch_year: 2020, consensus: 'Tendermint PoS', description: 'Interoperable Layer 1 specifically optimized for decentralized finance orderbooks.' },
+  { id: 'pepe', symbol: 'PEPE', name: 'Pepe', category: 'Meme', image: 'https://assets.coingecko.com/coins/images/29850/large/pepe-token.png', launch_year: 2023, consensus: 'Ethereum ERC-20', description: 'High-beta deflationary retail momentum meme token traded actively on Binance Futures.' },
+  { id: 'arbitrum', symbol: 'ARB', name: 'Arbitrum', category: 'Layer 2', image: 'https://assets.coingecko.com/coins/images/16547/large/arbitrum_logo.png', launch_year: 2023, consensus: 'Optimistic Rollup', description: 'Leading Ethereum Layer 2 scaling suite using optimistic rollups with deep liquidity.' },
+  { id: 'optimism', symbol: 'OP', name: 'Optimism', category: 'Layer 2', image: 'https://assets.coingecko.com/coins/images/25244/large/Optimism.png', launch_year: 2022, consensus: 'OP Stack Rollup', description: 'Collective governance and scalability platform powering the Superchain ecosystem.' },
+  { id: 'celestia', symbol: 'TIA', name: 'Celestia', category: 'Infrastructure', image: 'https://assets.coingecko.com/coins/images/31967/large/tia.png', launch_year: 2023, consensus: 'Data Availability Tendermint', description: 'First modular blockchain network that securely scales data availability for rollups.' },
+  { id: 'fetch-ai', symbol: 'FET', name: 'Artificial Superintelligence', category: 'AI & Data', image: 'https://assets.coingecko.com/coins/images/5681/large/Fetch.jpg', launch_year: 2019, consensus: 'Cosmos PoS', description: 'Decentralized autonomous AI agent compute alliance and machine learning protocol.' },
+  { id: 'fantom', symbol: 'FTM', name: 'Sonic (Fantom)', category: 'Layer 1', image: 'https://assets.coingecko.com/coins/images/4001/large/Fantom_round.png', launch_year: 2018, consensus: 'Lachesis aBFT', description: 'Ultra-fast sub-second DAG consensus Layer 1 transitioning to Sonic execution.' },
+  { id: 'sei-network', symbol: 'SEI', name: 'Sei', category: 'Layer 1', image: 'https://assets.coingecko.com/coins/images/28205/large/Sei_Logo_-_Transparent.png', launch_year: 2023, consensus: 'Twin-Turbo Consensus', description: 'Sector-specific Layer 1 blockchain specialized for trading exchanges and order books.' },
+  { id: 'kaspa', symbol: 'KAS', name: 'Kaspa', category: 'Layer 1', image: 'https://assets.coingecko.com/coins/images/28898/large/kaspa-icon-exchanges.png', launch_year: 2021, consensus: 'GHOSTDAG PoW', description: 'Instant blockDAG proof-of-work digital silver cryptocurrency with high throughput.' },
+  { id: 'aave', symbol: 'AAVE', name: 'Aave', category: 'DeFi', image: 'https://assets.coingecko.com/coins/images/12645/large/AAVE.png', launch_year: 2020, consensus: 'Ethereum ERC-20', description: 'Pioneering non-custodial decentralized liquidity market protocol and lending standard.' },
+  { id: 'dogwifhat', symbol: 'WIF', name: 'dogwifhat', category: 'Meme', image: 'https://assets.coingecko.com/coins/images/33566/large/dogwifhat.jpg', launch_year: 2023, consensus: 'Solana SPL', description: 'Top Solana-native community momentum asset with heavy Binance perpetual futures liquidity.' },
+  { id: 'shiba-inu', symbol: 'SHIB', name: 'Shiba Inu', category: 'Meme', image: 'https://assets.coingecko.com/coins/images/11939/large/shiba.png', launch_year: 2020, consensus: 'Ethereum ERC-20', description: 'Global decentralized meme ecosystem featuring Shibarium Layer 2 and DEX utility.' },
+  { id: 'polkadot', symbol: 'DOT', name: 'Polkadot', category: 'Layer 1', image: 'https://assets.coingecko.com/coins/images/12171/large/polkadot.png', launch_year: 2020, consensus: 'Nominated PoS', description: 'Heterogeneous multi-chain architecture connecting specialized parachains.' },
+  { id: 'lido-dao', symbol: 'LDO', name: 'Lido DAO', category: 'DeFi', image: 'https://assets.coingecko.com/coins/images/13573/large/Lido_DAO.png', launch_year: 2020, consensus: 'Ethereum ERC-20', description: 'Liquid staking protocol providing capital efficiency for proof-of-stake blockchains.' },
+  { id: 'bittensor', symbol: 'TAO', name: 'Bittensor', category: 'AI & Data', image: 'https://assets.coingecko.com/coins/images/30349/large/Bittensor_Token_Logo.png', launch_year: 2023, consensus: 'Subtensor Yuma', description: 'Decentralized open-source machine learning intelligence network with high volatility beta.' },
+  { id: 'ethena', symbol: 'ENA', name: 'Ethena', category: 'DeFi', image: 'https://assets.coingecko.com/coins/images/36528/large/ethena.png', launch_year: 2024, consensus: 'Ethereum ERC-20', description: 'Synthetic dollar protocol and delta-neutral internet bond ecosystem.' },
+  { id: 'bonk', symbol: 'BONK', name: 'Bonk', category: 'Meme', image: 'https://assets.coingecko.com/coins/images/28600/large/bonk.jpg', launch_year: 2022, consensus: 'Solana SPL', description: 'High-velocity Solana-native dog coin with prominent Binance perpetual volume.' },
+  { id: 'jupiter-exchange-solana', symbol: 'JUP', name: 'Jupiter', category: 'DeFi', image: 'https://assets.coingecko.com/coins/images/34188/large/jup.png', launch_year: 2024, consensus: 'Solana SPL', description: 'Dominant decentralized liquidity aggregator and perpetual exchange on Solana.' },
+  { id: 'popcat', symbol: 'POPCAT', name: 'Popcat', category: 'Meme', image: 'https://assets.coingecko.com/coins/images/33760/large/popcat.png', launch_year: 2023, consensus: 'Solana SPL', description: 'Top trending meme asset on Binance Futures with high percentage swings.' },
+  { id: 'blockstack', symbol: 'STX', name: 'Stacks', category: 'Layer 2', image: 'https://assets.coingecko.com/coins/images/2069/large/Stacks_Logo_Primary_Color_Purple.png', launch_year: 2018, consensus: 'Proof of Transfer', description: 'Bitcoin Layer 2 smart contract execution and DeFi settlement layer.' },
+  { id: 'worldcoin-org', symbol: 'WLD', name: 'Worldcoin', category: 'AI & Data', image: 'https://assets.coingecko.com/coins/images/31062/large/worldcoin.png', launch_year: 2023, consensus: 'Optimism OP Stack', description: 'Global proof-of-personhood biometric and decentralized AI verification network.' },
+  { id: 'floki', symbol: 'FLOKI', name: 'FLOKI', category: 'Meme', image: 'https://assets.coingecko.com/coins/images/16746/large/FLOKI.png', launch_year: 2021, consensus: 'Ethereum ERC-20', description: 'Utility meme token powering Valhalla metaverse, crypto education, and DeFi.' }
 ];
 
 // Pairs we have already warned about, so a missing listing logs once, not every 30s.
@@ -166,11 +165,9 @@ export async function fetchLiveMarketCoins(): Promise<CryptoCoin[]> {
     const binancePair = `${asset.symbol}USDT`;
     const ticker = tickers.get(binancePair) || tickers.get(`${asset.symbol}USD`);
 
-    // Skip assets with no live ticker. Previously these fell back to the
-    // hardcoded basePrice with change24h = 0, which made the scanner emit
-    // full signals - and the auto-pilot deploy trades - on a frozen price
-    // that could never move. FTM (migrated to Sonic), KAS and POPCAT are not
-    // listed as USDT spot pairs and hit this path on every scan.
+    // Skip assets with no live ticker. There are zero fallback or hardcoded
+    // prices; if a coin does not trade on Binance International spot, it is
+    // kicked out completely from the universe.
     if (!ticker) {
       if (!warnedMissingPairs.has(binancePair)) {
         warnedMissingPairs.add(binancePair);
@@ -195,7 +192,7 @@ export async function fetchLiveMarketCoins(): Promise<CryptoCoin[]> {
       symbol: asset.symbol.toLowerCase(),
       name: asset.name,
       image: asset.image,
-      current_price: livePrice > 0 ? livePrice : asset.basePrice,
+      current_price: livePrice,
       market_cap: totalVolume * 15,
       market_cap_rank: i + 1,
       fully_diluted_valuation: totalVolume * 18,
@@ -204,7 +201,7 @@ export async function fetchLiveMarketCoins(): Promise<CryptoCoin[]> {
       low_24h: low24h,
       price_change_24h: priceChange,
       price_change_percentage_24h: change24h,
-      circulating_supply: livePrice > 0 ? +(totalVolume / livePrice).toFixed(0) : 1000000,
+      circulating_supply: +(totalVolume / livePrice).toFixed(0),
       total_supply: null,
       max_supply: null,
       ath: high24h * 1.5,
@@ -227,6 +224,8 @@ export async function fetchLiveMarketCoins(): Promise<CryptoCoin[]> {
 
 /**
  * Synchronizes a list of CryptoCoins with Binance live ticker data if available.
+ * If a coin has no active ticker on Binance International or has an invalid/non-positive price,
+ * it is filtered out rather than keeping stale data.
  */
 export async function enrichCoinsWithBinance(coins: CryptoCoin[]): Promise<CryptoCoin[]> {
   if (!coins || coins.length === 0) {
@@ -237,10 +236,11 @@ export async function enrichCoinsWithBinance(coins: CryptoCoin[]): Promise<Crypt
     const tickers = await fetchBinanceTickers();
     if (tickers.size === 0) return coins;
 
-    return coins.map((coin) => {
+    const enriched: CryptoCoin[] = [];
+    for (const coin of coins) {
       const binancePair = `${coin.symbol.toUpperCase()}USDT`;
-      const ticker = tickers.get(binancePair);
-      if (!ticker) return coin;
+      const ticker = tickers.get(binancePair) || tickers.get(`${coin.symbol.toUpperCase()}USD`);
+      if (!ticker) continue;
 
       const livePrice = parseFloat(ticker.lastPrice);
       const change24h = parseFloat(ticker.priceChangePercent);
@@ -248,17 +248,48 @@ export async function enrichCoinsWithBinance(coins: CryptoCoin[]): Promise<Crypt
       const low24h = parseFloat(ticker.lowPrice);
       const totalVolume = parseFloat(ticker.quoteVolume);
 
-      return {
+      if (!(livePrice > 0) || !Number.isFinite(change24h)) {
+        continue;
+      }
+
+      enriched.push({
         ...coin,
-        current_price: !isNaN(livePrice) && livePrice > 0 ? livePrice : coin.current_price,
-        price_change_percentage_24h: !isNaN(change24h) ? change24h : coin.price_change_percentage_24h,
+        current_price: livePrice,
+        price_change_percentage_24h: change24h,
         high_24h: !isNaN(high24h) && high24h > 0 ? high24h : coin.high_24h,
         low_24h: !isNaN(low24h) && low24h > 0 ? low24h : coin.low_24h,
         total_volume: !isNaN(totalVolume) && totalVolume > 0 ? totalVolume : coin.total_volume,
-      };
-    });
+      });
+    }
+    return enriched;
   } catch (err) {
     console.warn('Could not enrich coins with Binance:', err);
     return coins;
   }
+}
+
+/**
+ * Symbol/id -> price for evaluating open trades: the scanned universe first,
+ * then every other Binance USDT ticker so an open trade on a coin outside the
+ * universe still gets a live price. Shared by the browser and the 24/7 worker.
+ */
+export async function buildPriceMap(coins: CryptoCoin[]): Promise<Map<string, number>> {
+  const priceMap = new Map<string, number>();
+  coins.forEach((c) => {
+    if (c.current_price) {
+      priceMap.set(c.symbol.toUpperCase(), c.current_price);
+      priceMap.set(c.id.toLowerCase(), c.current_price);
+    }
+  });
+  try {
+    const tickers = await fetchBinanceTickers();
+    tickers.forEach((t, pair) => {
+      const p = parseFloat(t.lastPrice);
+      if (!isNaN(p) && p > 0) {
+        const sym = pair.replace(/USDT$|USD$/, '').toUpperCase();
+        if (!priceMap.has(sym)) priceMap.set(sym, p);
+      }
+    });
+  } catch {}
+  return priceMap;
 }

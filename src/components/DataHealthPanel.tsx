@@ -88,6 +88,24 @@ export const DataHealthPanel: React.FC<DataHealthPanelProps> = ({ report, onSetE
             Excluding keeps the record in your history but leaves it out of P&amp;L, win rate and every other figure.
             {!FIRESTORE_WRITES_ENABLED && ' Read-only mode: exclusions are saved in this browser only.'}
           </p>
+          {report.criticalCounted > 0 && (
+            <div className="pt-2">
+              <button
+                type="button"
+                disabled={busyId !== null}
+                onClick={async () => {
+                  for (const item of critical) {
+                    if (!item.trade.excludedFromStats) {
+                      await toggle(item.trade, true);
+                    }
+                  }
+                }}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-xs font-semibold text-amber-300 hover:bg-amber-500/20 transition-colors disabled:opacity-50"
+              >
+                Exclude All {report.criticalCounted} Impossible Records
+              </button>
+            </div>
+          )}
         </div>
       </div>
 

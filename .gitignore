@@ -18,3 +18,4 @@ coverage/
 # Generated scanner bundle + vendored esbuild (see tools/build-scanner.mjs).
 tools/_gen/scanner.mjs
 tools/_gen/vendor/
+/server.js

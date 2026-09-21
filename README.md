@@ -14,9 +14,57 @@ to trade. See [Status](#status) before drawing conclusions from its numbers.
 
 ```bash
 bun install          # or npm install
-bun run dev          # http://localhost:3000
+bun run dev          # http://localhost:3000 - the app only; trades while the tab is open
+bun run build        # builds the app (dist/) and the server (server.js)
+bun run start        # http://localhost:3000 - app + 24/7 trading worker
 bun run lint         # type check (tsc --noEmit)
 ```
+
+### 24/7 trading — `server.ts`, `src/worker/tradingWorker.ts`
+
+A web page cannot run while every browser is closed, so trading around the
+clock needs a server. `bun run start` serves the app and runs a worker that
+does, every 30 seconds, what an open tab does: fetch prices, replay any time
+it missed, check stops and targets, and run the auto-pilot with the same
+decision code as the browser (`src/services/autopilotEngine.ts`).
+
+- **Browsers step aside.** A browser that finds a worker on its own server
+  that has completed a tick in the last two minutes only displays: it does
+  not evaluate trades or open new ones, so there are never two writers on the
+  same positions. The status strip shows "24/7 Server Active". If the worker
+  stops ticking, browsers take over again within about 20 seconds.
+- **Restarts lose nothing.** Every open trade carries `lastEvaluatedAt`, saved
+  with it to Firestore at each exit-ladder event and every 10 minutes. After a
+  restart or a sleep, the worker replays each trade's candles from exactly
+  there.
+- **It never trades blind.** No tick runs until the Firestore listener has
+  delivered the trade list, or when prices are more than two minutes old.
+- **Settings:** `TRADING_WORKER=off` serves the app without the worker;
+  `WORKER_AUTOPILOT=off` manages open trades but opens no new ones. A
+  read-only copy (`VITE_FIRESTORE_WRITES=off`, also read from `.env.local`)
+  never starts it.
+- **Endpoints:** `GET /api/status` (worker state and recent log),
+  `GET /api/tick` (run a tick now), `POST /api/autopilot` `{"enabled": bool}`.
+  `/api/autopilot` is unauthenticated and its setting resets on restart.
+
+**Hosting.** The worker needs a process that stays running:
+
+- *VPS / any always-on machine:* `bun run build && bun run start` (e.g. under
+  systemd or pm2). `PORT` sets the port.
+- *Cloud Run (how AI Studio deploys):* by default an instance only gets CPU
+  while it is answering a request and is shut down when idle, so the 30s loop
+  stalls. Either set **minimum instances = 1** with **CPU always allocated**,
+  or have a free uptime pinger (UptimeRobot, Cloud Scheduler) request
+  `/api/tick` every minute. Set **maximum instances = 1** either way: two
+  instances would be two workers trading the same account. After deploying,
+  open `/api/status` on the hosted URL — `workerRunning: true` and a
+  `tickAgeMs` under 60000 mean it is trading.
+- *Static hosting only* (no Node server): there is no worker; the app trades
+  while a tab is open, as before.
+
+Only one worker should run against the database. `bun run dev` never starts
+one; do not leave `bun run start` running locally while a hosted worker is
+live unless `.env.local` has `VITE_FIRESTORE_WRITES=off`.
 
 No environment variables are required. `.env.example` lists `GEMINI_API_KEY`
 and `APP_URL` from the AI Studio template; nothing in `src/` reads them.
@@ -134,7 +182,10 @@ closing the tab or browser, but exist only in that browser, and clearing site
 data deletes them.
 
 Trades are also written to and read from **Firestore**, so every browser
-running the app (local and hosted) shares one trade history. Reads can be slow
+running the app (local and hosted) shares one trade history. Firestore is the
+record: each update it sends replaces the browser's saved copy (keeping only
+fresher prices on open trades), so a correction made anywhere reaches every
+browser. Reads can be slow
 to start; the status strip shows whether Firestore has actually answered.
 
 > **Every copy of the app shares the production database**, including a local
@@ -157,10 +208,10 @@ older position at the current price with $0 P&L; it had done so 18 times.)
 
 ## Status
 
-**Nothing runs while the app is closed.** Prices, stops and targets are only
-checked while the tab is open and in the foreground. On reopening, each open
-position is evaluated once at the current price; whatever happened in between
-is missed. Paper results therefore depend on when the app was open.
+**Without the server, nothing runs while the app is closed.** Served by
+`bun run start` on an always-on host, the worker trades 24/7 (see above).
+Served any other way, prices, stops and targets are checked only while a tab
+is open; on return, the candles missed are replayed.
 
 **The strategy has not shown an edge.** Replaying the real scanner over
 6 months (and checking against 24 more) found that its entries do not beat the
@@ -192,6 +243,7 @@ node tools/test-metrics.mjs                  # metric accuracy check
 node tools/test-catchup.mjs                  # replay of time spent away
 node tools/test-data-safety.mjs              # no forced closes; read-only switch; data health rules
 node tools/test-network.mjs                  # a stalled Binance response cannot hang the refresh
+node tools/test-trading-worker.mjs           # 24/7 worker: no blind trading, restart replay, Firestore merge
 node tools/diagnose-trades.mjs trades.json   # find corrupt records in an exported feed
 ```
 

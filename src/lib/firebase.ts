@@ -19,7 +19,14 @@ export const db = firebaseConfig.firestoreDatabaseId
  * paper trades in the shared history and the old slot clean-up closed two
  * real positions as a result. Use this for any testing or experimentation.
  */
-export const FIRESTORE_WRITES_ENABLED = import.meta.env.VITE_FIRESTORE_WRITES !== 'off';
+let envWrites: string | undefined;
+try {
+  envWrites = import.meta.env.VITE_FIRESTORE_WRITES;
+} catch {
+  envWrites = typeof process !== 'undefined' ? process.env?.VITE_FIRESTORE_WRITES : undefined;
+}
+
+export const FIRESTORE_WRITES_ENABLED = envWrites !== 'off';
 
 if (!FIRESTORE_WRITES_ENABLED) {
   console.info('[Firestore] Read-only mode (VITE_FIRESTORE_WRITES=off): changes stay in this browser.');
@@ -88,19 +95,24 @@ const QUOTA_COOLDOWN_MS = 2 * 60 * 60 * 1000; // 2 hours cooldown when quota is 
 export function markQuotaExceeded(): void {
   try {
     const unblockAt = Date.now() + QUOTA_COOLDOWN_MS;
-    localStorage.setItem(QUOTA_STORAGE_KEY, String(unblockAt));
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(QUOTA_STORAGE_KEY, String(unblockAt));
+    }
   } catch {}
   console.warn('⚠️ [Firebase Quota Guard] Daily quota limit reached. Gracefully operating in offline-resilient local storage mode.');
 }
 
 export function resetQuotaState(): void {
   try {
-    localStorage.removeItem(QUOTA_STORAGE_KEY);
+    if (typeof localStorage !== 'undefined') {
+      localStorage.removeItem(QUOTA_STORAGE_KEY);
+    }
   } catch {}
 }
 
 export function isQuotaBlocked(): boolean {
   try {
+    if (typeof localStorage === 'undefined') return false;
     const raw = localStorage.getItem(QUOTA_STORAGE_KEY);
     if (!raw) return false;
     const unblockAt = parseInt(raw, 10);

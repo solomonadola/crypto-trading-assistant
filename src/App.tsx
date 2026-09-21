@@ -24,6 +24,7 @@ import {
 } from './services/automatedFeedService';
 import { scanLiveMarketEntries, deploySignalToAutomatedFeed } from './services/entryScannerService';
 import { catchUpOpenTrades } from './services/catchUpService';
+import { selectAutoPilotCandidate } from './services/autopilotEngine';
 import { StatusStrip, CatchUpStatus } from './components/StatusStrip';
 import { DataHealthPanel } from './components/DataHealthPanel';
 import { checkDataHealth } from './services/dataHealth';
@@ -36,7 +37,7 @@ import {
   evaluateRecentLossCircuitBreaker,
   getAutoPilotPacingInfo,
 } from './services/marketRegimeService';
-import { enrichCoinsWithBinance, fetchLiveMarketCoins, fetchBinanceTickers, getLastTickerFetchTime } from './services/binanceService';
+import { fetchLiveMarketCoins, buildPriceMap, getLastTickerFetchTime } from './services/binanceService';
 import { getFirestoreHealth } from './lib/firebase';
 import { Zap, CheckCircle2, AlertCircle } from 'lucide-react';
 
@@ -98,6 +99,42 @@ export default function App() {
     }
   });
 
+  // Is a 24/7 server worker trading right now? Only a worker that has
+  // completed a tick in the last two minutes counts. A server that answers but
+  // is not ticking (Cloud Run throttles CPU between requests, a crashed loop,
+  // no Firestore) must not silence the browser, or nothing trades at all.
+  const [serverState, setServerState] = useState<{ active: boolean; lastTickAt?: number | null }>({ active: false });
+  const serverActiveRef = useRef(false);
+  serverActiveRef.current = serverState.active;
+
+  useEffect(() => {
+    let mounted = true;
+    const checkServer = async () => {
+      let next: { active: boolean; lastTickAt?: number | null } = { active: false };
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 5000);
+        try {
+          const res = await fetch('/api/status', { cache: 'no-store', signal: controller.signal });
+          const data = res.ok ? await res.json() : null;
+          const w = data?.worker;
+          if (w?.workerRunning && typeof w.tickAgeMs === 'number' && w.tickAgeMs < 120_000) {
+            next = { active: true, lastTickAt: Date.now() - w.tickAgeMs };
+          }
+        } finally {
+          clearTimeout(timer);
+        }
+      } catch {}
+      if (mounted) setServerState(next);
+    };
+    checkServer();
+    const interval = setInterval(checkServer, 20000);
+    return () => {
+      mounted = false;
+      clearInterval(interval);
+    };
+  }, []);
+
   const handleToggleAutoPilot = useCallback(() => {
     setIsAutoPilot((prev) => {
       const nextVal = !prev;
@@ -105,6 +142,13 @@ export default function App() {
         localStorage.setItem('cryptostudy_autopilot', String(nextVal));
       } catch (e) {
         console.warn('Failed to save autopilot setting:', e);
+      }
+      if (serverState.active) {
+        fetch('/api/autopilot', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: nextVal }),
+        }).catch(() => {});
       }
       showNotification(
         nextVal
@@ -114,7 +158,7 @@ export default function App() {
       );
       return nextVal;
     });
-  }, [showNotification]);
+  }, [serverState.active, showNotification]);
 
   // Subscribe to trade feed (Firestore or LocalStorage)
   useEffect(() => {
@@ -195,28 +239,11 @@ export default function App() {
       // cached prices are older than this refresh, and the status strip should say so.
       setLastPriceUpdateAt(getLastTickerFetchTime() || null);
 
-      // Build price map for trade evaluation
-      const priceMap = new Map<string, number>();
-      enriched.forEach((c) => {
-        if (c.current_price) {
-          priceMap.set(c.symbol.toUpperCase(), c.current_price);
-          priceMap.set(c.id.toLowerCase(), c.current_price);
-        }
-      });
+      // The 24/7 worker is evaluating trades: this copy only displays them.
+      // Evaluating here as well would put two writers on the same positions.
+      if (serverActiveRef.current) return;
 
-      // Also enrich priceMap with full Binance tickers so any non-top-15 open trades (e.g. PEPE, AR, STRK) get live prices
-      try {
-        const tickers = await fetchBinanceTickers();
-        tickers.forEach((t: any, pair: string) => {
-          const p = parseFloat(t.lastPrice);
-          if (!isNaN(p) && p > 0) {
-            const sym = pair.replace(/USDT$|USD$/, '').toUpperCase();
-            if (!priceMap.has(sym)) {
-              priceMap.set(sym, p);
-            }
-          }
-        });
-      } catch {}
+      const priceMap = await buildPriceMap(enriched);
 
       // Catch up on whatever happened while the app was closed or hidden.
       // Without this, a stop crossed while away filled at the price seen on
@@ -391,127 +418,29 @@ export default function App() {
     }
   };
 
-  // Autonomous Auto-Pilot Trigger: Automatically deploy qualified signals when slots are available
-  // Strictly capped to max 10 active trades (10 distinct coins).
-  // Enforces 20-min post-exit cooldown on closed coins.
-  // Enforces max 3 major coins (BTC, ETH, BNB, SOL).
-  // In times of market stall, prioritizes high-beta altcoins over sluggish mega-caps.
+  // Autonomous auto-pilot. The entry decision itself lives in
+  // services/autopilotEngine.ts, shared with the 24/7 server worker so both
+  // make identical choices; only this loop's own guards stay here.
   useEffect(() => {
     if (!isAutoPilot) return;
+    // When the 24/7 server worker is active, the server handles auto-pilot deployments
+    // so the browser and server never trade concurrently.
+    if (serverState.active) return;
     if (isDeployingRef.current) return;
 
-    // Regime gate. Blocks new entries during consolidation lock, a BTC dump,
-    // or a loss-streak cooldown - the conditions under which a sub-ATR stop is
-    // most likely to be hit by noise rather than by the thesis failing.
-    if (AUTOPILOT_CONFIG.enforceRegimeGates && !pacingInfo.isDeployingAllowed) return;
-
-    // Burst guard: one deploy per fresh snapshot, and never faster than
-    // minMsBetweenDeploys. Without this the effect re-fires every 10s (and on
-    // every `trades` change) against a snapshot that only refreshes every 30s,
-    // opening several highly-correlated positions seconds apart.
+    // One deploy per fresh price snapshot: the effect re-fires every 10s (and on
+    // every trades change) against prices that only refresh every 30s.
     if (AUTOPILOT_CONFIG.oneDeployPerSnapshot &&
         lastDeploySnapshotRef.current === snapshotIdRef.current) return;
-    if (Date.now() - lastDeployAtRef.current < AUTOPILOT_CONFIG.minMsBetweenDeploys) return;
 
+    const decision = selectAutoPilotCandidate({
+      signals, trades, bankroll, pacingInfo,
+      now: Date.now(),
+      lastDeployAt: lastDeployAtRef.current,
+    });
+    const qualified = decision.signal;
     const openTrades = trades.filter((t) => t.status === 'OPEN');
-    if (openTrades.length >= AUTOPILOT_CONFIG.maxConcurrentTrades) return;
-    if (!bankroll.canOpenNewTrade) return;
-    if (bankroll.liquidCashUSD < bankroll.trancheSizeUSD) return;
-    if (bankroll.deployedCapitalUSD + bankroll.trancheSizeUSD > bankroll.totalPortfolioValueUSD + 0.05) return;
 
-    const openTradeSymbols = new Set(
-      openTrades.map((t) => t.symbol.toUpperCase())
-    );
-
-    const now = Date.now();
-    // 20-Minute Re-Entry Cooldown Guard: any coin closed within the last 20 mins is barred from Auto-Pilot
-    const cooldownSymbols = new Set(
-      trades
-        .filter((t) => t.status !== 'OPEN' && t.closedAtTimestamp && (now - t.closedAtTimestamp < COIN_REENTRY_COOLDOWN_MS))
-        .map((t) => t.symbol.toUpperCase())
-    );
-
-    // Current open major count (BTC, ETH, BNB, SOL) and meme count (DOGE, PEPE, WIF, BONK, etc.)
-    const openMajorCount = openTrades.filter((t) => MAJOR_COINS.has(t.symbol.toUpperCase())).length;
-    const openMemeCount = openTrades.filter((t) => MEME_COINS.has(t.symbol.toUpperCase())).length;
-
-    // Filter candidates
-    const eligibleCandidates = signals
-      .filter((s) => !openTradeSymbols.has(s.symbol.toUpperCase()))
-      .filter((s) => !cooldownSymbols.has(s.symbol.toUpperCase()))
-      .filter((s) => {
-        const sym = s.symbol.toUpperCase();
-        const isMajor = MAJOR_COINS.has(sym);
-        const isMeme = MEME_COINS.has(sym);
-
-        // Enforce max 3 major coins cap
-        if (isMajor && openMajorCount >= MAX_MAJOR_COIN_SLOTS) {
-          return false;
-        }
-
-        // Enforce max 2 meme coins cap (to prevent sector-wide flush risk)
-        if (isMeme && openMemeCount >= MAX_MEME_COIN_SLOTS) {
-          return false;
-        }
-
-        // Short side disabled. Measured forward returns were negative in both
-        // samples: in-sample t = -2.02 at 5m, and out-of-sample the short leg
-        // collapsed from -38 bps (t = -4.08) to -6.65 bps (t = -1.16), i.e. it
-        // was six months of alts trending, not an edge. See STUDY_A_RESULTS.md.
-        if (!AUTOPILOT_CONFIG.allowShorts && s.direction === 'SHORT') {
-          return false;
-        }
-
-        // Multi-Timeframe Confluence Guard: Auto-Pilot rejects disqualified or weak C-grade setups
-        const confluence = s.timeframeConfluence?.confluenceRating;
-        const alignedCount = s.timeframeConfluence?.alignedCount ?? 3;
-        if (confluence === 'DISQUALIFIED' || confluence === 'C' || alignedCount < 2) {
-          return false;
-        }
-
-        // 1. High conviction triggered setups
-        if (s.status === 'TRIGGERED' && s.score >= AUTOPILOT_CONFIG.minScore) return true;
-        // 2. Strong constructive setups with at least 3 checkpoints confirmed and not blocked
-        if (s.status === 'FORMING' && s.score >= AUTOPILOT_CONFIG.minScore && !s.disqualificationReason) {
-          const passedCount = s.checkpoints.filter((c) => c.passed).length;
-          return passedCount >= 3;
-        }
-        // 3. Staging at support with green reversal
-        if (s.status === 'STAGING_AT_SUPPORT' && s.score >= AUTOPILOT_CONFIG.minScore && s.microConfirmation?.isGreenReversal) {
-          return true;
-        }
-        return false;
-      })
-      .sort((a, b) => {
-        const isMajorA = MAJOR_COINS.has(a.symbol.toUpperCase());
-        const isMajorB = MAJOR_COINS.has(b.symbol.toUpperCase());
-
-        // Multi-Timeframe Confluence Priority: A+ and A setups first
-        const confRankA = a.timeframeConfluence?.confluenceRating === 'A+' ? 2 : a.timeframeConfluence?.confluenceRating === 'A' ? 1 : 0;
-        const confRankB = b.timeframeConfluence?.confluenceRating === 'A+' ? 2 : b.timeframeConfluence?.confluenceRating === 'A' ? 1 : 0;
-        if (confRankB !== confRankA) return confRankB - confRankA;
-
-        // Market Movement Evaluation:
-        // Majors are considered "actively moving" if |24h change| >= 2.5%.
-        // In stalls (<2.5%), high-beta alts & memes are given higher priority to capture larger swings!
-        const aIsVolatileMajor = isMajorA && Math.abs(a.priceChange24hPct || 0) >= 2.5;
-        const bIsVolatileMajor = isMajorB && Math.abs(b.priceChange24hPct || 0) >= 2.5;
-        const aIsStallingMajor = isMajorA && !aIsVolatileMajor;
-        const bIsStallingMajor = isMajorB && !bIsVolatileMajor;
-
-        // Prefer active alts/memes or volatile majors over stalling majors
-        if (!aIsStallingMajor && bIsStallingMajor) return -1;
-        if (aIsStallingMajor && !bIsStallingMajor) return 1;
-
-        // Triggered setups first
-        if (a.status === 'TRIGGERED' && b.status !== 'TRIGGERED') return -1;
-        if (b.status === 'TRIGGERED' && a.status !== 'TRIGGERED') return 1;
-
-        // Higher score first
-        return b.score - a.score;
-      });
-
-    const qualified = eligibleCandidates[0];
 
     if (qualified) {
       isDeployingRef.current = true;
@@ -539,7 +468,7 @@ export default function App() {
           }, 1500);
         });
     }
-  }, [isAutoPilot, autoPilotScanTick, bankroll.canOpenNewTrade, bankroll.activeTradesCount, bankroll.liquidCashUSD, bankroll.trancheSizeUSD, bankroll.deployedCapitalUSD, bankroll.totalPortfolioValueUSD, signals, trades, pacingInfo, showNotification]);
+  }, [isAutoPilot, serverState.active, autoPilotScanTick, bankroll.canOpenNewTrade, bankroll.activeTradesCount, bankroll.liquidCashUSD, bankroll.trancheSizeUSD, bankroll.deployedCapitalUSD, bankroll.totalPortfolioValueUSD, signals, trades, pacingInfo, showNotification]);
 
 
   // Exclude a trade from statistics (or include it again). The record is kept;
@@ -621,6 +550,8 @@ export default function App() {
         lastCatchUp={lastCatchUp}
         suspectRecords={dataHealth.criticalCounted}
         onOpenDataHealth={() => setActiveTab('firebase')}
+        serverActive={serverState.active}
+        lastServerTickAt={serverState.lastTickAt}
       />
 
       {/* Main Content Area */}

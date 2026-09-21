@@ -195,6 +195,12 @@ export interface AutomatedTradeRecord {
 
   exitReason?: string; // Exact trigger or rule that closed the position
   /** Set from the Data Health panel: kept in history, left out of every statistic. */
+  /**
+   * When this open trade was last checked against the market (ms). Travels
+   * with the trade, so whichever copy evaluates it next - a browser or the
+   * 24/7 worker after a restart - replays candles from exactly here.
+   */
+  lastEvaluatedAt?: number;
   excludedFromStats?: boolean;
   excludedReason?: string;
   /** Explanation written when a record was corrected by hand. */

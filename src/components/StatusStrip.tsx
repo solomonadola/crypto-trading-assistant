@@ -19,6 +19,8 @@ interface StatusStripProps {
   /** Impossible-looking records still counted in the statistics. */
   suspectRecords?: number;
   onOpenDataHealth?: () => void;
+  serverActive?: boolean;
+  lastServerTickAt?: number | null;
 }
 
 type Tone = 'good' | 'warn' | 'bad' | 'neutral' | 'info';
@@ -98,7 +100,7 @@ const Item: React.FC<{ tone: Tone; title?: string; className?: string; children:
  * current, why is auto-pilot (not) trading, where is my data actually saved,
  * and what happened while the app was closed.
  */
-export const StatusStrip: React.FC<StatusStripProps> = ({ lastPriceUpdateAt, isRefreshing, pacingInfo, lastCatchUp, suspectRecords = 0, onOpenDataHealth }) => {
+export const StatusStrip: React.FC<StatusStripProps> = ({ lastPriceUpdateAt, isRefreshing, pacingInfo, lastCatchUp, suspectRecords = 0, onOpenDataHealth, serverActive = false, lastServerTickAt = null }) => {
   const [now, setNow] = useState(() => Date.now());
   const [mountedAt] = useState(() => Date.now());
   const [expanded, setExpanded] = useState(false);
@@ -136,8 +138,10 @@ export const StatusStrip: React.FC<StatusStripProps> = ({ lastPriceUpdateAt, isR
   const pacingTone = PACING_TONE[pacingInfo.badgeColor] ?? 'neutral';
 
   let catchUpTone: Tone = 'neutral';
-  let catchUpLabel = 'Checked while open; time away is replayed on return';
-  if (lastCatchUp) {
+  let catchUpLabel = serverActive
+    ? '24/7 background worker active (keeps trading when tab is closed)'
+    : 'Checked while open; time away is replayed on return';
+  if (lastCatchUp && !serverActive) {
     if (lastCatchUp.failedSymbols.length) {
       catchUpTone = 'warn';
       catchUpLabel = `Catch-up incomplete (${lastCatchUp.failedSymbols.join(', ')}), retrying`;
@@ -179,6 +183,22 @@ export const StatusStrip: React.FC<StatusStripProps> = ({ lastPriceUpdateAt, isR
 
         <Item tone={storage.tone} title={storage.detail}>{storage.label}</Item>
 
+        {serverActive ? (
+          <Item
+            tone="good"
+            title="24/7 background trading worker is active on the server. Trades are evaluated and deployed autonomously even when all browser tabs are closed."
+          >
+            24/7 Server Active {lastServerTickAt ? `(Tick ${ago(now - lastServerTickAt)})` : ''}
+          </Item>
+        ) : (
+          <Item
+            tone="neutral"
+            title="In-browser trading mode. Runs while this tab is open in the foreground; time away is replayed on return."
+          >
+            Browser Mode
+          </Item>
+        )}
+
         {suspectRecords > 0 && (
           <button
             type="button"
@@ -193,10 +213,12 @@ export const StatusStrip: React.FC<StatusStripProps> = ({ lastPriceUpdateAt, isR
         )}
 
         <Item
-          tone={catchUpTone}
-          // The default explanation is secondary; on phones show only real results.
-          className={lastCatchUp ? 'inline-flex' : 'hidden sm:inline-flex'}
-          title="Stops and targets are checked while this tab is open. When you come back, the price candles you missed are replayed so nothing is skipped.">
+          tone={serverActive ? 'good' : catchUpTone}
+          className={lastCatchUp || serverActive ? 'inline-flex' : 'hidden sm:inline-flex'}
+          title={serverActive
+            ? "Trading runs 24/7 on the server. When browser tabs close, positions continue to be monitored and auto-pilot continues to deploy."
+            : "Stops and targets are checked while this tab is open. When you come back, the price candles you missed are replayed so nothing is skipped."}
+        >
           {catchUpLabel}
         </Item>
       </div>

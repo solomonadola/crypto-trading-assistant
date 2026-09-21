@@ -95,9 +95,11 @@ function notifySubscribers(trades: AutomatedTradeRecord[]) {
   });
 }
 
+// No window check: the 24/7 server worker installs an in-memory localStorage
+// (src/worker/memoryStorage.ts) so this layer behaves the same in Node.
 function safeGetLocalStorage(key: string): string | null {
   try {
-    if (typeof window !== 'undefined' && typeof localStorage !== 'undefined') {
+    if (typeof localStorage !== 'undefined') {
       return localStorage.getItem(key);
     }
   } catch {}
@@ -106,10 +108,63 @@ function safeGetLocalStorage(key: string): string | null {
 
 function safeSetLocalStorage(key: string, value: string): void {
   try {
-    if (typeof window !== 'undefined' && typeof localStorage !== 'undefined') {
+    if (typeof localStorage !== 'undefined') {
       localStorage.setItem(key, value);
     }
   } catch {}
+}
+
+function filledTiers(t: AutomatedTradeRecord): number {
+  const h = t.harvestTiers;
+  return h ? [h.tier1, h.tier2, h.tier3].filter((x) => x && x.status !== 'PENDING').length : 0;
+}
+
+/**
+ * Brings this copy's saved trades in line with a Firestore snapshot.
+ *
+ * The saved copy is what every 30s refresh evaluates and displays, and until
+ * now nothing ever refreshed it from Firestore. Each browser kept its own
+ * version of history: a correction made in Firestore (the two TAO trades
+ * reduced from $11.57 and $11.64 to about $0) never reached a browser that
+ * already had them saved, so that browser went on showing $23.21 more profit
+ * than the others. Trades opened elsewhere were also invisible to its slot
+ * count, which is how 13 positions came to be open against a limit of 10.
+ *
+ * Firestore is the record. Per trade:
+ *  - closed in Firestore: Firestore's version (closes and corrections win)
+ *  - closed here, open in Firestore: ours (a close whose write has not landed)
+ *  - open in both: the one further along the exit ladder; on a tie ours,
+ *    which has the fresher price, session high and low
+ * Trades only this copy has are dropped once they are older than a few
+ * minutes: Firestore includes writes still in flight, so anything older that
+ * is missing was deleted or never reached it.
+ */
+export function mergeRemoteTrades(
+  remote: AutomatedTradeRecord[],
+  local: AutomatedTradeRecord[],
+  now: number = Date.now()
+): AutomatedTradeRecord[] {
+  const localById = new Map(local.map((t) => [t.id, t]));
+  const remoteIds = new Set(remote.map((t) => t.id));
+  const merged = remote.map((r) => {
+    const l = localById.get(r.id);
+    if (!l || r.status !== 'OPEN') return r;
+    if (l.status !== 'OPEN') return l;
+    if (filledTiers(r) > filledTiers(l)) return r;
+    return { ...l, excludedFromStats: r.excludedFromStats, excludedReason: r.excludedReason };
+  });
+  for (const l of local) {
+    if (!remoteIds.has(l.id) && now - (l.openedAtTimestamp || 0) < 5 * 60_000) merged.push(l);
+  }
+  return merged;
+}
+
+function sortTrades(trades: AutomatedTradeRecord[]): AutomatedTradeRecord[] {
+  return trades.sort((a, b) => {
+    if (a.status === 'OPEN' && b.status !== 'OPEN') return -1;
+    if (a.status !== 'OPEN' && b.status === 'OPEN') return 1;
+    return (b.openedAtTimestamp || 0) - (a.openedAtTimestamp || 0);
+  });
 }
 
 /**
@@ -228,13 +283,15 @@ export function subscribeToAutomatedTrades(callback: (trades: AutomatedTradeReco
         if (!snapshot.empty) {
           const trades: AutomatedTradeRecord[] = [];
           snapshot.forEach((docSnap) => trades.push(docSnap.data() as AutomatedTradeRecord));
-          const sanitized = sanitizeActiveTrades(trades);
-          sanitized.sort((a, b) => {
-            if (a.status === 'OPEN' && b.status !== 'OPEN') return -1;
-            if (a.status !== 'OPEN' && b.status === 'OPEN') return 1;
-            return (b.openedAtTimestamp || 0) - (a.openedAtTimestamp || 0);
-          });
-          callback(sanitized);
+          // Read-only copies keep their own history (their changes never
+          // reach Firestore), so only the display follows the snapshot.
+          if (!FIRESTORE_WRITES_ENABLED) {
+            callback(sortTrades(sanitizeActiveTrades(trades)));
+            return;
+          }
+          const merged = sortTrades(sanitizeActiveTrades(mergeRemoteTrades(trades, loadLocalTrades())));
+          safeSetLocalStorage(LOCAL_STORAGE_KEY, JSON.stringify(merged));
+          notifySubscribers(merged);
         }
       }, (err) => {
         reportFirestoreResult(err);
@@ -263,12 +320,16 @@ export function subscribeToAutomatedTrades(callback: (trades: AutomatedTradeReco
       } catch {}
     }
   };
-  window.addEventListener('storage', handleStorage);
+  if (typeof window !== 'undefined') {
+    window.addEventListener('storage', handleStorage);
+  }
 
   return () => {
     subscribers.delete(callback);
     if (unsubscribeFirestore) unsubscribeFirestore();
-    window.removeEventListener('storage', handleStorage);
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('storage', handleStorage);
+    }
   };
 }
 
@@ -467,7 +528,10 @@ export async function syncOpenTradesWithLivePrices(
 ): Promise<{
   updatedCount: number;
   events: string[];
+  /** The full list after evaluation, as saved. */
+  trades: AutomatedTradeRecord[];
 }> {
+  const now = Date.now();
   // Use knownTrades from caller or cached local storage — zero getDocs calls!
   let currentTrades: AutomatedTradeRecord[] = knownTrades && knownTrades.length > 0 ? [...knownTrades] : [];
   if (currentTrades.length === 0) {
@@ -501,6 +565,7 @@ export async function syncOpenTradesWithLivePrices(
           status: 'STOPPED',
           exitReason: 'STAGNATION_TIMEOUT',
           closedAtTimestamp: Date.now(),
+          lastEvaluatedAt: now,
           currentPrice: livePrice,
           pnlUSD: +( (trade.positionSizeUSD || 10) * (zombieCheck.movementPct / 100) ).toFixed(2),
           pnlPercentage: zombieCheck.movementPct,
@@ -524,24 +589,27 @@ export async function syncOpenTradesWithLivePrices(
 
     // Mathematical cycle evaluation (Harvest ladders & ratchets)
     const evalResult = evaluateTradeCycle(trade, livePrice);
+    // Stamped before any write, so a saved state always carries the time it
+    // was evaluated up to.
+    const evaluated = { ...evalResult.trade, lastEvaluatedAt: now };
     if (evalResult.hasChanged) {
       // Milestone: profit tier harvested, stop loss hit, or trade completed
       const isMilestone = evalResult.eventTriggered !== 'NONE' || evalResult.trade.status !== trade.status;
-      await updateAutomatedTrade(evalResult.trade, isMilestone);
-      updatedTrades.push(evalResult.trade);
+      await updateAutomatedTrade(evaluated, isMilestone);
+      updatedTrades.push(evaluated);
       updatedCount++;
       if (evalResult.message) {
         events.push(evalResult.message);
       }
     } else {
-      updatedTrades.push(trade);
+      updatedTrades.push(evaluated);
     }
   }
 
   const sanitized = sanitizeActiveTrades(updatedTrades);
   safeSetLocalStorage(LOCAL_STORAGE_KEY, JSON.stringify(sanitized));
   notifySubscribers(sanitized);
-  return { updatedCount, events };
+  return { updatedCount, events, trades: sanitized };
 }
 
 /**

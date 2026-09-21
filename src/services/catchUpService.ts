@@ -172,11 +172,22 @@ export interface CatchUpSummary {
   failedSymbols: string[];
 }
 
-/** Replays every open trade through the candles between `sinceMs` and `nowMs`. */
+/**
+ * Replays every open trade through the candles between `sinceMs` and `nowMs`.
+ * A trade already evaluated after `sinceMs` (its `lastEvaluatedAt`, set by
+ * whichever copy last checked it) starts from there instead, so no candle is
+ * applied twice.
+ *
+ * With `requireCheckpoint`, trades that have never been stamped are skipped
+ * rather than replayed from their open: their saved stop and tiers may already
+ * reflect later prices, and replaying old candles against a stop that has
+ * since been raised would close them on a price that came before the raise.
+ */
 export async function catchUpOpenTrades(
   trades: AutomatedTradeRecord[],
   sinceMs: number,
-  nowMs: number
+  nowMs: number,
+  options: { requireCheckpoint?: boolean } = {}
 ): Promise<CatchUpSummary> {
   const out = [...trades];
   const changed: AutomatedTradeRecord[] = [];
@@ -187,7 +198,8 @@ export async function catchUpOpenTrades(
   for (let i = 0; i < out.length; i++) {
     const t = out[i];
     if (t.status !== 'OPEN') continue;
-    const from = Math.max(sinceMs, t.openedAtTimestamp || sinceMs);
+    if (options.requireCheckpoint && !t.lastEvaluatedAt) continue;
+    const from = Math.max(sinceMs, t.lastEvaluatedAt || 0, t.openedAtTimestamp || 0);
     if (nowMs - from < 60_000) continue;
 
     const fetched = await fetchBars(t.symbol, from, nowMs);
@@ -195,8 +207,9 @@ export async function catchUpOpenTrades(
 
     const result = replayBars(t, fetched.bars, fetched.intervalMs);
     if (result.trade !== t) {
-      out[i] = result.trade;
-      changed.push(result.trade);
+      const replayed = { ...result.trade, lastEvaluatedAt: nowMs };
+      out[i] = replayed;
+      changed.push(replayed);
       events.push(...result.events);
       if (result.closed) closedCount++;
     }
