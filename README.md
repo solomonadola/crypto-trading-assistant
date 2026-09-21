@@ -128,10 +128,17 @@ Trades are also written to and read from **Firestore**, so every browser
 running the app (local and hosted) shares one trade history. Reads can be slow
 to start; the status strip shows whether Firestore has actually answered.
 
-> **The dev server uses the production database.** Running the app locally
-> with auto-pilot on deploys paper trades into the same shared history as the
-> hosted app. Turn auto-pilot off (or use a separate Firebase project) when
-> testing.
+> **Every copy of the app shares the production database**, including a local
+> dev server. For development or testing, put `VITE_FIRESTORE_WRITES=off` in
+> `.env.local`: the app still loads the shared history, but everything it does
+> stays in that browser. The status strip shows "Firebase read-only" when it
+> is set.
+
+Positions are never closed automatically for exceeding the slot limits. If two
+browsers open trades at the same moment and push the count over 10 (or open
+the same coin twice), the conflict is logged and new entries are blocked until
+positions close on their own stops and targets. (The old behaviour closed the
+older position at the current price with $0 P&L; it had done so 18 times.)
 
 > `firestore.rules` in this repo is **more permissive** than the rules actually
 > deployed. Do not run `firebase deploy --only firestore:rules` without
@@ -173,6 +180,8 @@ node tools/study-score.mjs                   # does a higher score mean better t
 node tools/study-residual.mjs                # beta-neutral / longer-horizon variants
 node tools/sim-exits.mjs                     # old vs current exit geometry
 node tools/test-metrics.mjs                  # metric accuracy check
+node tools/test-catchup.mjs                  # replay of time spent away
+node tools/test-data-safety.mjs              # no forced closes; read-only switch blocks all writes
 node tools/diagnose-trades.mjs trades.json   # find corrupt records in an exported feed
 ```
 

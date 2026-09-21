@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { ChevronDown, ChevronUp } from 'lucide-react';
 import { AutoPilotPacingInfo } from '../services/marketRegimeService';
-import { getFirestoreHealth, FirestoreHealth } from '../lib/firebase';
+import { getFirestoreHealth, FirestoreHealth, FIRESTORE_WRITES_ENABLED } from '../lib/firebase';
 
 export interface CatchUpStatus {
   at: number;
@@ -117,7 +117,13 @@ export const StatusStrip: React.FC<StatusStripProps> = ({ lastPriceUpdateAt, isR
   // The Firestore SDK can keep retrying silently rather than failing, which
   // would leave "Checking storage..." on screen indefinitely.
   const health = getFirestoreHealth();
-  const storage = health === 'unknown' && now - mountedAt > 20_000
+  const storage = !FIRESTORE_WRITES_ENABLED
+    ? {
+        tone: 'info' as Tone,
+        label: 'Firebase read-only - changes stay in this browser',
+        detail: 'VITE_FIRESTORE_WRITES=off: this copy reads the shared trade history but never writes to it.',
+      }
+    : health === 'unknown' && now - mountedAt > 20_000
     ? {
         tone: 'warn' as Tone,
         label: 'Firebase not responding - this browser only',

@@ -7,7 +7,7 @@ import {
   deleteDoc, 
   onSnapshot 
 } from 'firebase/firestore';
-import { db, isQuotaBlocked, markQuotaExceeded, reportFirestoreResult } from '../lib/firebase';
+import { db, isQuotaBlocked, markQuotaExceeded, reportFirestoreResult, FIRESTORE_WRITES_ENABLED } from '../lib/firebase';
 import { outcome } from './metrics';
 import { AutomatedTradeRecord, AutomatedFeedAuditStats, StrategyVerificationReport } from '../types/automatedFeed';
 import { CryptoCoin } from '../types';
@@ -28,65 +28,60 @@ const LOCAL_STORAGE_KEY = 'crypto_automated_trades_local_fallback';
 type TradesSubscriber = (trades: AutomatedTradeRecord[]) => void;
 const subscribers = new Set<TradesSubscriber>();
 
-/**
- * Sanitizes trade list so that:
- * 1. Active (OPEN) trades NEVER contain duplicate coin symbols (10 slots = 10 different coins).
- * 2. Active (OPEN) trades NEVER exceed MAX_CONCURRENT_TRADES (10).
- * Any duplicate or excess open positions are consolidated to COMPLETED.
- */
-export function sanitizeActiveTrades(trades: AutomatedTradeRecord[]): AutomatedTradeRecord[] {
-  // Sort trades: newest opened first
-  const openTrades = trades
+export interface SlotConflicts {
+  /** Open trades beyond the first on the same coin (newest kept first). */
+  duplicateIds: string[];
+  /** Open positions in total. */
+  openCount: number;
+  /** True when open positions exceed MAX_CONCURRENT_TRADES. */
+  overLimit: boolean;
+}
+
+/** Reports duplicate coins and over-limit open positions without changing anything. */
+export function findSlotConflicts(trades: AutomatedTradeRecord[]): SlotConflicts {
+  const open = trades
     .filter((t) => t.status === 'OPEN')
     .sort((a, b) => (b.openedAtTimestamp || 0) - (a.openedAtTimestamp || 0));
-
-  const allowedOpenIds = new Set<string>();
-  const seenSymbols = new Set<string>();
-  let openMajorCount = 0;
-
-  for (const t of openTrades) {
+  const seen = new Set<string>();
+  const duplicateIds: string[] = [];
+  for (const t of open) {
     const sym = t.symbol.toUpperCase();
-    const isMajor = MAJOR_COINS.has(sym);
-    if (!seenSymbols.has(sym) && allowedOpenIds.size < MAX_CONCURRENT_TRADES) {
-      if (isMajor && openMajorCount >= MAX_MAJOR_COIN_SLOTS) {
-        // Enforce max 3 major coins to reserve slots for dynamic altcoins
-        continue;
-      }
-      if (isMajor) openMajorCount++;
-      seenSymbols.add(sym);
-      allowedOpenIds.add(t.id);
-    }
+    if (seen.has(sym)) duplicateIds.push(t.id);
+    else seen.add(sym);
   }
+  return { duplicateIds, openCount: open.length, overLimit: open.length > MAX_CONCURRENT_TRADES };
+}
 
-  return trades.map((t) => {
-    if (t.status === 'OPEN' && !allowedOpenIds.has(t.id)) {
-      const sym = t.symbol.toUpperCase();
-      const isDuplicate = seenSymbols.has(sym);
-      const exitReason = isDuplicate ? 'DUPLICATE_ASSET_CONSOLIDATED' : 'EXCESS_SLOT_REBALANCED';
+let lastConflictSignature = '';
 
-      const closedTrade: AutomatedTradeRecord = {
-        ...t,
-        status: 'COMPLETED' as const,
-        closedAtTimestamp: t.closedAtTimestamp || Date.now(),
-        exitReason,
-        exitPrice: t.currentPrice || t.entryPrice
-      };
-
-      // Asynchronously update Firestore so document is persisted as COMPLETED
-      if (!isQuotaBlocked()) {
-        try {
-          updateDoc(doc(db, TRADES_COLLECTION, t.id), {
-            status: 'COMPLETED',
-            closedAtTimestamp: closedTrade.closedAtTimestamp,
-            exitReason,
-            exitPrice: closedTrade.exitPrice
-          }).catch(() => {});
-        } catch {}
-      }
-      return closedTrade;
-    }
-    return t;
-  });
+/**
+ * Previously this CLOSED any open trade beyond the per-coin or slot limits -
+ * at whatever price was current, with P&L 0, writing COMPLETED to Firestore -
+ * and it ran on every load, save and notification. The limits are already
+ * enforced when a trade is opened (executeSimulatedTrade, auto-pilot), so a
+ * conflict can only come from a race such as two browsers deploying at once;
+ * closing the older real position is the worst response to that. In the live
+ * history it had closed 18 positions (DUPLICATE_ASSET_CONSOLIDATED /
+ * EXCESS_SLOT_REBALANCED), and on 2026-09-21 it closed a UNI and an LDO
+ * position when a test run opened trades concurrently.
+ *
+ * It now returns the list unchanged and only reports conflicts. New entries are
+ * still blocked while the limit is exceeded; existing positions run to their
+ * own stops and targets.
+ */
+export function sanitizeActiveTrades(trades: AutomatedTradeRecord[]): AutomatedTradeRecord[] {
+  const c = findSlotConflicts(trades);
+  const signature = `${c.duplicateIds.join(',')}|${c.overLimit ? c.openCount : ''}`;
+  if (signature !== '|' && signature !== lastConflictSignature) {
+    lastConflictSignature = signature;
+    console.warn(
+      `[Slots] ${c.openCount} open position(s)` +
+      (c.overLimit ? ` - above the ${MAX_CONCURRENT_TRADES} limit, so no new entries until some close` : '') +
+      (c.duplicateIds.length ? `; duplicate coin positions: ${c.duplicateIds.join(', ')}` : '') +
+      '. Nothing is closed automatically.'
+    );
+  }
+  return trades;
 }
 
 function notifySubscribers(trades: AutomatedTradeRecord[]) {
@@ -327,7 +322,7 @@ export async function executeSimulatedTrade(trade: AutomatedTradeRecord): Promis
   }
 
   // Safe to execute: persist new trade to Firestore (Milestone event)
-  if (!isQuotaBlocked()) {
+  if (FIRESTORE_WRITES_ENABLED && !isQuotaBlocked()) {
     try {
       await setDoc(doc(db, TRADES_COLLECTION, trade.id), trade);
       reportFirestoreResult();
@@ -359,7 +354,7 @@ export async function executeSimulatedTrade(trade: AutomatedTradeRecord): Promis
  */
 export async function updateAutomatedTrade(trade: AutomatedTradeRecord, syncToFirestore: boolean = false): Promise<void> {
   const shouldSync = syncToFirestore || trade.status !== 'OPEN';
-  if (shouldSync && !isQuotaBlocked()) {
+  if (FIRESTORE_WRITES_ENABLED && shouldSync && !isQuotaBlocked()) {
     try {
       const docRef = doc(db, TRADES_COLLECTION, trade.id);
       await updateDoc(docRef, { ...trade });
@@ -553,7 +548,7 @@ export async function syncOpenTradesWithLivePrices(
  * Resets automated trades feed to default seed state and notifies subscribers
  */
 export async function resetAutomatedTrades(): Promise<AutomatedTradeRecord[]> {
-  if (!isQuotaBlocked()) {
+  if (FIRESTORE_WRITES_ENABLED && !isQuotaBlocked()) {
     try {
       const colRef = collection(db, TRADES_COLLECTION);
       const snap = await getDocs(colRef);

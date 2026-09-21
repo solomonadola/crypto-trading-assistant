@@ -9,6 +9,23 @@ export const db = firebaseConfig.firestoreDatabaseId
   : getFirestore(app);
 
 /**
+ * Set VITE_FIRESTORE_WRITES=off (e.g. in .env.local) to make this copy of the
+ * app read-only against Firestore: it still loads the shared trade history,
+ * but everything it does - including auto-pilot deploys - stays in this
+ * browser's local storage.
+ *
+ * Every copy of the app (hosted, local dev, test runs) points at the same
+ * production database. On 2026-09-21 test runs of a local dev server opened
+ * paper trades in the shared history and the old slot clean-up closed two
+ * real positions as a result. Use this for any testing or experimentation.
+ */
+export const FIRESTORE_WRITES_ENABLED = import.meta.env.VITE_FIRESTORE_WRITES !== 'off';
+
+if (!FIRESTORE_WRITES_ENABLED) {
+  console.info('[Firestore] Read-only mode (VITE_FIRESTORE_WRITES=off): changes stay in this browser.');
+}
+
+/**
  * Real health of the Firestore connection.
  *
  * isFirebaseInitialized() only confirmed the SDK objects existed, so the UI
@@ -31,10 +48,8 @@ export function reportFirestoreResult(err?: unknown): void {
   if (msg.includes('permission') || msg.includes('insufficient') || msg.includes('unauthenticated')) {
     if (firestoreHealth !== 'denied') {
       console.warn(
-        '[Firestore] Permission denied - trades are being kept in localStorage only. ' +
-        'They will NOT sync across browsers or devices. This is expected while the ' +
-        'deployed rules require auth and no sign-in is configured; localStorage is a ' +
-        'working store for single-browser use.'
+        '[Firestore] Permission denied - trades are being kept in this browser only and ' +
+        'will not sync to other browsers or devices until Firestore accepts requests again.'
       );
     }
     firestoreHealth = 'denied';
