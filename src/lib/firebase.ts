@@ -1,6 +1,5 @@
 import { initializeApp, getApps } from 'firebase/app';
 import { getFirestore, doc, getDocFromServer } from 'firebase/firestore';
-import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
 import firebaseConfig from '../../firebase-applet-config.json';
 
 const app = !getApps().length ? initializeApp(firebaseConfig) : getApps()[0];
@@ -8,46 +7,6 @@ const app = !getApps().length ? initializeApp(firebaseConfig) : getApps()[0];
 export const db = firebaseConfig.firestoreDatabaseId
   ? getFirestore(app, firebaseConfig.firestoreDatabaseId)
   : getFirestore(app);
-
-// Anonymous auth.
-//
-// The firestore.rules FILE in this repo allowed unauthenticated read/write/
-// delete, with `allow delete: if isValidId(tradeId)` amounting to
-// `allow delete: if true`. The DEPLOYED rules are stricter - a REST read with
-// only the projectId and public apiKey returns PERMISSION_DENIED - so the repo
-// file was out of sync with what is actually running rather than describing a
-// live hole. The file has been corrected to match intent either way.
-//
-// Signing in anonymously gives those rules a request.auth to check against.
-// NOTE: this currently fails with ADMIN_ONLY_OPERATION because Anonymous
-// sign-in is disabled for this project. Until it is enabled in
-// Firebase console > Authentication > Sign-in method, every Firestore
-// operation is rejected and the app runs on localStorage alone - which means
-// no cross-device sync. getFirestoreHealth() reports this honestly.
-const auth = getAuth(app);
-
-export const authReady: Promise<string | null> = new Promise((resolve) => {
-  let settled = false;
-  const finish = (uid: string | null) => { if (!settled) { settled = true; resolve(uid); } };
-
-  onAuthStateChanged(auth, (user) => { if (user) finish(user.uid); });
-
-  signInAnonymously(auth).catch((err) => {
-    console.warn(
-      '[Auth] Anonymous sign-in failed - Firestore writes will be rejected by security rules. ' +
-      'Enable Anonymous sign-in in Firebase console > Authentication > Sign-in method.',
-      err
-    );
-    finish(null);
-  });
-
-  // Never block the UI indefinitely on auth; localStorage remains the fallback.
-  setTimeout(() => finish(null), 8000);
-});
-
-export function getCurrentUid(): string | null {
-  return auth.currentUser?.uid ?? null;
-}
 
 /**
  * Real health of the Firestore connection.
@@ -73,8 +32,9 @@ export function reportFirestoreResult(err?: unknown): void {
     if (firestoreHealth !== 'denied') {
       console.warn(
         '[Firestore] Permission denied - trades are being kept in localStorage only. ' +
-        'They will NOT sync across browsers or devices. Enable Anonymous sign-in ' +
-        '(Firebase console > Authentication > Sign-in method) and deploy firestore.rules.'
+        'They will NOT sync across browsers or devices. This is expected while the ' +
+        'deployed rules require auth and no sign-in is configured; localStorage is a ' +
+        'working store for single-browser use.'
       );
     }
     firestoreHealth = 'denied';

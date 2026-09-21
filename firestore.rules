@@ -7,10 +7,6 @@ service cloud.firestore {
     }
 
     // Helper functions
-    function isSignedIn() {
-      return request.auth != null;
-    }
-
     function isValidId(id) {
       return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
@@ -26,33 +22,11 @@ service cloud.firestore {
         data.currentPrice is number;
     }
 
-    // Owner is whoever created the record. Existing documents predate the
-    // ownerUid field; they stay readable and writable by any signed-in user so
-    // the migration is non-breaking, but new documents must claim an owner.
-    function isOwner(data) {
-      return !('ownerUid' in data) || data.ownerUid == request.auth.uid;
-    }
-
     // Automated Trade Feed Collection
-    //
-    // Previously: read/create/update/delete were all allowed unauthenticated.
-    // `allow delete: if isValidId(tradeId)` only checked the id was a
-    // well-formed string, which made it equivalent to `allow delete: if true` -
-    // anyone holding the projectId (it ships in the client bundle) could wipe
-    // the collection or inject fabricated trades via the REST API.
     match /crypto_automated_trades/{tradeId} {
-      allow read: if isSignedIn();
-      allow create: if isSignedIn()
-                    && isValidId(tradeId)
-                    && isValidTrade(request.resource.data)
-                    && isOwner(request.resource.data);
-      allow update: if isSignedIn()
-                    && isValidId(tradeId)
-                    && isValidTrade(request.resource.data)
-                    && isOwner(resource.data);
-      allow delete: if isSignedIn()
-                    && isValidId(tradeId)
-                    && isOwner(resource.data);
+      allow read: if true;
+      allow create, update: if isValidId(tradeId) && isValidTrade(request.resource.data);
+      allow delete: if isValidId(tradeId);
     }
   }
 }

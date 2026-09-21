@@ -7,7 +7,7 @@ import {
   deleteDoc, 
   onSnapshot 
 } from 'firebase/firestore';
-import { db, isQuotaBlocked, markQuotaExceeded, authReady, getCurrentUid, reportFirestoreResult } from '../lib/firebase';
+import { db, isQuotaBlocked, markQuotaExceeded, reportFirestoreResult } from '../lib/firebase';
 import { AutomatedTradeRecord, AutomatedFeedAuditStats, StrategyVerificationReport } from '../types/automatedFeed';
 import { CryptoCoin } from '../types';
 import { evaluateTradeCycle } from './cycleEngineService';
@@ -141,7 +141,6 @@ export async function fetchAutomatedTrades(forceNetwork: boolean = false): Promi
   // 2. Fetch from Firestore only if requested or if local storage was completely empty
   if (!loadedTrades && !isQuotaBlocked()) {
     try {
-      await authReady;
       const colRef = collection(db, TRADES_COLLECTION);
       const snap = await getDocs(colRef);
       if (!snap.empty) {
@@ -205,12 +204,7 @@ export function subscribeToAutomatedTrades(callback: (trades: AutomatedTradeReco
 
   // Firestore real-time listener if available and quota not exceeded
   let unsubscribeFirestore: (() => void) | null = null;
-  // Auth resolves asynchronously, so the caller may unsubscribe before the
-  // listener is attached. Without this flag that listener would leak.
-  let cancelled = false;
   if (!isQuotaBlocked()) {
-    authReady.then(() => {
-    if (cancelled) return;
     try {
       const colRef = collection(db, TRADES_COLLECTION);
       unsubscribeFirestore = onSnapshot(colRef, (snapshot) => {
@@ -238,7 +232,6 @@ export function subscribeToAutomatedTrades(callback: (trades: AutomatedTradeReco
         console.warn('Firestore subscription fallback to local events:', err);
       });
     } catch {}
-    });
   }
 
   // LocalStorage cross-tab sync listener
@@ -256,7 +249,6 @@ export function subscribeToAutomatedTrades(callback: (trades: AutomatedTradeReco
   window.addEventListener('storage', handleStorage);
 
   return () => {
-    cancelled = true;
     subscribers.delete(callback);
     if (unsubscribeFirestore) unsubscribeFirestore();
     window.removeEventListener('storage', handleStorage);
@@ -315,9 +307,7 @@ export async function executeSimulatedTrade(trade: AutomatedTradeRecord): Promis
   // Safe to execute: persist new trade to Firestore (Milestone event)
   if (!isQuotaBlocked()) {
     try {
-      await authReady;
-      const uid = getCurrentUid();
-      await setDoc(doc(db, TRADES_COLLECTION, trade.id), uid ? { ...trade, ownerUid: uid } : trade);
+      await setDoc(doc(db, TRADES_COLLECTION, trade.id), trade);
       reportFirestoreResult();
     } catch (err) {
       reportFirestoreResult(err);
@@ -349,7 +339,6 @@ export async function updateAutomatedTrade(trade: AutomatedTradeRecord, syncToFi
   const shouldSync = syncToFirestore || trade.status !== 'OPEN';
   if (shouldSync && !isQuotaBlocked()) {
     try {
-      await authReady;
       const docRef = doc(db, TRADES_COLLECTION, trade.id);
       await updateDoc(docRef, { ...trade });
     } catch (err) {
@@ -544,7 +533,6 @@ export async function syncOpenTradesWithLivePrices(
 export async function resetAutomatedTrades(): Promise<AutomatedTradeRecord[]> {
   if (!isQuotaBlocked()) {
     try {
-      await authReady;
       const colRef = collection(db, TRADES_COLLECTION);
       const snap = await getDocs(colRef);
       for (const d of snap.docs) {
