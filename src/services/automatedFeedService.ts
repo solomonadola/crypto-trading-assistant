@@ -489,6 +489,7 @@ function scheduleRetry(): void {
 
 async function startSync(): Promise<void> {
   stopSync();
+  if (serverFeedActive) return;   // the trading server is the source; no Firestore reads
   if (isQuotaBlocked()) { scheduleRetry(); return; }
   const gen = syncGeneration;
   const now = Date.now();
@@ -544,6 +545,50 @@ async function startSync(): Promise<void> {
     scheduleRetry();
   });
   renewTimer = setTimeout(() => { if (subscribers.size > 0) startSync().catch(() => {}); }, LISTENER_RENEW_MS);
+}
+
+// ---------------------------------------------------------------- server hub
+//
+// While a 24/7 trading server is running, browsers take the trade list from
+// it (GET /api/trades, see services/serverFeed.ts) instead of from Firestore.
+// Every copy then shows the one list the only trader holds - also when the
+// Firestore read quota is spent - and browsers make no Firestore reads.
+
+let serverFeedActive = false;
+
+/** Switches this copy between the trading server's feed and Firestore. */
+export function setServerFeedActive(active: boolean): void {
+  if (active === serverFeedActive) return;
+  serverFeedActive = active;
+  if (active) stopSync();
+  else if (subscribers.size > 0) startSync().catch(() => {});
+}
+
+/**
+ * Applies a pull from the trading server. `full` replaces the saved list
+ * outright - the server is the trader and its list is the record; otherwise
+ * `trades` are the ones changed since the last pull.
+ */
+export function applyServerTrades(full: boolean, trades: AutomatedTradeRecord[], removedIds: string[] = []): void {
+  let list: AutomatedTradeRecord[];
+  if (full) {
+    list = trades;
+  } else {
+    list = loadLocalTrades();
+    const index = new Map(list.map((t, i) => [t.id, i]));
+    for (const t of trades) {
+      const i = index.get(t.id);
+      if (i === undefined) list.push(t);
+      else list[i] = t;
+    }
+    if (removedIds.length) {
+      const gone = new Set(removedIds);
+      list = list.filter((t) => !gone.has(t.id));
+    }
+  }
+  const sorted = sortTrades(sanitizeActiveTrades(list));
+  safeSetLocalStorage(LOCAL_STORAGE_KEY, JSON.stringify(sorted));
+  notifySubscribers(sorted);
 }
 
 /**

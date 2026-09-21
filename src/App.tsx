@@ -22,10 +22,12 @@ import {
   resetTradesToDefault,
   syncOpenTradesWithLivePrices,
   isTradeListAuthoritative,
+  setServerFeedActive,
 } from './services/automatedFeedService';
 import { scanLiveMarketEntries, deploySignalToAutomatedFeed } from './services/entryScannerService';
 import { catchUpOpenTrades } from './services/catchUpService';
 import { selectAutoPilotCandidate } from './services/autopilotEngine';
+import { fetchServerStatus, pullServerTrades, resetServerFeed, serverApiUrl } from './services/serverFeed';
 import { StatusStrip, CatchUpStatus } from './components/StatusStrip';
 import { DataHealthPanel } from './components/DataHealthPanel';
 import { checkDataHealth } from './services/dataHealth';
@@ -111,22 +113,19 @@ export default function App() {
   useEffect(() => {
     let mounted = true;
     const checkServer = async () => {
-      let next: { active: boolean; lastTickAt?: number | null } = { active: false };
-      try {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 5000);
-        try {
-          const res = await fetch('/api/status', { cache: 'no-store', signal: controller.signal });
-          const data = res.ok ? await res.json() : null;
-          const w = data?.worker;
-          if (w?.workerRunning && typeof w.tickAgeMs === 'number' && w.tickAgeMs < 120_000) {
-            next = { active: true, lastTickAt: Date.now() - w.tickAgeMs };
-          }
-        } finally {
-          clearTimeout(timer);
+      const next = await fetchServerStatus();
+      if (!mounted) return;
+      // While the server trades, its list is what every copy shows (and no
+      // Firestore reads are made here); if it stops, back to Firestore.
+      if (next.active !== serverActiveRef.current) {
+        serverActiveRef.current = next.active;
+        setServerFeedActive(next.active);
+        if (next.active) {
+          resetServerFeed();
+          pullServerTrades().catch(() => {});
         }
-      } catch {}
-      if (mounted) setServerState(next);
+      }
+      setServerState(next);
     };
     checkServer();
     const interval = setInterval(checkServer, 20000);
@@ -145,7 +144,7 @@ export default function App() {
         console.warn('Failed to save autopilot setting:', e);
       }
       if (serverState.active) {
-        fetch('/api/autopilot', {
+        fetch(serverApiUrl('/api/autopilot'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ enabled: nextVal }),
@@ -240,9 +239,13 @@ export default function App() {
       // cached prices are older than this refresh, and the status strip should say so.
       setLastPriceUpdateAt(getLastTickerFetchTime() || null);
 
-      // The 24/7 worker is evaluating trades: this copy only displays them.
-      // Evaluating here as well would put two writers on the same positions.
-      if (serverActiveRef.current) return;
+      // The 24/7 worker is evaluating trades: this copy only displays them,
+      // from the server's list. Evaluating here as well would put two writers
+      // on the same positions.
+      if (serverActiveRef.current) {
+        await pullServerTrades();
+        return;
+      }
       // Database first: act only on the list Firestore has delivered.
       if (!isTradeListAuthoritative()) return;
 

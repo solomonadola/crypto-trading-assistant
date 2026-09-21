@@ -10,7 +10,9 @@ import {
   executeTradingTick,
   getWorkerStatus,
   setWorkerAutoPilot,
+  getTradesFeed,
 } from './src/worker/tradingWorker';
+import zlib from 'node:zlib';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -20,9 +22,15 @@ const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
 app.use(express.json());
 
-// No CORS headers: the app calls these endpoints from its own origin only, and
-// other websites must not be able to switch the auto-pilot from a visitor's
-// browser.
+// CORS only on the read-only GET endpoints, so a copy of the app hosted
+// elsewhere (e.g. a local dev server with VITE_TRADING_SERVER_URL) can follow
+// this server. The trade list is already publicly readable in Firestore. The
+// control endpoints stay same-origin: other websites must not be able to
+// switch the auto-pilot from a visitor's browser.
+const allowAnyOrigin = (_req: Request, res: Response, next: () => void) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  next();
+};
 
 // ---------------------------------------------------------------- API routes
 
@@ -30,9 +38,33 @@ app.use(express.json());
  * Health and status probe.
  * Checked by the browser app to determine if 24/7 server trading is active.
  */
-app.get('/api/status', (_req: Request, res: Response) => {
+app.get('/api/status', allowAnyOrigin, (_req: Request, res: Response) => {
   res.set('Cache-Control', 'no-store');
   res.json({ serverActive: true, worker: getWorkerStatus() });
+});
+
+/**
+ * The trade list as this server holds it - what browsers show while it runs.
+ * ?since=<version>&boot=<bootId> from the previous response returns only the
+ * changes. Gzipped when the caller accepts it (~1 MB of JSON for the full
+ * list today, a few KB for a change set).
+ */
+app.get('/api/trades', allowAnyOrigin, (req: Request, res: Response) => {
+  res.set('Cache-Control', 'no-store');
+  const feed = getTradesFeed(Number(req.query.since) || 0, String(req.query.boot || ''));
+  if (!feed) {
+    res.status(503).json({ error: 'No confirmed trade list yet' });
+    return;
+  }
+  const body = Buffer.from(JSON.stringify(feed));
+  res.set('Content-Type', 'application/json; charset=utf-8');
+  res.set('Vary', 'Accept-Encoding');
+  if (/\bgzip\b/.test(String(req.headers['accept-encoding'] || ''))) {
+    res.set('Content-Encoding', 'gzip');
+    res.send(zlib.gzipSync(body));
+  } else {
+    res.send(body);
+  }
 });
 
 app.get('/api/health', (_req: Request, res: Response) => {

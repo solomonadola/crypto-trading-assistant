@@ -28,11 +28,19 @@ does, every 30 seconds, what an open tab does: fetch prices, replay any time
 it missed, check stops and targets, and run the auto-pilot with the same
 decision code as the browser (`src/services/autopilotEngine.ts`).
 
-- **Browsers step aside.** A browser that finds a worker on its own server
-  that has completed a tick in the last two minutes only displays: it does
-  not evaluate trades or open new ones, so there are never two writers on the
-  same positions. The status strip shows "24/7 Server Active". If the worker
-  stops ticking, browsers take over again within about 20 seconds.
+- **Browsers step aside and follow the server.** A browser that finds a
+  worker that has completed a tick in the last two minutes only displays: it
+  does not evaluate trades or open new ones, so there is one trader. It shows
+  the server's own list, pulled every 30 seconds from `GET /api/trades`
+  (only the trades changed since its last pull, gzipped), and makes no
+  Firestore reads — so every copy shows the same data even while the
+  Firestore quota is spent. If the worker stops ticking, browsers switch back
+  to Firestore and trade themselves within about 20 seconds.
+- **Which server:** the one the page came from, or the URL in
+  `VITE_TRADING_SERVER_URL` (e.g. a local dev server following the hosted
+  app; see `.env.example`). The status strip shows "24/7 Server Active".
+  Manual deploys and exclusions from a browser still go to Firestore, so the
+  server only sees them once Firestore can be read.
 - **Restarts lose nothing.** Every open trade carries `lastEvaluatedAt`, saved
   with it to Firestore at each exit-ladder event and every 10 minutes. After a
   restart or a sleep, the worker replays each trade's candles from exactly
@@ -53,6 +61,7 @@ decision code as the browser (`src/services/autopilotEngine.ts`).
   read-only copy (`VITE_FIRESTORE_WRITES=off`, also read from `.env.local`)
   never starts it.
 - **Endpoints:** `GET /api/status` (worker state and recent log),
+  `GET /api/trades?since=&boot=` (the trade list, or changes since a pull),
   `GET /api/tick` (run a tick now), `POST /api/autopilot` `{"enabled": bool}`.
   `/api/autopilot` is unauthenticated and its setting resets on restart.
 

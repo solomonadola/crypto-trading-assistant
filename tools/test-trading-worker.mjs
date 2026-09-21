@@ -51,11 +51,11 @@ let build = 0;
 async function load(writesOff) {
   const out = await esbuild.build({
     stdin: {
-      contents: "export * from './src/worker/tradingWorker'; export { mergeRemoteTrades, loadLocalTrades, executeSimulatedTrade, updateAutomatedTrade, subscribeToAutomatedTrades, isTradeListAuthoritative, getPendingWriteCount, syncOpenTradesWithLivePrices } from './src/services/automatedFeedService';",
+      contents: "export * from './src/worker/tradingWorker'; export { mergeRemoteTrades, loadLocalTrades, executeSimulatedTrade, updateAutomatedTrade, subscribeToAutomatedTrades, isTradeListAuthoritative, getPendingWriteCount, syncOpenTradesWithLivePrices, applyServerTrades } from './src/services/automatedFeedService'; export { pullServerTrades, resetServerFeed } from './src/services/serverFeed';",
       resolveDir: process.cwd(), loader: 'ts',
     },
     bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'error',
-    define: { 'import.meta.env.VITE_FIRESTORE_WRITES': writesOff ? '"off"' : 'undefined' },
+    define: { 'import.meta.env.VITE_FIRESTORE_WRITES': writesOff ? '"off"' : 'undefined', 'import.meta.env.VITE_TRADING_SERVER_URL': '"https://hosted.example"' },
     plugins: [{
       name: 'fake-firebase',
       setup(b) {
@@ -80,6 +80,7 @@ let candles = {};         // SYMBOL -> [[t,o,h,l,c], ...]
 let binanceDown = false;
 globalThis.fetch = async (url) => {
   url = String(url);
+  if (url.includes('/api/') && globalThis.__api) return globalThis.__api(url);
   if (binanceDown) throw new Error('offline');
   if (url.includes('/ticker/24hr')) {
     const rows = Object.entries(prices).map(([s, p]) => ({
@@ -341,6 +342,51 @@ console.log('\n10. Free-tier reads: the history is not re-read on every load');
   check('a change arrives through the listener', w.loadLocalTrades().find((t) => t.id === 'h5')?.pnlUSD === 1.23);
   check('history intact', w.loadLocalTrades().length === 300);
   c();
+}
+
+console.log('\n12. Trade feed: browsers pull the server\'s list, then only changes');
+{
+  reset();
+  prices = { SOL: 100, ETH: 100 };
+  globalThis.__fsDocs = [trade('a', 'SOL'), trade('b', 'ETH')];
+  const w = await load(false);
+  check('no feed before the list is confirmed', w.getTradesFeed(0, '') === null);
+  w.startTradingWorker(1e9);
+  await settle();
+  const f1 = w.getTradesFeed(0, '');
+  check('first pull: full list', f1?.full === true && f1.trades.length === 2, JSON.stringify(f1 && { full: f1.full, n: f1.trades.length }));
+  const same = w.getTradesFeed(f1.version, f1.bootId);
+  check('nothing changed: nothing sent', same.full === false && same.trades.length === 0 && same.removedIds.length === 0);
+  await w.updateAutomatedTrade({ ...w.loadLocalTrades().find((t) => t.id === 'a'), currentPrice: 101.5 }, false);
+  const f2 = w.getTradesFeed(f1.version, f1.bootId);
+  check('one trade changed: only it is sent', f2.trades.length === 1 && f2.trades[0].id === 'a' && f2.trades[0].currentPrice === 101.5);
+  localStorage.setItem('crypto_automated_trades_local_fallback', JSON.stringify(w.loadLocalTrades().filter((t) => t.id !== 'b')));
+  const f3 = w.getTradesFeed(f2.version, f2.bootId);
+  check('a removed trade is reported', f3.removedIds.length === 1 && f3.removedIds[0] === 'b');
+  check('after a server restart (other bootId): full list again', w.getTradesFeed(f3.version, 'old-boot').full === true);
+  w.stopTradingWorker();
+
+  // Browser side: the pull applies full lists and change sets, and sends its cursor back.
+  reset();
+  localStorage.setItem('crypto_automated_trades_local_fallback', JSON.stringify([trade('stale', 'OLD')]));
+  const urls = [];
+  const replies = [
+    { bootId: 'B1', version: 5, full: true, trades: [trade('a', 'SOL'), trade('b', 'ETH')], removedIds: [] },
+    { bootId: 'B1', version: 7, full: false, trades: [trade('a', 'SOL', { currentPrice: 99 })], removedIds: ['b'] },
+  ];
+  globalThis.__api = async (url) => { urls.push(url); return { ok: true, json: async () => replies.shift() }; };
+  w.resetServerFeed();
+  check('full pull applied', (await w.pullServerTrades()) === true);
+  let ids = w.loadLocalTrades().map((t) => t.id).sort().join(',');
+  check('saved copy replaced by the server list', ids === 'a,b', ids);
+  await w.pullServerTrades();
+  const list = w.loadLocalTrades();
+  check('change set applied', list.length === 1 && list[0].currentPrice === 99, JSON.stringify(list.map((t) => [t.id, t.currentPrice])));
+  check('asks the configured server', urls[0].startsWith('https://hosted.example/api/trades?since=0'));
+  check('sends back its cursor', urls[1].includes('since=5') && urls[1].includes('boot=B1'), urls[1]);
+  globalThis.__api = async () => ({ ok: false, json: async () => null });
+  check('server down: reported, list kept', (await w.pullServerTrades()) === false && w.loadLocalTrades().length === 1);
+  globalThis.__api = null;
 }
 
 console.log('\n11. Firebase quota spent: the server trades on from its saved file');

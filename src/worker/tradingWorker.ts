@@ -15,6 +15,7 @@ import { calculateBankrollState } from '../services/bankrollService';
 import { catchUpOpenTrades } from '../services/catchUpService';
 import { computePacing, selectAutoPilotCandidate } from '../services/autopilotEngine';
 import { isCounted } from '../services/metrics';
+import { AutomatedTradeRecord } from '../types/automatedFeed';
 
 /**
  * 24/7 trading worker: the browser's refresh loop, run by a server process so
@@ -99,7 +100,68 @@ function logEvent(message: string, level: WorkerLogEntry['level'] = 'info') {
 function subscribe() {
   unsubscribe?.();
   subscribedAt = Date.now();
-  unsubscribe = subscribeToAutomatedTrades(() => {});
+  unsubscribe = subscribeToAutomatedTrades(trackChanges);
+}
+
+// ---------------------------------------------------------------- trade feed
+//
+// Browsers pull the trade list from here (GET /api/trades) rather than from
+// Firestore. The full list is ~3 KB a trade, and open trades change on every
+// tick, so a pull returns only the trades changed since the caller's last
+// one: each change bumps a version number, and the caller sends back the
+// version it has. bootId changes on restart, when versions start again.
+
+const bootId = Math.random().toString(36).slice(2, 10);
+let feedVersion = 0;
+const tradeSignature = new Map<string, string>();
+const changedAtVersion = new Map<string, number>();
+const removedAtVersion = new Map<string, number>();
+
+function trackChanges(trades: AutomatedTradeRecord[]): void {
+  const seen = new Set<string>();
+  for (const t of trades) {
+    seen.add(t.id);
+    const sig = JSON.stringify(t);
+    if (tradeSignature.get(t.id) !== sig) {
+      tradeSignature.set(t.id, sig);
+      changedAtVersion.set(t.id, ++feedVersion);
+      removedAtVersion.delete(t.id);
+    }
+  }
+  for (const id of [...tradeSignature.keys()]) {
+    if (seen.has(id)) continue;
+    tradeSignature.delete(id);
+    changedAtVersion.delete(id);
+    removedAtVersion.set(id, ++feedVersion);
+  }
+}
+
+export interface TradesFeed {
+  bootId: string;
+  version: number;
+  full: boolean;
+  trades: AutomatedTradeRecord[];
+  removedIds: string[];
+}
+
+/**
+ * The trade list for GET /api/trades, or null while the worker has no list
+ * Firestore has confirmed (an empty list then would read as "no trades").
+ * `since`/`boot` are what the caller got last time; a missing or stale pair
+ * gets the full list.
+ */
+export function getTradesFeed(since: number, boot: string): TradesFeed | null {
+  if (!isWorkerRunning || !hasConfirmedTradeList()) return null;
+  trackChanges(loadLocalTrades());
+  const full = boot !== bootId || !(since > 0) || since > feedVersion;
+  const all = loadLocalTrades();
+  return {
+    bootId,
+    version: feedVersion,
+    full,
+    trades: full ? all : all.filter((t) => (changedAtVersion.get(t.id) ?? 0) > since),
+    removedIds: full ? [] : [...removedAtVersion].filter(([, v]) => v > since).map(([id]) => id),
+  };
 }
 
 function skip(reason: string): TickResult {
