@@ -1,4 +1,5 @@
 import React, { useState, useMemo } from 'react';
+import { resolvePositionSizeUSD } from '../config/geometry';
 import { 
   Zap, 
   Activity, 
@@ -142,7 +143,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
               Top Crypto Trade Opportunities
             </h2>
             <p className="text-xs sm:text-sm text-stone-400 mt-1 max-w-2xl">
-              Continuously scans Binance coins using 5 safety checks (trend direction, big buyer volume, price support, and low-risk reward ratio).
+              Scans Binance coins every 30 seconds using 5 checks (trend, estimated buy pressure, price structure, reward-to-risk). Scores rank signals; they are not guarantees.
             </p>
           </div>
 
@@ -169,7 +170,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
               </button>
             )}
 
-            <div className="flex items-center gap-1.5 p-1 rounded-xl bg-stone-950 border border-stone-800 shrink-0">
+            <div className="flex max-w-full flex-wrap items-center gap-1.5 p-1 rounded-xl bg-stone-950 border border-stone-800">
               <button
                 id="mode-futures-btn"
                 onClick={() => setTradingMode('FUTURES_1_2D')}
@@ -208,7 +209,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
                 <span className="text-[11px] font-semibold text-rose-400">({triggeredShortCount} Shorts)</span>
               )}
             </div>
-            <span className="text-[10px] text-stone-500">Passed all safety rules</span>
+            <span className="text-[10px] text-stone-500">Passed all entry checks</span>
           </div>
 
           <div className="p-2.5 rounded-xl bg-stone-950/60 border border-stone-800">
@@ -224,9 +225,9 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
           </div>
 
           <div className="p-2.5 rounded-xl bg-stone-950/60 border border-stone-800">
-            <span className="text-[10px] text-stone-400 uppercase block">Top Safe Pick</span>
+            <span className="text-[10px] text-stone-400 uppercase block">Top-Ranked Signal</span>
             <span className="text-lg font-bold text-amber-300">{topPick?.symbol || 'BTC'}</span>
-            <span className="text-[10px] text-stone-500">{topPick?.score || 90}/100 Confidence</span>
+            <span className="text-[10px] text-stone-500">{topPick?.score || 90}/100 score</span>
           </div>
         </div>
       </div>
@@ -443,7 +444,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
                   </div>
 
                   <div>
-                    <span className="text-[10px] text-stone-500 block">Safety Score</span>
+                    <span className="text-[10px] text-stone-500 block">Signal Score</span>
                     <div className="flex items-center gap-1.5">
                       <span className="font-extrabold text-amber-400 text-sm">{sig.score}/100</span>
                       <span className="text-[10px] text-stone-400">({sig.score >= 85 ? 'High Quality' : 'Moderate'})</span>
@@ -484,15 +485,15 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
 
                 {/* Plain English Details */}
                 <div className="space-y-1.5 text-[11px] text-stone-400 mb-3">
-                  <div className="flex items-center justify-between" title="Shows if big accounts (over $100,000) are buying or selling">
-                    <span>Big Investor Flow:</span>
+                  <div className="flex items-center justify-between" title="Estimated from the 24h price change and range. No individual trades are observed.">
+                    <span>Est. Buy Pressure:</span>
                     <span className={`font-semibold ${whaleNet >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
                       {whaleNet >= 0 ? '+' : ''}{formatCashUSD(whaleNet)} {whaleNet >= 0 ? '(Buying)' : '(Selling)'}
                     </span>
                   </div>
 
-                  <div className="flex items-center justify-between" title="Potential profit compared to potential risk">
-                    <span>Win-to-Loss Ratio:</span>
+                  <div className="flex items-center justify-between" title="Distance to the second target compared with distance to the stop">
+                    <span>Reward-to-Risk:</span>
                     <span className="font-bold text-stone-200">
                       {plan.rewardRiskRatio}:1 (Stop Loss: -{plan.stopLossPct}%)
                     </span>
@@ -561,11 +562,11 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
                     id={`deploy-tranche-${sig.coinId}-btn`}
                     onClick={() => onDeploySignal(sig)}
                     disabled={!bankroll.canOpenNewTrade}
-                    title={bankroll.canOpenNewTrade ? 'Open $10.00 Trade' : bankroll.blockReason}
+                    title={bankroll.canOpenNewTrade ? `Open a $${resolvePositionSizeUSD(bankroll.trancheSizeUSD, bankroll.totalPortfolioValueUSD, plan.stopLossPct).toFixed(2)} position, sized so the stop loses 0.4% of the account` : bankroll.blockReason}
                     className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-bold bg-amber-500 hover:bg-amber-400 text-stone-950 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
                   >
                     <Zap className="w-3 h-3" />
-                    <span>Deploy $10</span>
+                    <span>Deploy ${resolvePositionSizeUSD(bankroll.trancheSizeUSD, bankroll.totalPortfolioValueUSD, plan.stopLossPct).toFixed(2)}</span>
                   </button>
                 )}
               </div>
@@ -591,6 +592,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
       {/* Signal Detail Modal */}
       <SignalDetailModal
         signal={selectedSignal}
+        positionSizeUSD={selectedSignal ? resolvePositionSizeUSD(bankroll.trancheSizeUSD, bankroll.totalPortfolioValueUSD, selectedSignal.tradePlan.stopLossPct) : undefined}
         onClose={() => setSelectedSignal(null)}
         onDeploy={(sig) => {
           onDeploySignal(sig);

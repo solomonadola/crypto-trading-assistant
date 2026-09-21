@@ -107,9 +107,10 @@ export function replayBars(
 
 // ---------------------------------------------------------------- network
 
+// Same venue as the live ticker (see binanceService). Binance.US is a different
+// exchange with different prices, so it must never supply candles here.
 const KLINE_ENDPOINTS = [
   'https://data-api.binance.vision/api/v3/klines',
-  'https://api.binance.us/api/v3/klines',
   'https://api.binance.com/api/v3/klines',
 ];
 

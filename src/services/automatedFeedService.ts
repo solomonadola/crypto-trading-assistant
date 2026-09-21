@@ -22,6 +22,7 @@ import {
 import { MAJOR_COINS, MAX_MAJOR_COIN_SLOTS } from '../types/entryScanner';
 
 const TRADES_COLLECTION = 'crypto_automated_trades';
+const FIRESTORE_READ_TIMEOUT_MS = 8000;
 const LOCAL_STORAGE_KEY = 'crypto_automated_trades_local_fallback';
 
 type TradesSubscriber = (trades: AutomatedTradeRecord[]) => void;
@@ -121,6 +122,20 @@ function safeSetLocalStorage(key: string, value: string): void {
  */
 export const SEED_TRADES: AutomatedTradeRecord[] = [];
 
+/**
+ * Trades from this browser's storage only - no network. Used by the 30s price
+ * loop, which must never wait on Firestore: when storage was empty (a fresh
+ * browser) the old path fell through to a Firestore read that could hang.
+ */
+export function loadLocalTrades(): AutomatedTradeRecord[] {
+  try {
+    const parsed = JSON.parse(safeGetLocalStorage(LOCAL_STORAGE_KEY) || '[]');
+    return Array.isArray(parsed) ? sanitizeActiveTrades(parsed) : [];
+  } catch {
+    return [];
+  }
+}
+
 export async function fetchAutomatedTrades(forceNetwork: boolean = false): Promise<AutomatedTradeRecord[]> {
   let loadedTrades: AutomatedTradeRecord[] | null = null;
 
@@ -143,7 +158,12 @@ export async function fetchAutomatedTrades(forceNetwork: boolean = false): Promi
   if (!loadedTrades && !isQuotaBlocked()) {
     try {
       const colRef = collection(db, TRADES_COLLECTION);
-      const snap = await getDocs(colRef);
+      // The SDK can retry silently instead of failing; never wait on it forever.
+      const snap = await Promise.race([
+        getDocs(colRef),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('Firestore read timed out (offline)')), FIRESTORE_READ_TIMEOUT_MS)),
+      ]);
       if (!snap.empty) {
         const trades: AutomatedTradeRecord[] = [];
         snap.forEach((docSnap) => {
@@ -209,6 +229,7 @@ export function subscribeToAutomatedTrades(callback: (trades: AutomatedTradeReco
     try {
       const colRef = collection(db, TRADES_COLLECTION);
       unsubscribeFirestore = onSnapshot(colRef, (snapshot) => {
+        reportFirestoreResult();   // a delivered snapshot means reads are working
         if (!snapshot.empty) {
           const trades: AutomatedTradeRecord[] = [];
           snapshot.forEach((docSnap) => trades.push(docSnap.data() as AutomatedTradeRecord));
@@ -455,7 +476,7 @@ export async function syncOpenTradesWithLivePrices(
   // Use knownTrades from caller or cached local storage — zero getDocs calls!
   let currentTrades: AutomatedTradeRecord[] = knownTrades && knownTrades.length > 0 ? [...knownTrades] : [];
   if (currentTrades.length === 0) {
-    currentTrades = await fetchAutomatedTrades(false);
+    currentTrades = loadLocalTrades();
   }
 
   let updatedCount = 0;

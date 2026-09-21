@@ -641,7 +641,7 @@ export function scanLiveMarketEntries(coins: CryptoCoin[], mode: ScannerTradingM
       });
 
       aiRationale = `${coin.name} is testing its 4H 21 EMA at $${ema21_4h} (${distToEma21Pct}% distance) with ${microConfirmation.isGreenReversal ? 'confirmed micro 1H reversal' : 'micro momentum held in staging'}. Institutional whale net flow is ${whaleNet >= 0 ? '+' : ''}${formatCashUSD(whaleNet)}, supporting a ${confluenceRating} confluence rating and ${rewardRiskRatio}:1 R:R.`;
-      recommendedAction = `Deploy $10.00 micro-tranche at $${price}. Stop Loss at $${stopLossPrice} (-${stopLossPct}%) and harvest Tier 1 Take Profit at $${tier1Price} (+${tier1Pct}%).`;
+      recommendedAction = `Enter at $${price}. Stop Loss at $${stopLossPrice} (-${stopLossPct}%) and harvest Tier 1 Take Profit at $${tier1Price} (+${tier1Pct}%).`;
     } else if (archetype === 'VOLATILITY_SQUEEZE') {
       archetypeName = 'Volatility Squeeze Breakout';
       archetypeDescription = 'Explosive energy coiled strategy detecting extreme Bollinger Band compression (<4.2%) ready for expansion with volume surge.';
@@ -733,7 +733,7 @@ export function scanLiveMarketEntries(coins: CryptoCoin[], mode: ScannerTradingM
       });
 
       aiRationale = `${coin.name} is in a tightly wound Bollinger Squeeze (Bandwidth ${bbWidthPct}%) with ${volumeSurgeRatio}x volume expansion and ${whaleNet >= 0 ? '+' : ''}${formatCashUSD(whaleNet)} whale accumulation. Asymmetric expansion target set at +${tier1Pct}% with ${rewardRiskRatio}:1 R:R.`;
-      recommendedAction = `Deploy $10.00 breakout tranche at $${price}. Stop Loss at $${stopLossPrice} (-${stopLossPct}%) and harvest Tier 1 Take Profit at $${tier1Price} (+${tier1Pct}%).`;
+      recommendedAction = `Enter at $${price}. Stop Loss at $${stopLossPrice} (-${stopLossPct}%) and harvest Tier 1 Take Profit at $${tier1Price} (+${tier1Pct}%).`;
     } else if (archetype === 'MEAN_REVERSION_DIP') {
       archetypeName = 'Mean Reversion Dip Capitulation';
       archetypeDescription = 'Statistical dip-buying strategy identifying oversold capitulation into high-liquidity order flow support with confirmed absorption wicks.';
@@ -827,7 +827,7 @@ export function scanLiveMarketEntries(coins: CryptoCoin[], mode: ScannerTradingM
       });
 
       aiRationale = `${coin.name} has undergone a capitulation dip (${distToEma21Pct}% from 21 EMA, RSI ${pseudoRsi}) with ${lowerWickAbsorptionPct}% lower-wick absorption. Whale order flow is ${whaleNet >= 0 ? '+' : ''}${formatCashUSD(whaleNet)}, targeting a snapback rally with ${rewardRiskRatio}:1 R:R.`;
-      recommendedAction = `Deploy $10.00 dip tranche at $${price}. Stop Loss at $${stopLossPrice} (-${stopLossPct}%) and harvest Tier 1 Take Profit at $${tier1Price} (+${tier1Pct}%).`;
+      recommendedAction = `Enter at $${price}. Stop Loss at $${stopLossPrice} (-${stopLossPct}%) and harvest Tier 1 Take Profit at $${tier1Price} (+${tier1Pct}%).`;
     } else if (archetype === 'BEARISH_RESISTANCE_REJECTION') {
       archetypeName = 'Resistance Rejection Short';
       archetypeDescription = mode === 'FUTURES_1_2D'
@@ -931,7 +931,7 @@ export function scanLiveMarketEntries(coins: CryptoCoin[], mode: ScannerTradingM
       });
 
       aiRationale = `${coin.name} is rejecting overhead resistance at $${overheadResistancePrice} (${resistanceType === 'DAILY_MA7' ? 'Daily MA7' : '24h High'}, ${distToResistancePct}% away) with ${orderFlow.sellRatioPct}% taker sell volume. Downside target at $${tier1Price} (-${tier1Pct}%) with ${rewardRiskRatio}:1 R:R.`;
-      recommendedAction = `Deploy $10.00 SHORT tranche at $${price}. Stop Loss at $${stopLossPrice} (+${stopLossPct}%) and harvest Tier 1 Take Profit at $${tier1Price} (-${tier1Pct}%).`;
+      recommendedAction = `Enter SHORT at $${price}. Stop Loss at $${stopLossPrice} (+${stopLossPct}%) and harvest Tier 1 Take Profit at $${tier1Price} (-${tier1Pct}%).`;
     } else {
       archetypeName = '4H 21 EMA Breakdown Short';
       archetypeDescription = 'Trend-reversal short strategy capitalizing on confirmed 4-hour candle closes below the 21 EMA with accelerating downside volume.';
@@ -1031,7 +1031,7 @@ export function scanLiveMarketEntries(coins: CryptoCoin[], mode: ScannerTradingM
       });
 
       aiRationale = `${coin.name} has broken below its 4H 21 EMA ($${ema21_4h}) with ${orderFlow.sellRatioPct}% taker sell volume and ${micro.consecutiveRedHours} consecutive red 1H candles. Downside momentum is accelerating toward $${tier1Price} with ${rewardRiskRatio}:1 R:R.`;
-      recommendedAction = `Deploy $10.00 SHORT breakdown tranche at $${price}. Stop Loss at $${stopLossPrice} (+${stopLossPct}%) and harvest Tier 1 Take Profit at $${tier1Price} (-${tier1Pct}%).`;
+      recommendedAction = `Enter SHORT at $${price}. Stop Loss at $${stopLossPrice} (+${stopLossPct}%) and harvest Tier 1 Take Profit at $${tier1Price} (-${tier1Pct}%).`;
     }
 
     const pillarScores: PillarScores = {

@@ -72,7 +72,7 @@ export const Header: React.FC<HeaderProps> = ({
                 </span>
               </div>
               <p className="text-xs text-stone-400 hidden sm:block">
-                Automated Profit Taking & Zero-Loss Protection
+                Paper-trading lab: tests strategies after costs
               </p>
             </div>
           </div>
@@ -89,9 +89,15 @@ export const Header: React.FC<HeaderProps> = ({
           >
             <BarChart3 className="w-3.5 h-3.5 text-amber-400 group-hover:scale-110 transition-transform" />
             <span className="font-semibold text-stone-300">Bot Results:</span>
-            <span className="font-bold text-emerald-400" title="Win Rate">{verification.winRatePct}% Win Rate</span>
-            <span className="text-stone-600">·</span>
-            <span className="font-bold text-amber-400" title="Win-to-Loss Ratio: Wins are 2.5x larger than losses">{formatRatio(verification.payoffRatio)}:1 Win/Loss</span>
+            {verification.sampleSize === 0 ? (
+              <span className="text-stone-400">No closed trades yet</span>
+            ) : (
+              <>
+                <span className="font-bold text-emerald-400" title="Share of closed trades that made money after fees">{verification.winRatePct}% Win Rate</span>
+                <span className="text-stone-600">·</span>
+                <span className="font-bold text-amber-400" title="Payoff ratio: average net win divided by average net loss">{formatRatio(verification.payoffRatio)}:1 Payoff</span>
+              </>
+            )}
             <span className="text-[10px] text-stone-400 underline decoration-stone-600 underline-offset-2 ml-1">
               View Stats
             </span>

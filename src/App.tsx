@@ -15,6 +15,7 @@ import { AutomatedTradeRecord, BankrollState } from './types/automatedFeed';
 import { EntrySignalResult, ScannerTradingMode, MAJOR_COINS, MAX_MAJOR_COIN_SLOTS, MEME_COINS, MAX_MEME_COIN_SLOTS, COIN_REENTRY_COOLDOWN_MS } from './types/entryScanner';
 import { 
   loadAutomatedTrades, 
+  loadLocalTrades,
   subscribeToAutomatedTrades, 
   executeSimulatedTrade, 
   updateTradeRecord, 
@@ -23,6 +24,7 @@ import {
 } from './services/automatedFeedService';
 import { scanLiveMarketEntries, deploySignalToAutomatedFeed } from './services/entryScannerService';
 import { catchUpOpenTrades } from './services/catchUpService';
+import { StatusStrip, CatchUpStatus } from './components/StatusStrip';
 import { calculateBankrollState } from './services/bankrollService';
 import { AUTOPILOT_CONFIG } from './config/autopilot';
 import {
@@ -31,8 +33,8 @@ import {
   evaluateRecentLossCircuitBreaker,
   getAutoPilotPacingInfo,
 } from './services/marketRegimeService';
-import { enrichCoinsWithBinance, fetchLiveMarketCoins, fetchBinanceTickers } from './services/binanceService';
-import { isFirebaseInitialized } from './lib/firebase';
+import { enrichCoinsWithBinance, fetchLiveMarketCoins, fetchBinanceTickers, getLastTickerFetchTime } from './services/binanceService';
+import { getFirestoreHealth } from './lib/firebase';
 import { Zap, CheckCircle2, AlertCircle } from 'lucide-react';
 
 // When open trades were last evaluated against the market. Persisted so a
@@ -66,6 +68,8 @@ export default function App() {
   const [tradingMode, setTradingMode] = useState<ScannerTradingMode>('FUTURES_1_2D');
   const [activeTab, setActiveTab] = useState<ActiveTab>('scanner');
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
+  const [lastPriceUpdateAt, setLastPriceUpdateAt] = useState<number | null>(null);
+  const [lastCatchUp, setLastCatchUp] = useState<CatchUpStatus | null>(null);
   const [isDeployModalOpen, setIsDeployModalOpen] = useState<boolean>(false);
   const [isFirebaseModalOpen, setIsFirebaseModalOpen] = useState<boolean>(false);
   const [isMetricsModalOpen, setIsMetricsModalOpen] = useState<boolean>(false);
@@ -166,17 +170,22 @@ export default function App() {
   const lastDeploySnapshotRef = useRef<number>(-1);
 
   // Sync market data with Binance live prices
-  const refreshInFlightRef = useRef(false);
+  // Start time of the refresh in progress (0 = none).
+  const refreshInFlightRef = useRef(0);
 
   const handleRefreshLiveFeed = useCallback(async () => {
     // A visibility change and the 30s timer can fire together; one at a time.
-    if (refreshInFlightRef.current) return;
-    refreshInFlightRef.current = true;
+    // The guard expires after 60s so a single stuck call cannot freeze prices.
+    if (refreshInFlightRef.current && Date.now() - refreshInFlightRef.current < 60_000) return;
+    refreshInFlightRef.current = Date.now();
     setIsRefreshing(true);
     try {
       const enriched = await fetchLiveMarketCoins();
       setCoins(enriched);
       snapshotIdRef.current += 1;   // marks a genuinely new market observation
+      // The time the data was actually fetched - if every endpoint failed, the
+      // cached prices are older than this refresh, and the status strip should say so.
+      setLastPriceUpdateAt(getLastTickerFetchTime() || null);
 
       // Build price map for trade evaluation
       const priceMap = new Map<string, number>();
@@ -204,7 +213,8 @@ export default function App() {
       // Catch up on whatever happened while the app was closed or hidden.
       // Without this, a stop crossed while away filled at the price seen on
       // return, and a target touched and reversed was never banked.
-      let knownTrades = await loadAutomatedTrades(false);
+      // Local storage only: this loop must never wait on Firestore.
+      let knownTrades = loadLocalTrades();
       const lastEvalAt = readLastEvalAt();
       const now = Date.now();
       let catchUpComplete = true;
@@ -221,6 +231,13 @@ export default function App() {
           catchUpComplete = false;
           console.warn(`[Catch-up] Could not fetch candles for ${cu.failedSymbols.join(', ')}; will retry.`);
         }
+        setLastCatchUp({
+          at: now,
+          gapMs: now - lastEvalAt,
+          changed: cu.changed.length,
+          closed: cu.closedCount,
+          failedSymbols: cu.failedSymbols,
+        });
         const away = formatGap(now - lastEvalAt);
         catchUpNote = cu.closedCount > 0
           ? `Caught up on ${away} away: ${cu.closedCount} trade${cu.closedCount === 1 ? '' : 's'} closed while the app was closed.`
@@ -245,7 +262,7 @@ export default function App() {
       console.warn('Live feed refresh error:', e);
       showNotification('Market data refreshed (offline fallback active).', 'info');
     } finally {
-      refreshInFlightRef.current = false;
+      refreshInFlightRef.current = 0;
       setIsRefreshing(false);
     }
   }, [showNotification]);
@@ -359,7 +376,7 @@ export default function App() {
     try {
       const deployed = await deploySignalToAutomatedFeed(signal, bankroll.trancheSizeUSD);
       setTrades((prev) => [deployed, ...prev.filter((t) => t.id !== deployed.id)]);
-      showNotification(`Successfully deployed $${bankroll.trancheSizeUSD.toFixed(2)} tranche for ${signal.symbol} (${signal.archetypeName})!`, 'success');
+      showNotification(`Deployed $${deployed.positionSizeUSD.toFixed(2)} into ${signal.symbol} (${signal.archetypeName})!`, 'success');
     } catch (e: any) {
       console.error('Failed to deploy signal:', e);
       showNotification(e?.message || 'Failed to deploy signal.', 'warn');
@@ -501,7 +518,7 @@ export default function App() {
           const roleLabel = isMajor ? '⚡ Volatile Major' : isMeme ? '🎭 High-Beta Meme' : '🚀 High-Beta Alt';
           const confGrade = qualified.timeframeConfluence?.confluenceRating || 'A';
           showNotification(
-            `🤖 Auto-Pilot: Deployed $${bankroll.trancheSizeUSD.toFixed(2)} into ${qualified.symbol} (${roleLabel}, Score ${qualified.score}/100, MTF: ${confGrade})! Slot ${openTrades.length + 1}/10.`,
+            `🤖 Auto-Pilot: Deployed $${newTrade.positionSizeUSD.toFixed(2)} into ${qualified.symbol} (${roleLabel}, Score ${qualified.score}/100, MTF: ${confGrade})! Slot ${openTrades.length + 1}/10.`,
             'success'
           );
         })
@@ -562,13 +579,21 @@ export default function App() {
         setActiveTab={setActiveTab}
         bankroll={bankroll}
         trades={trades}
-        isFirebaseLive={isFirebaseInitialized()}
+        // Green only once Firebase has actually answered, matching the status strip.
+        isFirebaseLive={getFirestoreHealth() === 'ok'}
         onRefreshLiveFeed={handleRefreshLiveFeed}
         isRefreshing={isRefreshing}
         onOpenDeployModal={() => setIsDeployModalOpen(true)}
         onOpenMetricsModal={() => setIsMetricsModalOpen(true)}
         isAutoPilot={isAutoPilot}
         onToggleAutoPilot={handleToggleAutoPilot}
+      />
+
+      <StatusStrip
+        lastPriceUpdateAt={lastPriceUpdateAt}
+        isRefreshing={isRefreshing}
+        pacingInfo={pacingInfo}
+        lastCatchUp={lastCatchUp}
       />
 
       {/* Main Content Area */}

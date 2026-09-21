@@ -32,8 +32,11 @@ All tunables live in `src/config/`. The values below are the current defaults.
 - **Universe:** 36 hardcoded USDT pairs in `src/services/binanceService.ts`.
   Pairs with no live Binance spot ticker (currently FTM, KAS and POPCAT) are
   skipped rather than scanned at a stale price.
-- **Feed:** Binance `/api/v3/ticker/24hr`, refreshed every 30 seconds. This is
-  the only data source; there are no candles, no order book, no trade prints.
+- **Feed:** Binance `/api/v3/ticker/24hr` (global spot, via
+  `data-api.binance.vision` or `api.binance.com`), refreshed every 30 seconds.
+  Binance.US is deliberately *not* used as a fallback: it is a different
+  exchange with different prices. Candles are fetched only to replay time the
+  app was closed.
 - **Indicators:** every indicator the scanner shows (EMAs, MA7, RSI, ATR,
   Bollinger, order-flow, 1H/15m/5m reads) is derived from that one 24-hour
   snapshot. They are approximations, not values computed from real candles.
@@ -121,9 +124,14 @@ Trades and settings are saved in the browser's **localStorage**. They survive
 closing the tab or browser, but exist only in that browser, and clearing site
 data deletes them.
 
-The code also writes to **Firestore**, but for this project every Firestore
-request is currently rejected (no sign-in method is enabled and the deployed
-rules require one), so localStorage is the only working store.
+Trades are also written to and read from **Firestore**, so every browser
+running the app (local and hosted) shares one trade history. Reads can be slow
+to start; the status strip shows whether Firestore has actually answered.
+
+> **The dev server uses the production database.** Running the app locally
+> with auto-pilot on deploys paper trades into the same shared history as the
+> hosted app. Turn auto-pilot off (or use a separate Firebase project) when
+> testing.
 
 > `firestore.rules` in this repo is **more permissive** than the rules actually
 > deployed. Do not run `firebase deploy --only firestore:rules` without

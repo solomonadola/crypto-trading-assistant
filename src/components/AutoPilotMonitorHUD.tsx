@@ -444,7 +444,7 @@ export const AutoPilotMonitorHUD: React.FC<AutoPilotMonitorHUDProps> = ({
                             : 'bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40'
                         }`}
                       >
-                        {isFull ? 'Slots Full' : `Deploy $${bankroll.trancheSizeUSD.toFixed(2)}`}
+                        {isFull ? 'Slots Full' : `Deploy up to $${bankroll.trancheSizeUSD.toFixed(2)}`}
                       </button>
                     )}
                   </div>

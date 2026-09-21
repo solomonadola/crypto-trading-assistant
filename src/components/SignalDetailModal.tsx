@@ -26,6 +26,8 @@ interface SignalDetailModalProps {
   isAlreadyOpen?: boolean;
   cooldownMinutesRemaining?: number;
   isMajorCapped?: boolean;
+  /** Risk-based position size for this signal, if known. */
+  positionSizeUSD?: number;
   isMemeCapped?: boolean;
 }
 
@@ -39,6 +41,7 @@ export const SignalDetailModal: React.FC<SignalDetailModalProps> = ({
   cooldownMinutesRemaining,
   isMajorCapped = false,
   isMemeCapped = false,
+  positionSizeUSD,
 }) => {
   if (!signal) return null;
 
@@ -283,7 +286,7 @@ export const SignalDetailModal: React.FC<SignalDetailModalProps> = ({
               className="inline-flex items-center gap-2 px-5 py-2 text-xs font-bold rounded-lg bg-amber-500 hover:bg-amber-400 text-stone-950 disabled:opacity-50 disabled:cursor-not-allowed shadow-md transition-all"
             >
               <Zap className="w-3.5 h-3.5" />
-              <span>Deploy $10.00 Micro-Tranche</span>
+              <span>{positionSizeUSD ? `Deploy $${positionSizeUSD.toFixed(2)}` : 'Deploy'}</span>
             </button>
           )}
         </div>

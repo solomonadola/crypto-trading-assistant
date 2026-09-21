@@ -9,6 +9,8 @@ export interface BinanceFuturesTicker {
   lowPrice: string;
   volume: string;
   quoteVolume: string;
+  /** Number of trades in the last 24h. 0 means the listing is not trading. */
+  count?: number;
 }
 
 const BINANCE_TICKER_CACHE_KEY = 'binance_futures_tickers_cache';
@@ -17,12 +19,26 @@ const CACHE_TTL_MS = 15000;
 let lastFetchTime = 0;
 let cachedTickers: Map<string, BinanceFuturesTicker> = new Map();
 
-// Multi-tier endpoints with fallback mirrors (Binance Cloud Vision is non-geoblocked and CORS-enabled worldwide)
+// Binance global spot only. data-api.binance.vision is Binance's public
+// market-data mirror of the same market as api.binance.com.
+//
+// api.binance.us used to be the second fallback. It is NOT a mirror: Binance.US
+// is a separate exchange with its own listings and prices and, for most of this
+// universe, almost no volume ($0.00-0.1M/day vs $3-350M). Measured on
+// 2026-09-21: FTM 0.4806 there vs 0.6994 on Binance (-31%), 1-2% gaps on
+// OP/WIF/TIA/PEPE/UNI. Whenever the primary timed out, the app silently switched
+// venue, and every open trade saw a fake price jump that could trigger a stop
+// or bank a target that never happened. Stale-but-consistent prices are safer
+// than fresh prices from a different market, so there is no cross-venue fallback.
 const BINANCE_ENDPOINTS = [
   'https://data-api.binance.vision/api/v3/ticker/24hr',
-  'https://api.binance.us/api/v3/ticker/24hr',
   'https://api.binance.com/api/v3/ticker/24hr'
 ];
+
+/** When the ticker data currently in use was actually fetched (0 = never). */
+export function getLastTickerFetchTime(): number {
+  return lastFetchTime;
+}
 
 /**
  * Fetches real-time Binance 24hr ticker data for US-dollar pairs (USDT).
@@ -37,7 +53,8 @@ export async function fetchBinanceTickers(): Promise<Map<string, BinanceFuturesT
   for (const endpoint of BINANCE_ENDPOINTS) {
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 3500);
+      // The primary regularly takes several seconds; 3.5s pushed traffic to the fallback.
+      const timeoutId = setTimeout(() => controller.abort(), 8000);
 
       const response = await fetch(endpoint, {
         signal: controller.signal
@@ -55,6 +72,8 @@ export async function fetchBinanceTickers(): Promise<Map<string, BinanceFuturesT
 
       const map = new Map<string, BinanceFuturesTicker>();
       for (const item of data) {
+        // Skip listings with no trades in 24h: their lastPrice is stale.
+        if (typeof item.count === 'number' && item.count <= 0) continue;
         if (item.symbol && (item.symbol.endsWith('USDT') || item.symbol.endsWith('USD'))) {
           map.set(item.symbol, item);
         }

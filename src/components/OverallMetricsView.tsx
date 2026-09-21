@@ -812,7 +812,7 @@ export const OverallMetricsView: React.FC<OverallMetricsViewProps> = ({
           <div>
             <div className="flex items-baseline gap-2">
               <span className="text-3xl font-black text-amber-400">{formatRatio(verification.payoffRatio)}:1</span>
-              <span className="text-xs text-stone-400 font-medium">Win-to-Loss Ratio</span>
+              <span className="text-xs text-stone-400 font-medium">Payoff Ratio (avg win ÷ avg loss)</span>
             </div>
             <p className="text-[11px] text-stone-300 mt-1">
               Average Win: <strong className="text-emerald-400">+${verification.avgWinUSD.toFixed(2)}</strong> vs Average Loss: <strong className="text-rose-400">-${verification.avgLossUSD.toFixed(2)}</strong>
