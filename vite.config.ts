@@ -17,12 +17,14 @@ export default defineConfig(() => {
       hmr: process.env.DISABLE_HMR !== 'true',
       // Disable file watching when DISABLE_HMR is true to save CPU during agent edits.
       watch: process.env.DISABLE_HMR === 'true' ? null : {},
-      proxy: {
-        '/api': {
-          target: process.env.BACKEND_URL || 'http://localhost:3001',
-          changeOrigin: true,
-        },
-      },
+      // Only when a trading server is actually running beside the dev server
+      // (e.g. BACKEND_URL=http://localhost:3001 with `bun run server`).
+      // Without one, the proxy logged a connection error on every /api/status
+      // check, every 20s; unproxied, the check simply finds no server and the
+      // browser trades itself, as intended.
+      ...(process.env.BACKEND_URL
+        ? { proxy: { '/api': { target: process.env.BACKEND_URL, changeOrigin: true } } }
+        : {}),
     },
   };
 });
