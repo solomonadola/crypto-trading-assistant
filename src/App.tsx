@@ -22,6 +22,7 @@ import {
   syncOpenTradesWithLivePrices
 } from './services/automatedFeedService';
 import { scanLiveMarketEntries, deploySignalToAutomatedFeed } from './services/entryScannerService';
+import { catchUpOpenTrades } from './services/catchUpService';
 import { calculateBankrollState } from './services/bankrollService';
 import { AUTOPILOT_CONFIG } from './config/autopilot';
 import {
@@ -33,6 +34,31 @@ import {
 import { enrichCoinsWithBinance, fetchLiveMarketCoins, fetchBinanceTickers } from './services/binanceService';
 import { isFirebaseInitialized } from './lib/firebase';
 import { Zap, CheckCircle2, AlertCircle } from 'lucide-react';
+
+// When open trades were last evaluated against the market. Persisted so a
+// reopened app knows how long it was away and can replay the gap.
+const LAST_EVAL_KEY = 'cryptostudy_last_trade_eval_at';
+const CATCH_UP_MIN_GAP_MS = 90_000;   // normal refreshes are 30s apart; anything longer is a gap
+
+function readLastEvalAt(): number | null {
+  try {
+    const v = Number(localStorage.getItem(LAST_EVAL_KEY));
+    return Number.isFinite(v) && v > 0 ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeLastEvalAt(ms: number): void {
+  try { localStorage.setItem(LAST_EVAL_KEY, String(ms)); } catch {}
+}
+
+function formatGap(ms: number): string {
+  const m = Math.round(ms / 60000);
+  if (m < 90) return `${m} min`;
+  const h = ms / 3600000;
+  return h < 48 ? `${h.toFixed(1)} h` : `${(h / 24).toFixed(1)} days`;
+}
 
 export default function App() {
   const [coins, setCoins] = useState<CryptoCoin[]>([]);
@@ -140,7 +166,12 @@ export default function App() {
   const lastDeploySnapshotRef = useRef<number>(-1);
 
   // Sync market data with Binance live prices
+  const refreshInFlightRef = useRef(false);
+
   const handleRefreshLiveFeed = useCallback(async () => {
+    // A visibility change and the 30s timer can fire together; one at a time.
+    if (refreshInFlightRef.current) return;
+    refreshInFlightRef.current = true;
     setIsRefreshing(true);
     try {
       const enriched = await fetchLiveMarketCoins();
@@ -170,9 +201,40 @@ export default function App() {
         });
       } catch {}
 
-      // Pass known trades to avoid triggering getDocs from Firestore on every tick
-      const { updatedCount, events } = await syncOpenTradesWithLivePrices(priceMap, tradesRef.current);
-      if (events.length > 0) {
+      // Catch up on whatever happened while the app was closed or hidden.
+      // Without this, a stop crossed while away filled at the price seen on
+      // return, and a target touched and reversed was never banked.
+      let knownTrades = await loadAutomatedTrades(false);
+      const lastEvalAt = readLastEvalAt();
+      const now = Date.now();
+      let catchUpComplete = true;
+      let catchUpNote: string | null = null;
+      if (lastEvalAt && now - lastEvalAt > CATCH_UP_MIN_GAP_MS && knownTrades.some((t) => t.status === 'OPEN')) {
+        const cu = await catchUpOpenTrades(knownTrades, lastEvalAt, now);
+        for (const t of cu.changed) {
+          await updateTradeRecord(t, t.status !== 'OPEN');
+        }
+        knownTrades = cu.trades;
+        cu.events.forEach((e) => console.info('[Catch-up]', e));
+        if (cu.failedSymbols.length) {
+          // Keep the old timestamp so the gap is retried, not silently lost.
+          catchUpComplete = false;
+          console.warn(`[Catch-up] Could not fetch candles for ${cu.failedSymbols.join(', ')}; will retry.`);
+        }
+        const away = formatGap(now - lastEvalAt);
+        catchUpNote = cu.closedCount > 0
+          ? `Caught up on ${away} away: ${cu.closedCount} trade${cu.closedCount === 1 ? '' : 's'} closed while the app was closed.`
+          : cu.changed.length > 0
+            ? `Caught up on ${away} away: ${cu.changed.length} open trade${cu.changed.length === 1 ? '' : 's'} updated.`
+            : null;
+      }
+
+      const { updatedCount, events } = await syncOpenTradesWithLivePrices(priceMap, knownTrades);
+      if (catchUpComplete) writeLastEvalAt(Date.now());
+
+      if (catchUpNote) {
+        showNotification(catchUpNote, 'info');
+      } else if (events.length > 0) {
         showNotification(events[0], 'success');
       } else if (updatedCount > 0) {
         showNotification(`Synced ${updatedCount} open trades with live market prices.`, 'info');
@@ -183,9 +245,22 @@ export default function App() {
       console.warn('Live feed refresh error:', e);
       showNotification('Market data refreshed (offline fallback active).', 'info');
     } finally {
+      refreshInFlightRef.current = false;
       setIsRefreshing(false);
     }
   }, [showNotification]);
+
+  // Evaluate trades as soon as the app opens and whenever the tab becomes
+  // visible again, rather than waiting up to 30s. This is what triggers the
+  // catch-up replay after time away.
+  useEffect(() => {
+    handleRefreshLiveFeed();
+    const onVisible = () => {
+      if (typeof document !== 'undefined' && !document.hidden) handleRefreshLiveFeed();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [handleRefreshLiveFeed]);
 
   // Periodic automatic sync every 30 seconds (pauses when browser tab is inactive to protect quota and performance)
   useEffect(() => {
