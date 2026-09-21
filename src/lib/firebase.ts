@@ -9,11 +9,21 @@ export const db = firebaseConfig.firestoreDatabaseId
   ? getFirestore(app, firebaseConfig.firestoreDatabaseId)
   : getFirestore(app);
 
-// Anonymous auth. The Firestore rules previously allowed unauthenticated
-// read/write/delete on crypto_automated_trades - and since the projectId ships
-// in the client bundle, anyone could read, poison or wipe the trade history.
-// Poisoned records would silently corrupt every statistic computed from them.
-// Signing in anonymously gives the rules a request.auth to check against.
+// Anonymous auth.
+//
+// The firestore.rules FILE in this repo allowed unauthenticated read/write/
+// delete, with `allow delete: if isValidId(tradeId)` amounting to
+// `allow delete: if true`. The DEPLOYED rules are stricter - a REST read with
+// only the projectId and public apiKey returns PERMISSION_DENIED - so the repo
+// file was out of sync with what is actually running rather than describing a
+// live hole. The file has been corrected to match intent either way.
+//
+// Signing in anonymously gives those rules a request.auth to check against.
+// NOTE: this currently fails with ADMIN_ONLY_OPERATION because Anonymous
+// sign-in is disabled for this project. Until it is enabled in
+// Firebase console > Authentication > Sign-in method, every Firestore
+// operation is rejected and the app runs on localStorage alone - which means
+// no cross-device sync. getFirestoreHealth() reports this honestly.
 const auth = getAuth(app);
 
 export const authReady: Promise<string | null> = new Promise((resolve) => {
@@ -37,6 +47,42 @@ export const authReady: Promise<string | null> = new Promise((resolve) => {
 
 export function getCurrentUid(): string | null {
   return auth.currentUser?.uid ?? null;
+}
+
+/**
+ * Real health of the Firestore connection.
+ *
+ * isFirebaseInitialized() only confirmed the SDK objects existed, so the UI
+ * reported Firebase as live even when every read and write was being rejected.
+ * Writes fail into a catch that warns and falls back to localStorage, so the
+ * failure is invisible unless the console is open - and the data then lives on
+ * one browser only, with no cross-device consistency.
+ */
+export type FirestoreHealth = 'unknown' | 'ok' | 'denied' | 'quota' | 'offline';
+let firestoreHealth: FirestoreHealth = 'unknown';
+
+export function getFirestoreHealth(): FirestoreHealth {
+  return isQuotaBlocked() ? 'quota' : firestoreHealth;
+}
+
+/** Called by the data layer after each Firestore operation. */
+export function reportFirestoreResult(err?: unknown): void {
+  if (!err) { firestoreHealth = 'ok'; return; }
+  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+  if (msg.includes('permission') || msg.includes('insufficient') || msg.includes('unauthenticated')) {
+    if (firestoreHealth !== 'denied') {
+      console.warn(
+        '[Firestore] Permission denied - trades are being kept in localStorage only. ' +
+        'They will NOT sync across browsers or devices. Enable Anonymous sign-in ' +
+        '(Firebase console > Authentication > Sign-in method) and deploy firestore.rules.'
+      );
+    }
+    firestoreHealth = 'denied';
+  } else if (msg.includes('resource-exhausted') || msg.includes('quota')) {
+    firestoreHealth = 'quota';
+  } else {
+    firestoreHealth = 'offline';
+  }
 }
 
 // Operation types for Firestore logging & diagnostic error handling
@@ -116,7 +162,11 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
 }
 
 export function isFirebaseInitialized(): boolean {
-  return Boolean(app && db && firebaseConfig.projectId && !isQuotaBlocked());
+  // Configured AND actually usable. 'unknown' is treated as configured so the
+  // badge is not pessimistic before the first operation completes.
+  if (!app || !db || !firebaseConfig.projectId || isQuotaBlocked()) return false;
+  const health = getFirestoreHealth();
+  return health === 'ok' || health === 'unknown';
 }
 
 // Connection test per Firebase integration skill

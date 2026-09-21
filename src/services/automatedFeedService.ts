@@ -7,7 +7,7 @@ import {
   deleteDoc, 
   onSnapshot 
 } from 'firebase/firestore';
-import { db, isQuotaBlocked, markQuotaExceeded, authReady, getCurrentUid } from '../lib/firebase';
+import { db, isQuotaBlocked, markQuotaExceeded, authReady, getCurrentUid, reportFirestoreResult } from '../lib/firebase';
 import { AutomatedTradeRecord, AutomatedFeedAuditStats, StrategyVerificationReport } from '../types/automatedFeed';
 import { CryptoCoin } from '../types';
 import { evaluateTradeCycle } from './cycleEngineService';
@@ -154,6 +154,7 @@ export async function fetchAutomatedTrades(forceNetwork: boolean = false): Promi
         loadedTrades = [];
       }
     } catch (err) {
+      reportFirestoreResult(err);
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.toLowerCase().includes('resource-exhausted') || msg.toLowerCase().includes('quota')) {
         markQuotaExceeded();
@@ -225,6 +226,7 @@ export function subscribeToAutomatedTrades(callback: (trades: AutomatedTradeReco
           callback(sanitized);
         }
       }, (err) => {
+        reportFirestoreResult(err);
         const msg = err instanceof Error ? err.message : String(err);
         if (msg.toLowerCase().includes('resource-exhausted') || msg.toLowerCase().includes('quota')) {
           markQuotaExceeded();
@@ -316,7 +318,9 @@ export async function executeSimulatedTrade(trade: AutomatedTradeRecord): Promis
       await authReady;
       const uid = getCurrentUid();
       await setDoc(doc(db, TRADES_COLLECTION, trade.id), uid ? { ...trade, ownerUid: uid } : trade);
+      reportFirestoreResult();
     } catch (err) {
+      reportFirestoreResult(err);
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.toLowerCase().includes('resource-exhausted') || msg.toLowerCase().includes('quota')) {
         markQuotaExceeded();
@@ -349,6 +353,7 @@ export async function updateAutomatedTrade(trade: AutomatedTradeRecord, syncToFi
       const docRef = doc(db, TRADES_COLLECTION, trade.id);
       await updateDoc(docRef, { ...trade });
     } catch (err) {
+      reportFirestoreResult(err);
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.toLowerCase().includes('resource-exhausted') || msg.toLowerCase().includes('quota')) {
         markQuotaExceeded();
@@ -546,6 +551,7 @@ export async function resetAutomatedTrades(): Promise<AutomatedTradeRecord[]> {
         await deleteDoc(doc(db, TRADES_COLLECTION, d.id));
       }
     } catch (err) {
+      reportFirestoreResult(err);
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.toLowerCase().includes('resource-exhausted') || msg.toLowerCase().includes('quota')) {
         markQuotaExceeded();
