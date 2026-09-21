@@ -1,6 +1,7 @@
 import { AutomatedTradeRecord, NumericalCycleMetrics } from '../types/automatedFeed';
 import { roundPrice } from './entryScannerService';
 import { sideCostUSD } from '../config/costs';
+import { GEOMETRY_CONFIG } from '../config/geometry';
 
 export interface CycleEvaluationResult {
   trade: AutomatedTradeRecord;
@@ -119,12 +120,16 @@ export function evaluateTradeCycle(
 
   // Initialize Ratchet if missing
   if (!updated.ratchet) {
+    // Floor expressed in R (stop distance) rather than a fixed +/-0.3%.
+    const beFloorPct = Math.abs(updated.stopLossPct || 3.2) * GEOMETRY_CONFIG.breakevenFloorRMultiple;
     updated.ratchet = {
       isArmed: false,
       triggerPct: updated.harvestTiers.tier1.targetPct,
-      floorPrice: isShort ? roundPrice(entryP * 0.997) : roundPrice(entryP * 1.003),
+      floorPrice: isShort
+        ? roundPrice(entryP * (1 - beFloorPct / 100))
+        : roundPrice(entryP * (1 + beFloorPct / 100)),
       currentProtection: 'INITIAL_DEFENSE',
-      floorBufferPct: 0.3
+      floorBufferPct: +beFloorPct.toFixed(2)
     };
     hasChanged = true;
   }
@@ -150,7 +155,10 @@ export function evaluateTradeCycle(
       updated.ratchet.isArmed = true;
       updated.ratchet.currentProtection = 'ZERO_RISK_LOCKED';
       updated.stopLossPrice = updated.ratchet.floorPrice;
-      updated.stopLossPct = 0.3; // Guaranteed profit buffer
+      // Record the real distance to the armed floor, not a hardcoded 0.3.
+      updated.stopLossPct = entryP > 0
+        ? +(((isShort ? entryP - updated.ratchet.floorPrice : updated.ratchet.floorPrice - entryP) / entryP) * 100).toFixed(2)
+        : 0;
       hasChanged = true;
       eventTriggered = 'TIER_1_HARVESTED';
       message = effectiveTier1Pct > updated.harvestTiers.tier1.targetPct + 2

@@ -17,6 +17,7 @@ import { executeSimulatedTrade, fetchAutomatedTrades } from './automatedFeedServ
 import { calculateBankrollState } from './bankrollService';
 import { calculateCoinOrderFlow, formatOrderFlowUSD, formatCashUSD } from './orderFlowService';
 import { sideCostUSD } from '../config/costs';
+import { GEOMETRY_CONFIG, resolveGeometry, resolvePositionSizeUSD } from '../config/geometry';
 
 // In-Memory & LocalStorage Signal Persistence Registry (Anti-Jitter Rule #1)
 interface SignalPersistenceRecord {
@@ -425,7 +426,12 @@ export function scanLiveMarketEntries(coins: CryptoCoin[], mode: ScannerTradingM
     const atrMultiplierStop = mode === 'FUTURES_1_2D' 
       ? (archetype === 'MEAN_REVERSION_DIP' ? 1.05 : archetype === 'VOLATILITY_SQUEEZE' ? 0.85 : 0.95)
       : (archetype === 'MEAN_REVERSION_DIP' ? 1.35 : archetype === 'VOLATILITY_SQUEEZE' ? 1.15 : 1.25);
-    const stopLossPct = mode === 'FUTURES_1_2D' 
+    // ATR-scaled ladder (config/geometry.ts). The legacy branch is kept so the
+    // original capped behaviour can be reproduced for a controlled comparison.
+    const atrLadder = GEOMETRY_CONFIG.useAtrGeometry ? resolveGeometry(atrPct) : null;
+    const stopLossPct = atrLadder
+      ? atrLadder.stopPct
+      : mode === 'FUTURES_1_2D'
       ? +Math.max(1.4, Math.min(3.2, atrPct * atrMultiplierStop)).toFixed(2)
       : +Math.max(2.2, Math.min(6.5, atrPct * atrMultiplierStop)).toFixed(2);
     const stopLossPrice = direction === 'SHORT'
@@ -434,7 +440,9 @@ export function scanLiveMarketEntries(coins: CryptoCoin[], mode: ScannerTradingM
     const riskAmountUSD = +((suggestedTrancheUSD * (stopLossPct / 100))).toFixed(2);
 
     const atrMultiplierTier1 = mode === 'FUTURES_1_2D' ? 0.95 : (archetype === 'VOLATILITY_SQUEEZE' ? +Math.max(1.15, (bbWidthPct * 0.8) / atrPct).toFixed(2) : 1.15);
-    const tier1Pct = mode === 'FUTURES_1_2D' 
+    const tier1Pct = atrLadder
+      ? atrLadder.tier1Pct
+      : mode === 'FUTURES_1_2D'
       ? +Math.max(1.8, Math.min(3.8, atrPct * atrMultiplierTier1)).toFixed(2)
       : +Math.max(1.8, Math.min(6.5, atrPct * atrMultiplierTier1)).toFixed(2);
     const tier1Price = direction === 'SHORT'
@@ -443,7 +451,9 @@ export function scanLiveMarketEntries(coins: CryptoCoin[], mode: ScannerTradingM
     const tier1RewardUSD = +((suggestedTrancheUSD * 0.33 * (tier1Pct / 100))).toFixed(2);
 
     const atrMultiplierTier2 = mode === 'FUTURES_1_2D' ? 1.85 : (archetype === 'VOLATILITY_SQUEEZE' ? 2.60 : 2.30);
-    const tier2Pct = mode === 'FUTURES_1_2D' 
+    const tier2Pct = atrLadder
+      ? atrLadder.tier2Pct
+      : mode === 'FUTURES_1_2D'
       ? +Math.max(3.6, Math.min(7.5, atrPct * atrMultiplierTier2)).toFixed(2)
       : +Math.max(4.2, Math.min(14.0, atrPct * atrMultiplierTier2)).toFixed(2);
     const tier2Price = direction === 'SHORT'
@@ -451,16 +461,20 @@ export function scanLiveMarketEntries(coins: CryptoCoin[], mode: ScannerTradingM
       : roundPrice(price * (1 + tier2Pct / 100));
     const tier2RewardUSD = +((suggestedTrancheUSD * 0.33 * (tier2Pct / 100))).toFixed(2);
 
-    const tier3Pct = mode === 'FUTURES_1_2D' 
+    const tier3Pct = atrLadder
+      ? atrLadder.tier3Pct
+      : mode === 'FUTURES_1_2D'
       ? +Math.max(5.5, Math.min(12.0, atrPct * 2.8)).toFixed(2)
       : +Math.max(7.5, Math.min(24.0, atrPct * 4.0)).toFixed(2);
     const tier3TargetPrice = direction === 'SHORT'
       ? roundPrice(price * (1 - tier3Pct / 100))
       : roundPrice(price * (1 + tier3Pct / 100));
     const rewardRiskRatio = +(tier2Pct / stopLossPct).toFixed(1);
+    // Floor once tier 1 harvests, expressed in R rather than a fixed +0.3%.
+    const beFloorPct = stopLossPct * GEOMETRY_CONFIG.breakevenFloorRMultiple;
     const breakevenRatchetPrice = direction === 'SHORT'
-      ? roundPrice(price * 0.997)
-      : roundPrice(price * 1.003);
+      ? roundPrice(price * (1 - beFloorPct / 100))
+      : roundPrice(price * (1 + beFloorPct / 100));
 
     const momentumState: 'ACCELERATING' | 'HEALTHY_PULLBACK' | 'CONSOLIDATING' | 'EXHAUSTED' = 
       pseudoRsi > 65 ? 'ACCELERATING' : pseudoRsi < 42 ? 'HEALTHY_PULLBACK' : bbWidthPct < 4.5 ? 'CONSOLIDATING' : 'HEALTHY_PULLBACK';
@@ -1604,9 +1618,17 @@ export async function deploySignalToAutomatedFeed(
   }
 
   const bankroll = calculateBankrollState(currentTrades);
-  const trancheUSD = typeof customTrancheUSD === 'number' && customTrancheUSD > 0 
-    ? customTrancheUSD 
+  const baseTrancheUSD = typeof customTrancheUSD === 'number' && customTrancheUSD > 0
+    ? customTrancheUSD
     : bankroll.trancheSizeUSD;
+
+  // Size for constant dollar risk rather than constant notional, so a wide
+  // ATR stop takes a smaller position instead of a proportionally bigger loss.
+  const trancheUSD = resolvePositionSizeUSD(
+    baseTrancheUSD,
+    bankroll.totalPortfolioValueUSD,
+    signal.tradePlan.stopLossPct
+  );
 
   const currentP = signal.currentPrice;
   const units = currentP > 0 ? +(trancheUSD / currentP).toFixed(currentP < 0.01 ? 2 : 6) : 0.1;
