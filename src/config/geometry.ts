@@ -80,6 +80,18 @@ export interface GeometryConfig {
 
   /** Dollar risk per trade as a percent of total equity. */
   riskPerTradePct: number;
+
+  /**
+   * Ceiling on a gap-through harvest, as a multiple of the tier's target.
+   *
+   * The engine harvests at max(targetPct, currentReturnPct) so a price that
+   * gaps past a tier is banked at the better price. That is defensible for a
+   * market order - but it was unbounded, so a single bad tick wrote a
+   * permanent realizedCashBankedUSD. A spurious +700% print banks $23.10 on a
+   * $10 tranche, and the old P&L clamp in bankrollService then hid it from the
+   * totals rather than surfacing it.
+   */
+  maxGapHarvestMultiple: number;
 }
 
 export const GEOMETRY_CONFIG: GeometryConfig = {
@@ -93,6 +105,7 @@ export const GEOMETRY_CONFIG: GeometryConfig = {
   breakevenFloorRMultiple: 0.1,
   useRiskBasedSizing: true,
   riskPerTradePct: 0.4,
+  maxGapHarvestMultiple: 3.0,
 };
 
 /** Resolves the full ladder from ATR. Returns percentages. */
@@ -121,4 +134,19 @@ export function resolvePositionSizeUSD(
   const sized = riskUSD / (stopPct / 100);
   // Never exceed the tranche: a very tight stop must not lever the book up.
   return +Math.min(trancheUSD, Math.max(1, sized)).toFixed(2);
+}
+
+/**
+ * Bounds a gap-through harvest and reports whether the cap bit, so the caller
+ * can log a bad tick instead of silently banking it.
+ */
+export function capGapHarvest(
+  targetPct: number,
+  currentReturnPct: number,
+  cfg: GeometryConfig = GEOMETRY_CONFIG
+): { pct: number; capped: boolean } {
+  const ceiling = Math.abs(targetPct) * cfg.maxGapHarvestMultiple;
+  const raw = Math.max(targetPct, currentReturnPct);
+  if (!Number.isFinite(raw)) return { pct: targetPct, capped: true };
+  return raw > ceiling ? { pct: ceiling, capped: true } : { pct: raw, capped: false };
 }

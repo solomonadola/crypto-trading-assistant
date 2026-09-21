@@ -1,7 +1,7 @@
 import { AutomatedTradeRecord, NumericalCycleMetrics } from '../types/automatedFeed';
 import { roundPrice } from './entryScannerService';
 import { sideCostUSD } from '../config/costs';
-import { GEOMETRY_CONFIG } from '../config/geometry';
+import { GEOMETRY_CONFIG, capGapHarvest } from '../config/geometry';
 
 export interface CycleEvaluationResult {
   trade: AutomatedTradeRecord;
@@ -143,7 +143,11 @@ export function evaluateTradeCycle(
     if (reached) {
       updated.harvestTiers.tier1.status = 'HARVESTED';
       // Capture actual market price if an instant pump exceeded the target
-      const effectiveTier1Pct = Math.max(updated.harvestTiers.tier1.targetPct, currentReturnPct);
+      const gap1 = capGapHarvest(updated.harvestTiers.tier1.targetPct, currentReturnPct);
+      if (gap1.capped) {
+        console.warn(`[CycleEngine] {1} ${updated.symbol} reported +${currentReturnPct}% at tier 1 - implausible, capped to +${gap1.pct}%. Check the price feed for this symbol.`.replace('{1} ',''));
+      }
+      const effectiveTier1Pct = gap1.pct;
       // Net of the exit cost on the fraction actually traded (33% of notional).
       const t1Cost = sideCostUSD(posSize * 0.33);
       const harvestGain = +((posSize * 0.33 * (effectiveTier1Pct / 100)) - t1Cost).toFixed(2);
@@ -174,7 +178,11 @@ export function evaluateTradeCycle(
       : livePrice >= updated.harvestTiers.tier2.targetPrice;
     if (reached) {
       updated.harvestTiers.tier2.status = 'HARVESTED';
-      const effectiveTier2Pct = Math.max(updated.harvestTiers.tier2.targetPct, currentReturnPct);
+      const gap2 = capGapHarvest(updated.harvestTiers.tier2.targetPct, currentReturnPct);
+      if (gap2.capped) {
+        console.warn(`[CycleEngine] {2} ${updated.symbol} reported +${currentReturnPct}% at tier 2 - implausible, capped to +${gap2.pct}%. Check the price feed for this symbol.`.replace('{2} ',''));
+      }
+      const effectiveTier2Pct = gap2.pct;
       const t2Cost = sideCostUSD(posSize * 0.33);
       const harvestGain = +((posSize * 0.33 * (effectiveTier2Pct / 100)) - t2Cost).toFixed(2);
       updated.totalFeesUSD = +((updated.totalFeesUSD || 0) + t2Cost).toFixed(4);
@@ -200,7 +208,11 @@ export function evaluateTradeCycle(
     if (reached) {
       updated.harvestTiers.tier3.status = 'HARVESTED';
       // Bank 50% of the remaining units (17% of total), leaving the final 17% as a free trailing runner
-      const effectiveTier3Pct = Math.max(updated.harvestTiers.tier3.targetPct, currentReturnPct);
+      const gap3 = capGapHarvest(updated.harvestTiers.tier3.targetPct, currentReturnPct);
+      if (gap3.capped) {
+        console.warn(`[CycleEngine] {3} ${updated.symbol} reported +${currentReturnPct}% at tier 3 - implausible, capped to +${gap3.pct}%. Check the price feed for this symbol.`.replace('{3} ',''));
+      }
+      const effectiveTier3Pct = gap3.pct;
       const t3Cost = sideCostUSD(posSize * 0.17);
       const harvestGain = +((posSize * 0.17 * (effectiveTier3Pct / 100)) - t3Cost).toFixed(2);
       updated.totalFeesUSD = +((updated.totalFeesUSD || 0) + t3Cost).toFixed(4);
