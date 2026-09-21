@@ -16,19 +16,23 @@ const FAKE_FIRESTORE = `
   export const getFirestore = () => ({});
   export const collection = (_db, name) => ({ name });
   export const doc = (_db, col, id) => ({ col, id });
-  export const setDoc = async (ref, data) => { log({ op: 'set', id: ref.id, data }); };
-  export const updateDoc = async (ref, data) => { log({ op: 'update', id: ref.id, data }); };
+  const maybeFail = () => { if (globalThis.__fsWriteFail) throw new Error(globalThis.__fsWriteFail); };
+  export const setDoc = async (ref, data) => { maybeFail(); log({ op: 'set', id: ref.id, data }); };
+  export const updateDoc = async (ref, data) => { maybeFail(); log({ op: 'update', id: ref.id, data }); };
   export const deleteDoc = async (ref) => { log({ op: 'delete', id: ref.id }); };
   export const getDocs = async () => snap(globalThis.__fsDocs || []);
   export const getDocFromServer = async () => ({});
   export const onSnapshot = (_ref, next) => { (globalThis.__listeners = globalThis.__listeners || []).push(next); return () => {}; };
+  export const query = (c) => c;
+  export const where = () => ({});
+  export const getDocsFromServer = async () => snap((globalThis.__fsDocs || []).filter((d) => d.status === 'OPEN'));
 `;
 
 let build = 0;
 async function load(writesOff) {
   const out = await esbuild.build({
     stdin: {
-      contents: "export * from './src/worker/tradingWorker'; export { mergeRemoteTrades, loadLocalTrades } from './src/services/automatedFeedService';",
+      contents: "export * from './src/worker/tradingWorker'; export { mergeRemoteTrades, loadLocalTrades, executeSimulatedTrade, updateAutomatedTrade, subscribeToAutomatedTrades, isTradeListAuthoritative, getPendingWriteCount, syncOpenTradesWithLivePrices } from './src/services/automatedFeedService';",
       resolveDir: process.cwd(), loader: 'ts',
     },
     bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'error',
@@ -72,7 +76,7 @@ globalThis.fetch = async (url) => {
   return { ok: false, json: async () => null };
 };
 const deliver = (docs) => { globalThis.__fsDocs = docs; (globalThis.__listeners || []).forEach((l) => l(globalThis.__snap(docs))); };
-const reset = () => { globalThis.__fsCalls = []; globalThis.__listeners = []; globalThis.__fsDocs = []; globalThis.localStorage?.clear(); };
+const reset = () => { globalThis.__fsWriteFail = null; globalThis.__fsCalls = []; globalThis.__listeners = []; globalThis.__fsDocs = []; globalThis.localStorage?.clear(); };
 const settle = () => new Promise((r) => setTimeout(r, 30));
 const writes = () => globalThis.__fsCalls || [];
 
@@ -201,6 +205,70 @@ console.log('\n6. Merging a Firestore snapshot into the saved copy');
   const ids = m([], [orphanOld, orphanNew], NOW).map((t) => t.id);
   check('trade missing from Firestore for an hour is dropped', !ids.includes('old'));
   check('trade opened a minute ago is kept (write in flight)', ids.includes('new'));
+}
+
+console.log('\n7. Never more than 10 open: the database is checked, not just this copy');
+{
+  reset();
+  const w = await load(false);
+  const unsub = w.subscribeToAutomatedTrades(() => {});
+  // The database has 10 open; this copy has only seen 2 of them.
+  const ten = ['A','B','C','D','E','F','G','H','I','J'].map((x) => trade(x, x + 'X'));
+  globalThis.__fsDocs = ten;
+  localStorage.setItem('crypto_automated_trades_local_fallback', JSON.stringify(ten.slice(0, 2)));
+  const ok = await w.executeSimulatedTrade(trade('new', 'NEWX', { openedAtTimestamp: NOW }));
+  check('11th position refused', ok === false);
+  check('nothing written', !writes().some((c) => c.id === 'new'));
+  globalThis.__fsDocs = ten.slice(0, 3);
+  const dup = await w.executeSimulatedTrade(trade('dup', 'CX', { openedAtTimestamp: NOW }));
+  check('coin already open in the database refused', dup === false);
+  unsub();
+}
+
+console.log('\n8. A failed save is queued and retried, not left in one browser');
+{
+  reset();
+  const w = await load(false);
+  const unsub = w.subscribeToAutomatedTrades(() => {});
+  deliver([]);
+  globalThis.__fsWriteFail = 'unavailable';
+  const ok = await w.executeSimulatedTrade(trade('q1', 'QQQ', { openedAtTimestamp: NOW - 3600_000 }));
+  check('trade opened locally', ok === true);
+  check('queued for retry', w.getPendingWriteCount() === 1);
+  deliver([]);   // database still without it: kept because it is queued
+  await settle();
+  check('kept by the merge while queued', w.loadLocalTrades().some((t) => t.id === 'q1'));
+  globalThis.__fsWriteFail = null;
+  deliver([]);   // next snapshot flushes the queue
+  await settle();
+  check('written on retry', writes().some((c) => c.op === 'set' && c.id === 'q1'));
+  check('queue empty', w.getPendingWriteCount() === 0);
+
+  // With no snapshot arriving, the 30s refresh retries it.
+  globalThis.__fsWriteFail = 'unavailable';
+  await w.updateAutomatedTrade({ ...w.loadLocalTrades()[0], status: 'STOPPED' }, true);
+  check('failed close queued', w.getPendingWriteCount() === 1);
+  globalThis.__fsWriteFail = null;
+  await w.syncOpenTradesWithLivePrices(new Map(), w.loadLocalTrades());
+  check('refresh retried it', w.getPendingWriteCount() === 0 && writes().some((c) => c.op === 'update' && c.id === 'q1' && c.data.status === 'STOPPED'));
+  unsub();
+}
+
+console.log('\n9. Database first at startup');
+{
+  reset();
+  const w = await load(false);
+  localStorage.setItem('crypto_automated_trades_local_fallback', JSON.stringify([trade('stale', 'OLD', { status: 'COMPLETED' })]));
+  const unsub = w.subscribeToAutomatedTrades(() => {});
+  check('not acting on the saved copy before Firestore answers', w.isTradeListAuthoritative() === false);
+  (globalThis.__listeners || []).forEach((l) => l({ ...globalThis.__snap([]), metadata: { fromCache: true } }));
+  check('an offline cache snapshot does not count as the answer', w.isTradeListAuthoritative() === false);
+  check('...and does not wipe the list', w.loadLocalTrades().length === 1);
+  deliver([trade('real', 'SOL')]);
+  check('acts once Firestore has answered', w.isTradeListAuthoritative() === true);
+  const ids = w.loadLocalTrades().map((t) => t.id);
+  check('list is now exactly the database', ids.length === 1 && ids[0] === 'real', ids.join(','));
+  unsub();
 }
 
 console.log(`\n${fails === 0 ? 'ALL WORKER CHECKS PASS' : fails + ' CHECK(S) FAILED'}`);

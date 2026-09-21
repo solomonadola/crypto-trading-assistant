@@ -1,5 +1,8 @@
-import { 
-  collection, 
+import {
+  collection,
+  query,
+  where,
+  getDocsFromServer,
   getDocs, 
   setDoc, 
   doc, 
@@ -7,7 +10,7 @@ import {
   deleteDoc, 
   onSnapshot 
 } from 'firebase/firestore';
-import { db, isQuotaBlocked, markQuotaExceeded, reportFirestoreResult, FIRESTORE_WRITES_ENABLED } from '../lib/firebase';
+import { db, isQuotaBlocked, markQuotaExceeded, reportFirestoreResult, getFirestoreHealth, FIRESTORE_WRITES_ENABLED } from '../lib/firebase';
 import { outcome } from './metrics';
 import { AutomatedTradeRecord, AutomatedFeedAuditStats, StrategyVerificationReport } from '../types/automatedFeed';
 import { CryptoCoin } from '../types';
@@ -114,6 +117,94 @@ function safeSetLocalStorage(key: string, value: string): void {
   } catch {}
 }
 
+// ---------------------------------------------------------------- database first
+//
+// Firestore is the record; this copy's saved list is a working cache of it.
+// Two rules keep them from drifting apart:
+//  1. Nothing is evaluated or deployed until Firestore has delivered the list
+//     (or has clearly failed - see isTradeListAuthoritative).
+//  2. A write that fails is queued and retried, not left in this browser only.
+//     Queued trades survive the merge until their write lands.
+
+const PENDING_KEY = 'crypto_automated_trades_pending_writes';
+type PendingOp = 'create' | 'update';
+
+function getPending(): Record<string, PendingOp> {
+  try {
+    const v = JSON.parse(safeGetLocalStorage(PENDING_KEY) || '{}');
+    return v && typeof v === 'object' ? v : {};
+  } catch {
+    return {};
+  }
+}
+
+function setPending(id: string, op: PendingOp | null): void {
+  const p = getPending();
+  if (op) p[id] = p[id] === 'create' ? 'create' : op;   // a create stays a create
+  else delete p[id];
+  safeSetLocalStorage(PENDING_KEY, JSON.stringify(p));
+}
+
+/** Trades whose latest change has not reached Firestore yet. */
+export function getPendingWriteCount(): number {
+  return Object.keys(getPending()).length;
+}
+
+let firstSnapshotAt = 0;
+let subscribedAt = 0;
+const FIRESTORE_WAIT_MS = 20_000;
+
+/**
+ * May this copy act on its trade list - evaluate stops, open trades? Only once
+ * Firestore has delivered it. If Firestore is known to be failing, or has not
+ * answered within 20s, the saved copy is used (and its writes queue for later)
+ * so an outage does not stop trading. A read-only copy is its own record.
+ */
+export function isTradeListAuthoritative(now: number = Date.now()): boolean {
+  if (!FIRESTORE_WRITES_ENABLED || firstSnapshotAt > 0) return true;
+  const health = getFirestoreHealth();
+  if (health === 'denied' || health === 'quota' || health === 'offline') return true;
+  return subscribedAt > 0 && now - subscribedAt > FIRESTORE_WAIT_MS;
+}
+
+function isNotFound(err: unknown): boolean {
+  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+  return msg.includes('not-found') || msg.includes('no document');
+}
+
+let flushing = false;
+
+/** Retries queued writes. A queued update for a trade deleted in Firestore is dropped: the database wins. */
+export async function flushPendingWrites(): Promise<number> {
+  if (flushing || !FIRESTORE_WRITES_ENABLED || isQuotaBlocked()) return 0;
+  const pending = getPending();
+  const ids = Object.keys(pending);
+  if (!ids.length) return 0;
+  flushing = true;
+  let written = 0;
+  try {
+    const local = new Map(loadLocalTrades().map((t) => [t.id, t]));
+    for (const id of ids) {
+      const t = local.get(id);
+      if (!t) { setPending(id, null); continue; }
+      try {
+        if (pending[id] === 'create') await setDoc(doc(db, TRADES_COLLECTION, id), t);
+        else await updateDoc(doc(db, TRADES_COLLECTION, id), { ...t });
+        setPending(id, null);
+        written++;
+      } catch (err) {
+        if (isNotFound(err)) { setPending(id, null); continue; }
+        reportFirestoreResult(err);
+        break;   // still failing; try again on the next snapshot
+      }
+    }
+  } finally {
+    flushing = false;
+  }
+  if (written) console.info(`[Firestore] ${written} queued write(s) saved.`);
+  return written;
+}
+
 function filledTiers(t: AutomatedTradeRecord): number {
   const h = t.harvestTiers;
   return h ? [h.tier1, h.tier2, h.tier3].filter((x) => x && x.status !== 'PENDING').length : 0;
@@ -142,19 +233,22 @@ function filledTiers(t: AutomatedTradeRecord): number {
 export function mergeRemoteTrades(
   remote: AutomatedTradeRecord[],
   local: AutomatedTradeRecord[],
-  now: number = Date.now()
+  now: number = Date.now(),
+  pendingIds: Set<string> = new Set()
 ): AutomatedTradeRecord[] {
   const localById = new Map(local.map((t) => [t.id, t]));
   const remoteIds = new Set(remote.map((t) => t.id));
   const merged = remote.map((r) => {
     const l = localById.get(r.id);
+    if (l && pendingIds.has(r.id)) return l;   // our change has not landed yet
     if (!l || r.status !== 'OPEN') return r;
     if (l.status !== 'OPEN') return l;
     if (filledTiers(r) > filledTiers(l)) return r;
     return { ...l, excludedFromStats: r.excludedFromStats, excludedReason: r.excludedReason };
   });
   for (const l of local) {
-    if (!remoteIds.has(l.id) && now - (l.openedAtTimestamp || 0) < 5 * 60_000) merged.push(l);
+    if (remoteIds.has(l.id)) continue;
+    if (pendingIds.has(l.id) || now - (l.openedAtTimestamp || 0) < 5 * 60_000) merged.push(l);
   }
   return merged;
 }
@@ -269,8 +363,10 @@ export async function fetchAutomatedTrades(forceNetwork: boolean = false): Promi
  */
 export function subscribeToAutomatedTrades(callback: (trades: AutomatedTradeRecord[]) => void): () => void {
   subscribers.add(callback);
+  if (!subscribedAt) subscribedAt = Date.now();
 
-  // Fast initial load from local storage
+  // Shown at once so the screen is not empty, but not acted on until
+  // Firestore answers (isTradeListAuthoritative).
   fetchAutomatedTrades(false).then((t) => callback(t)).catch(console.error);
 
   // Firestore real-time listener if available and quota not exceeded
@@ -279,8 +375,13 @@ export function subscribeToAutomatedTrades(callback: (trades: AutomatedTradeReco
     try {
       const colRef = collection(db, TRADES_COLLECTION);
       unsubscribeFirestore = onSnapshot(colRef, (snapshot) => {
+        // Offline, the SDK can deliver a snapshot from its own (possibly empty)
+        // cache. That is not the database's answer: merging it would drop
+        // every saved trade.
+        if (snapshot.metadata?.fromCache && !firstSnapshotAt) return;
         reportFirestoreResult();   // a delivered snapshot means reads are working
-        if (!snapshot.empty) {
+        if (!firstSnapshotAt) firstSnapshotAt = Date.now();
+        {
           const trades: AutomatedTradeRecord[] = [];
           snapshot.forEach((docSnap) => trades.push(docSnap.data() as AutomatedTradeRecord));
           // Read-only copies keep their own history (their changes never
@@ -289,9 +390,11 @@ export function subscribeToAutomatedTrades(callback: (trades: AutomatedTradeReco
             callback(sortTrades(sanitizeActiveTrades(trades)));
             return;
           }
-          const merged = sortTrades(sanitizeActiveTrades(mergeRemoteTrades(trades, loadLocalTrades())));
+          const pendingIds = new Set(Object.keys(getPending()));
+          const merged = sortTrades(sanitizeActiveTrades(mergeRemoteTrades(trades, loadLocalTrades(), Date.now(), pendingIds)));
           safeSetLocalStorage(LOCAL_STORAGE_KEY, JSON.stringify(merged));
           notifySubscribers(merged);
+          if (pendingIds.size) flushPendingWrites().catch(() => {});
         }
       }, (err) => {
         reportFirestoreResult(err);
@@ -334,6 +437,28 @@ export function subscribeToAutomatedTrades(callback: (trades: AutomatedTradeReco
 }
 
 /**
+ * Open positions as the database has them right now, or null when that cannot
+ * be known (read-only copy, quota, offline, slow): the caller then falls back
+ * to its own saved list.
+ */
+async function fetchOpenTradesFromServer(): Promise<AutomatedTradeRecord[] | null> {
+  if (!FIRESTORE_WRITES_ENABLED || isQuotaBlocked()) return null;
+  try {
+    const q = query(collection(db, TRADES_COLLECTION), where('status', '==', 'OPEN'));
+    const snap = await Promise.race([
+      getDocsFromServer(q),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timed out')), FIRESTORE_READ_TIMEOUT_MS)),
+    ]);
+    const open: AutomatedTradeRecord[] = [];
+    snap.forEach((d) => open.push(d.data() as AutomatedTradeRecord));
+    return open;
+  } catch (err) {
+    console.warn('[Bankroll Guard] Could not check open positions in the database; using this copy:', err);
+    return null;
+  }
+}
+
+/**
  * Executes a simulated trade and writes it into Firestore and localStorage.
  * CRITICAL GUARDS:
  * 1. Strictly enforces MAX_CONCURRENT_TRADES (10 active trades max).
@@ -368,6 +493,26 @@ export async function executeSimulatedTrade(trade: AutomatedTradeRecord): Promis
     }
   }
 
+  // GUARD 1b: the same limits against the database, not just this copy. Each
+  // copy used to check only its own saved list, so separate browsers filled
+  // their slots independently - 13 positions were open at once, with AAVE
+  // and WLD held twice. A small read (open trades only) just before opening.
+  const remoteOpen = await fetchOpenTradesFromServer();
+  if (remoteOpen) {
+    if (remoteOpen.length >= MAX_CONCURRENT_TRADES) {
+      console.warn(`[Bankroll Guard] Blocked ${trade.symbol}: database already has ${remoteOpen.length} open positions.`);
+      return false;
+    }
+    if (remoteOpen.some((t) => t.symbol.toUpperCase() === trade.symbol.toUpperCase())) {
+      console.warn(`[Bankroll Guard] Blocked ${trade.symbol}: already open in the database.`);
+      return false;
+    }
+    if (MAJOR_COINS.has(sym) && remoteOpen.filter((t) => MAJOR_COINS.has(t.symbol.toUpperCase())).length >= MAX_MAJOR_COIN_SLOTS) {
+      console.warn(`[Bankroll Guard] Blocked ${trade.symbol}: major-coin slots full in the database.`);
+      return false;
+    }
+  }
+
   // GUARD 4: Must NOT exceed balance or liquid cash
   const bankroll = calculateBankrollState(sanitizedCurrent);
   const tradeSize = trade.positionSizeUSD || bankroll.trancheSizeUSD || 10.00;
@@ -383,7 +528,9 @@ export async function executeSimulatedTrade(trade: AutomatedTradeRecord): Promis
   }
 
   // Safe to execute: persist new trade to Firestore (Milestone event)
-  if (FIRESTORE_WRITES_ENABLED && !isQuotaBlocked()) {
+  if (FIRESTORE_WRITES_ENABLED && isQuotaBlocked()) {
+    setPending(trade.id, 'create');
+  } else if (FIRESTORE_WRITES_ENABLED) {
     try {
       await setDoc(doc(db, TRADES_COLLECTION, trade.id), trade);
       reportFirestoreResult();
@@ -393,7 +540,8 @@ export async function executeSimulatedTrade(trade: AutomatedTradeRecord): Promis
       if (msg.toLowerCase().includes('resource-exhausted') || msg.toLowerCase().includes('quota')) {
         markQuotaExceeded();
       }
-      console.warn('Failed to save trade to Firestore, saving to localStorage:', err);
+      setPending(trade.id, 'create');
+      console.warn('Failed to save trade to Firestore; queued for retry:', err);
     }
   }
 
@@ -415,17 +563,22 @@ export async function executeSimulatedTrade(trade: AutomatedTradeRecord): Promis
  */
 export async function updateAutomatedTrade(trade: AutomatedTradeRecord, syncToFirestore: boolean = false): Promise<void> {
   const shouldSync = syncToFirestore || trade.status !== 'OPEN';
-  if (FIRESTORE_WRITES_ENABLED && shouldSync && !isQuotaBlocked()) {
+  if (FIRESTORE_WRITES_ENABLED && shouldSync && isQuotaBlocked()) {
+    setPending(trade.id, 'update');
+  } else if (FIRESTORE_WRITES_ENABLED && shouldSync) {
     try {
       const docRef = doc(db, TRADES_COLLECTION, trade.id);
       await updateDoc(docRef, { ...trade });
+      setPending(trade.id, null);
     } catch (err) {
       reportFirestoreResult(err);
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.toLowerCase().includes('resource-exhausted') || msg.toLowerCase().includes('quota')) {
         markQuotaExceeded();
       }
-      console.warn('Failed to update trade in Firestore, updating local state:', err);
+      // Deleted in Firestore: the database wins, nothing to retry.
+      if (!isNotFound(err)) setPending(trade.id, 'update');
+      console.warn('Failed to update trade in Firestore; queued for retry:', err);
     }
   }
 
@@ -532,6 +685,8 @@ export async function syncOpenTradesWithLivePrices(
   trades: AutomatedTradeRecord[];
 }> {
   const now = Date.now();
+  // Retry queued writes on every refresh, not only when a snapshot arrives.
+  if (getPendingWriteCount()) await flushPendingWrites();
   // Use knownTrades from caller or cached local storage — zero getDocs calls!
   let currentTrades: AutomatedTradeRecord[] = knownTrades && knownTrades.length > 0 ? [...knownTrades] : [];
   if (currentTrades.length === 0) {

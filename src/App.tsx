@@ -20,7 +20,8 @@ import {
   executeSimulatedTrade, 
   updateTradeRecord, 
   resetTradesToDefault,
-  syncOpenTradesWithLivePrices
+  syncOpenTradesWithLivePrices,
+  isTradeListAuthoritative,
 } from './services/automatedFeedService';
 import { scanLiveMarketEntries, deploySignalToAutomatedFeed } from './services/entryScannerService';
 import { catchUpOpenTrades } from './services/catchUpService';
@@ -242,6 +243,8 @@ export default function App() {
       // The 24/7 worker is evaluating trades: this copy only displays them.
       // Evaluating here as well would put two writers on the same positions.
       if (serverActiveRef.current) return;
+      // Database first: act only on the list Firestore has delivered.
+      if (!isTradeListAuthoritative()) return;
 
       const priceMap = await buildPriceMap(enriched);
 
@@ -426,6 +429,7 @@ export default function App() {
     // When the 24/7 server worker is active, the server handles auto-pilot deployments
     // so the browser and server never trade concurrently.
     if (serverState.active) return;
+    if (!isTradeListAuthoritative()) return;
     if (isDeployingRef.current) return;
 
     // One deploy per fresh price snapshot: the effect re-fires every 10s (and on

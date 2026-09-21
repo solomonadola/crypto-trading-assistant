@@ -182,10 +182,20 @@ closing the tab or browser, but exist only in that browser, and clearing site
 data deletes them.
 
 Trades are also written to and read from **Firestore**, so every browser
-running the app (local and hosted) shares one trade history. Firestore is the
-record: each update it sends replaces the browser's saved copy (keeping only
-fresher prices on open trades), so a correction made anywhere reaches every
-browser. Reads can be slow
+running the app (local and hosted) shares one trade history. **Firestore is the
+record; the browser's saved copy is only a working cache of it:**
+
+- Nothing is evaluated or opened until Firestore has delivered the list
+  (or is known to be failing, or has not answered in 20 seconds).
+- Each update from Firestore replaces the saved copy, keeping only a close not
+  yet written and fresher prices on open trades. A correction made anywhere
+  reaches every browser; a trade that never reached Firestore disappears.
+- A save that fails is queued and retried on the next update or refresh,
+  rather than living in one browser.
+- Before opening a trade, the open positions are read from Firestore itself,
+  so the 10-position, one-per-coin and 3-major limits hold across every
+  browser and the worker. (Two copies opening in the same second can still
+  both pass; the worker plus stand-down browsers keeps that to one writer.) Reads can be slow
 to start; the status strip shows whether Firestore has actually answered.
 
 > **Every copy of the app shares the production database**, including a local
