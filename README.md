@@ -37,8 +37,17 @@ decision code as the browser (`src/services/autopilotEngine.ts`).
   with it to Firestore at each exit-ladder event and every 10 minutes. After a
   restart or a sleep, the worker replays each trade's candles from exactly
   there.
-- **It never trades blind.** No tick runs until the Firestore listener has
-  delivered the trade list, or when prices are more than two minutes old.
+- **It keeps a JSON copy on disk** (`data/worker-state.json`, or
+  `WORKER_STATE_FILE`; `off` to disable): the trade list, sync position and
+  queued writes, saved within 2 seconds of any change. A restart resumes from
+  it with a changes-only sync instead of re-reading the whole history.
+- **It keeps trading when Firebase cannot be read** (daily quota spent,
+  outage), from a list Firebase has confirmed before — this run or the saved
+  file — since it is the only writer while it runs. Stops and targets are
+  still enforced; writes are queued and sent when Firebase is back.
+- **It never trades blind.** With no confirmed list (a first start while
+  Firebase is down) it waits; it also skips ticks when prices are more than
+  two minutes old.
 - **Settings:** `TRADING_WORKER=off` serves the app without the worker;
   `WORKER_AUTOPILOT=off` manages open trades but opens no new ones. A
   read-only copy (`VITE_FIRESTORE_WRITES=off`, also read from `.env.local`)
@@ -50,10 +59,11 @@ decision code as the browser (`src/services/autopilotEngine.ts`).
 **Hosting.** The worker needs a process that stays running:
 
 - *VPS / any always-on machine:* `bun run build && bun run start` (e.g. under
-  systemd or pm2). `PORT` sets the port.
+  systemd or pm2). `PORT` sets the port. The JSON file survives restarts.
 - *Cloud Run (how AI Studio deploys):* by default an instance only gets CPU
   while it is answering a request and is shut down when idle, so the 30s loop
-  stalls. Either set **minimum instances = 1** with **CPU always allocated**,
+  stalls, and its disk is temporary, so the JSON file lasts only until the
+  instance restarts. Either set **minimum instances = 1** with **CPU always allocated**,
   or have a free uptime pinger (UptimeRobot, Cloud Scheduler) request
   `/api/tick` every minute. Set **maximum instances = 1** either way: two
   instances would be two workers trading the same account. After deploying,
@@ -226,9 +236,10 @@ Expected use at about 70 trades a day with the worker running:
 
 Storage is about 3 KB per trade, around 6 MB a month. Usage is shown in the
 Firebase console under Firestore > Usage. If the quota is reached, browsers
-keep working from their saved list and queue their writes; the 24/7 worker
-pauses rather than trade on a list it cannot confirm. Both resume once the
-quota resets (midnight Pacific).
+keep working from their saved list and the 24/7 worker from its JSON file;
+both queue their writes and send them once Firebase is readable again (the
+quota resets at midnight Pacific). Browsers cannot see the worker's changes
+until then.
 
 > **Every copy of the app shares the production database**, including a local
 > dev server. For development or testing, put `VITE_FIRESTORE_WRITES=off` in

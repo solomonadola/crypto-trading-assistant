@@ -5,7 +5,15 @@
 //
 //   node tools/test-trading-worker.mjs
 import { createRequire } from 'node:module';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { mkdtempSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 const require = createRequire(import.meta.url);
+const CHILD = process.argv[2];   // set when this file re-runs itself for the restart tests
+// Never write a state file into the project.
+if (!process.env.WORKER_STATE_FILE) process.env.WORKER_STATE_FILE = join(mkdtempSync(join(tmpdir(), 'cs-worker-')), 'state.json');
 const esbuild = require('./_gen/vendor/node_modules/esbuild');
 
 const FAKE_FIRESTORE = `
@@ -30,6 +38,7 @@ const FAKE_FIRESTORE = `
   export const serverTimestamp = () => ({ serverTs: true });
   export const Timestamp = { fromMillis: (ms) => ({ ms }) };
   export const getDocsFromServer = async (q) => {
+    if (globalThis.__fsQuotaSpent) throw new Error('resource-exhausted: Quota exceeded');
     if (globalThis.__fsHold) await globalThis.__fsHold;
     const status = (q.filters || []).find((f) => f.field === 'status');
     const d = (globalThis.__fsDocs || []).filter((x) => !status || x.status === status.value);
@@ -106,6 +115,32 @@ const trade = (id, sym, extra = {}) => ({
 
 let fails = 0;
 const check = (label, ok, detail = '') => { if (!ok) fails++; console.log(`  ${ok ? 'ok  ' : 'FAIL'}  ${label}${detail ? '   ' + detail : ''}`); };
+
+// Restart scenarios run in a fresh process, because the state file is read
+// once, when the storage module first loads.
+if (CHILD) {
+  globalThis.__fsQuotaSpent = true;      // reads fail all day
+  prices = { SOL: 95, ETH: 101 };
+  const w = await load(false);
+  w.startTradingWorker(1e9);
+  await settle();
+  const r = await w.executeTradingTick();
+  const sol = w.loadLocalTrades().find((t) => t.id === 'sol');
+  const pending = w.getPendingWriteCount();
+  w.stopTradingWorker();                 // saves the state file
+  console.log(JSON.stringify({ r, solStatus: sol?.status ?? null, pending }));
+  process.exit(0);
+}
+
+function runChild(state) {
+  const file = join(mkdtempSync(join(tmpdir(), 'cs-worker-')), 'state.json');
+  if (state) writeFileSync(file, JSON.stringify(state));
+  const out = spawnSync(process.execPath, [fileURLToPath(import.meta.url), 'child'], {
+    env: { ...process.env, WORKER_STATE_FILE: file }, encoding: 'utf8', timeout: 60_000, maxBuffer: 64 * 1024 * 1024,   // stack traces include the whole bundle
+  });
+  const line = out.stdout.trim().split('\n').reverse().find((l) => l.startsWith('{'));
+  return { result: line ? JSON.parse(line) : null, file, stderr: out.stderr };
+}
 
 // ---------------------------------------------------------------- tests
 console.log('\n1. A read-only copy never starts the worker');
@@ -306,6 +341,27 @@ console.log('\n10. Free-tier reads: the history is not re-read on every load');
   check('a change arrives through the listener', w.loadLocalTrades().find((t) => t.id === 'h5')?.pnlUSD === 1.23);
   check('history intact', w.loadLocalTrades().length === 300);
   c();
+}
+
+console.log('\n11. Firebase quota spent: the server trades on from its saved file');
+{
+  const saved = {
+    crypto_automated_trades_local_fallback: JSON.stringify([trade('sol', 'SOL'), trade('eth', 'ETH')]),
+    crypto_automated_trades_full_sync_at: String(NOW - 3600_000),
+    crypto_automated_trades_sync_cursor: String(NOW - 3600_000),
+    firebase_quota_blocked_until: String(NOW + 2 * 3600_000),
+  };
+  const { result, file, stderr } = runChild(saved);
+  check('tick ran on the saved list', result?.r?.success === true, result ? (result.r.reason || result.r.error || '') : stderr.slice(-300));
+  check('stop still enforced (SOL closed at 95)', result?.solStatus === 'STOPPED', result?.solStatus);
+  check('the close is queued for Firebase', result?.pending >= 1, String(result?.pending));
+  const after = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : {};
+  const savedSol = JSON.parse(after.crypto_automated_trades_local_fallback || '[]').find((t) => t.id === 'sol');
+  check('state file holds the close', savedSol?.status === 'STOPPED');
+  check('state file holds the queue', Object.keys(JSON.parse(after.crypto_automated_trades_pending_writes || '{}')).includes('sol'));
+
+  const fresh = runChild(null);
+  check('with no saved list it waits instead of trading blind', fresh.result?.r?.skipped === true && /Waiting/.test(fresh.result?.r?.reason || ''), fresh.result?.r?.reason);
 }
 
 console.log(`\n${fails === 0 ? 'ALL WORKER CHECKS PASS' : fails + ' CHECK(S) FAILED'}`);

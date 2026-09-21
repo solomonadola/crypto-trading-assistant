@@ -1,10 +1,12 @@
 // Must be first: the data layer below keeps its working state in localStorage.
-import './memoryStorage';
+import { saveStateNow, STATE_FILE } from './memoryStorage';
 import { FIRESTORE_WRITES_ENABLED, getFirestoreHealth } from '../lib/firebase';
 import { fetchLiveMarketCoins, buildPriceMap, getLastTickerFetchTime } from '../services/binanceService';
 import {
   loadLocalTrades,
   subscribeToAutomatedTrades,
+  hasConfirmedTradeList,
+  getPendingWriteCount,
   syncOpenTradesWithLivePrices,
   updateAutomatedTrade,
 } from '../services/automatedFeedService';
@@ -112,13 +114,20 @@ export async function executeTradingTick(): Promise<TickResult> {
   const startTime = Date.now();
 
   try {
-    // 1. Trades. 'ok' is set when the listener delivers a snapshot, so the
-    //    local copy then holds Firestore's trades. If the listener has failed,
-    //    retry it rather than trading on a stale or empty copy.
+    // 1. Trades. 'ok': the saved list is Firestore's. If Firestore cannot be
+    //    read (daily quota spent, outage), carry on from the saved list only
+    //    if it was confirmed by Firestore before - this run or restored from
+    //    the state file - since the worker is the only writer while it runs.
+    //    Writes then go out or queue. A never-confirmed list would look like
+    //    zero open positions, so without one the worker waits.
     const health = getFirestoreHealth();
+    let degraded = false;
     if (health !== 'ok') {
       if (health !== 'unknown' && Date.now() - subscribedAt > RESUBSCRIBE_AFTER_MS) subscribe();
-      return skip(`Waiting for Firestore (${health})`);
+      if (health === 'unknown' || !hasConfirmedTradeList()) {
+        return skip(`Waiting for Firestore (${health})`);
+      }
+      degraded = true;
     }
 
     // 2. Prices. fetchLiveMarketCoins serves the last good tickers when every
@@ -193,7 +202,9 @@ export async function executeTradingTick(): Promise<TickResult> {
     ticksCount += 1;
     lastTickAt = Date.now();
     lastTickDurationMs = lastTickAt - startTime;
-    lastTickSummary = `Tick #${ticksCount}: ${open.length} open, ${sync.updatedCount} updated, ${deployedSymbol ? `deployed ${deployedSymbol}` : 'no deploy'}`;
+    const queued = getPendingWriteCount();
+    lastTickSummary = `Tick #${ticksCount}: ${open.length} open, ${sync.updatedCount} updated, ${deployedSymbol ? `deployed ${deployedSymbol}` : 'no deploy'}` +
+      (degraded ? ` - Firestore ${health}: trading on the saved list, ${queued} write(s) queued` : '');
     return { success: true, updatedCount: sync.updatedCount, events: sync.events, deployedSymbol, durationMs: lastTickDurationMs };
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
@@ -218,7 +229,7 @@ export function startTradingWorker(intervalMs = 30_000): void {
   }
   isWorkerRunning = true;
   subscribe();
-  logEvent(`Started: tick every ${intervalMs / 1000}s, auto-pilot ${isAutoPilot ? 'on' : 'off'}`);
+  logEvent(`Started: tick every ${intervalMs / 1000}s, auto-pilot ${isAutoPilot ? 'on' : 'off'}, state file ${STATE_FILE}`);
   executeTradingTick().catch((e) => console.error('Worker tick error:', e));
   intervalTimer = setInterval(() => {
     executeTradingTick().catch((e) => console.error('Worker tick error:', e));
@@ -232,6 +243,7 @@ export function stopTradingWorker(): void {
   unsubscribe?.();
   unsubscribe = null;
   isWorkerRunning = false;
+  saveStateNow();
   logEvent('Stopped');
 }
 

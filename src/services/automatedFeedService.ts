@@ -169,6 +169,17 @@ export function isTradeListAuthoritative(now: number = Date.now()): boolean {
   return subscribedAt > 0 && now - subscribedAt > FIRESTORE_WAIT_MS;
 }
 
+/**
+ * Has this copy's saved list ever been confirmed by a full read from Firestore,
+ * in this run or a previous one (the 24/7 worker restores its state file)?
+ * Only such a list may be traded on while Firestore cannot be read; an empty
+ * or never-synced list would look like zero open positions.
+ */
+export function hasConfirmedTradeList(): boolean {
+  if (firstSnapshotAt > 0) return true;
+  return Number(safeGetLocalStorage(FULL_SYNC_AT_KEY)) > 0 && safeGetLocalStorage(LOCAL_STORAGE_KEY) !== null;
+}
+
 function isNotFound(err: unknown): boolean {
   const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
   return msg.includes('not-found') || msg.includes('no document');
