@@ -21,6 +21,7 @@ const FAKE_FIRESTORE = `
   export const deleteDoc = async (ref) => { calls.push('deleteDoc:' + ref.id); };
   export const getDocs = async () => ({ empty: true, docs: [], forEach() {} });
   export const getDocFromServer = async () => ({});
+  export const getCountFromServer = async () => ({ data: () => ({ count: 0 }) });
   export const onSnapshot = () => () => {};
   export const query = (c) => c;
   export const where = () => ({});

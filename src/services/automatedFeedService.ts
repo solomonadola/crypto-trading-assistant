@@ -11,6 +11,7 @@ import {
   onSnapshot,
   serverTimestamp,
   Timestamp,
+  getCountFromServer,
 } from 'firebase/firestore';
 import { db, isQuotaBlocked, markQuotaExceeded, reportFirestoreResult, getFirestoreHealth, FIRESTORE_WRITES_ENABLED } from '../lib/firebase';
 import { outcome } from './metrics';
@@ -530,13 +531,41 @@ let renewTimer: ReturnType<typeof setTimeout> | null = null;
 let retryTimer: ReturnType<typeof setTimeout> | null = null;
 let syncGeneration = 0;
 
+let countTimer: ReturnType<typeof setInterval> | null = null;
+
 function stopSync(): void {
   syncGeneration++;
   stopListener?.();
   stopListener = null;
   if (renewTimer) clearTimeout(renewTimer);
   if (retryTimer) clearTimeout(retryTimer);
-  renewTimer = retryTimer = null;
+  if (countTimer) clearInterval(countTimer);
+  renewTimer = retryTimer = countTimer = null;
+}
+
+// The changes-only listener cannot see deletions (a deleted trade simply stops
+// matching), nor changes saved without updatedAt. Once a minute the page asks
+// Firestore how many trades there are - a count costs 1 read per 1,000 trades -
+// and if that differs from what it holds, it re-reads everything. Emptying the
+// database, for example, reaches every open page within a minute.
+const COUNT_CHECK_MS = 60_000;
+let lastCountResync = 0;
+
+async function checkCount(gen: number): Promise<void> {
+  if (gen !== syncGeneration || isQuotaBlocked()) return;
+  try {
+    const remote = (await withTimeout(getCountFromServer(collection(db, TRADES_COLLECTION)), 10_000)).data().count;
+    if (gen !== syncGeneration) return;
+    const pending = getPending();
+    const confirmedLocal = loadLocalTrades().filter((t) => pending[t.id] !== 'create').length;
+    if (remote !== confirmedLocal && Date.now() - lastCountResync > COUNT_CHECK_MS) {
+      lastCountResync = Date.now();
+      console.info(`[Sync] Firestore has ${remote} trades, this copy ${confirmedLocal}: re-reading all.`);
+      await startSync(true);
+    }
+  } catch {
+    // counted again next minute
+  }
 }
 
 function scheduleRetry(): void {
@@ -620,6 +649,9 @@ async function startSync(forceFull = false): Promise<void> {
     scheduleRetry();
   });
   renewTimer = setTimeout(() => { if (subscribers.size > 0) startSync().catch(() => {}); }, LISTENER_RENEW_MS);
+  const genNow = syncGeneration;
+  checkCount(genNow).catch(() => {});
+  countTimer = setInterval(() => { checkCount(genNow).catch(() => {}); }, COUNT_CHECK_MS);
 }
 
 // ---------------------------------------------------------------- reconcile

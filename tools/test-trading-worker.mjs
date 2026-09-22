@@ -39,6 +39,7 @@ const FAKE_FIRESTORE = `
   export const deleteDoc = async (ref) => { log({ op: 'delete', id: ref.id }); };
   export const getDocs = async () => { const d = globalThis.__fsDocs || []; count(d.length); return snap(d); };
   export const getDocFromServer = async () => ({});
+  export const getCountFromServer = async () => { globalThis.__counts = (globalThis.__counts || 0) + 1; return { data: () => ({ count: (globalThis.__fsDocs || []).length }) }; };
   export const onSnapshot = (_ref, next) => { (globalThis.__listeners = globalThis.__listeners || []).push(next); return () => {}; };
   export const where = (field, op, value) => ({ field, op, value });
   export const query = (c, ...filters) => ({ ...c, filters });
@@ -569,6 +570,38 @@ console.log('\n16. Server and Firebase kept in step by revision: behind -> pull,
   check('price-only ticks cause no writes', writes().length === 0 && r5.pushed === 0, JSON.stringify(writes().map((c) => c.id)));
   check('status reports the last check', w.getWorkerStatus().sync.lastReconcile?.at > 0);
   w.stopTradingWorker();
+}
+
+console.log('\n17. Deletions reach an open page: the minute count check re-reads when the numbers differ');
+{
+  reset();
+  // A page synced a minute ago holding 14 trades; since then the database was emptied.
+  const now = String(Date.now() - 60_000);
+  localStorage.setItem('crypto_automated_trades_local_fallback', JSON.stringify(Array.from({ length: 14 }, (_, i) => trade('x' + i, 'X' + i))));
+  localStorage.setItem('crypto_automated_trades_sync_version', '3');
+  localStorage.setItem('crypto_automated_trades_sync_cursor', now);
+  localStorage.setItem('crypto_automated_trades_full_sync_at', now);
+  globalThis.__fsDocs = [];
+  globalThis.__counts = 0;
+  const w = await load(false);
+  const unsub = w.subscribeToAutomatedTrades(() => {});
+  await settle(); await settle();
+  check('the count was checked', globalThis.__counts >= 1);
+  check('the page now shows the empty database', w.loadLocalTrades().length === 0, String(w.loadLocalTrades().length));
+  unsub();
+
+  // Counts match: no re-read.
+  reset();
+  localStorage.setItem('crypto_automated_trades_local_fallback', JSON.stringify([trade('y', 'Y')]));
+  localStorage.setItem('crypto_automated_trades_sync_version', '3');
+  localStorage.setItem('crypto_automated_trades_sync_cursor', now);
+  localStorage.setItem('crypto_automated_trades_full_sync_at', now);
+  globalThis.__fsDocs = [trade('y', 'Y')];
+  const w2 = await load(false);
+  const unsub2 = w2.subscribeToAutomatedTrades(() => {});
+  await settle(); await settle();
+  check('counts match: nothing re-read', globalThis.__reads === 0, String(globalThis.__reads));
+  unsub2();
 }
 
 console.log('\n11. Firebase quota spent: the server trades on from its saved file');

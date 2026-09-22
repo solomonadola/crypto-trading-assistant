@@ -48,6 +48,7 @@ const FAKE_FIRESTORE = `
   };
   export const deleteDoc = async (ref) => { db.delete(ref.id); save(); };
   export const onSnapshot = () => () => {};
+  export const getCountFromServer = async (q) => ({ data: () => ({ count: run(q).length }) });
   export const serverTimestamp = () => ({ __serverTs: true });
   export const Timestamp = { fromMillis: (ms) => ({ ms, toMillis: () => ms }) };
 `;
@@ -188,7 +189,7 @@ try {
           b.onResolve({ filter: /^firebase\/(app|firestore)$/ }, (a) => ({ path: a.path, namespace: 'fake' }));
           b.onLoad({ filter: /.*/, namespace: 'fake' }, (a) => ({
             contents: a.path === 'firebase/app' ? 'export const initializeApp = () => ({}); export const getApps = () => [];'
-              : 'const n = () => ({}); export { n as getFirestore, n as collection, n as doc, n as query, n as where, n as serverTimestamp }; export const Timestamp = { fromMillis: n }; export const onSnapshot = () => () => {}; const e = async () => { throw new Error("page must not use Firebase here"); }; export { e as getDocs, e as getDocsFromServer, e as getDocFromServer, e as setDoc, e as updateDoc, e as deleteDoc };',
+              : 'const n = () => ({}); export { n as getFirestore, n as collection, n as doc, n as query, n as where, n as serverTimestamp }; export const Timestamp = { fromMillis: n }; export const onSnapshot = () => () => {}; export const getCountFromServer = async () => ({ data: () => ({ count: 0 }) }); const e = async () => { throw new Error("page must not use Firebase here"); }; export { e as getDocs, e as getDocsFromServer, e as getDocFromServer, e as setDoc, e as updateDoc, e as deleteDoc };',
             loader: 'js',
           }));
         },
