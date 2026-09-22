@@ -90,6 +90,7 @@ globalThis.fetch = async (url) => {
     return { ok: true, json: async () => rows };
   }
   if (url.includes('/klines')) {
+    if (globalThis.__klineDelay) await new Promise((r) => setTimeout(r, globalThis.__klineDelay));
     const sym = new URL(url).searchParams.get('symbol').replace(/USDT$/, '');
     return { ok: true, json: async () => candles[sym] || [] };
   }
@@ -176,6 +177,8 @@ console.log('\n2. No trading before Firestore has delivered the trades');
   await settle();
   const r2 = await w.executeTradingTick();
   check('tick ran', r2.success === true, r2.reason || r2.error || '');
+  check('nothing written until the scheduled save', writes().length === 0, JSON.stringify(writes().map((c) => c.id)));
+  await w.flushNow();
   const closed = writes().find((c) => c.id === 'sol' && c.data?.status === 'STOPPED');
   check('SOL stop written to Firestore', !!closed);
   check('SOL filled at the live price', closed?.data?.exitPrice === 95 || closed?.data?.currentPrice === 95, String(closed?.data?.currentPrice));
@@ -212,13 +215,13 @@ console.log('\n5. After a restart, candles missed while asleep are replayed from
     [NOW - 2 * M, 99, 99, 98.5, 99],
   ];
   candles = { SOL: bars, ETH: bars };
+  globalThis.__fsDocs = [
+    trade('sol', 'SOL', { lastEvaluatedAt: NOW - 55 * M }),   // stamped: replayed
+    trade('eth', 'ETH'),                                      // never stamped: not replayed
+  ];
   const w = await load(false);
   w.startTradingWorker(1e9);
   await settle();
-  deliver([
-    trade('sol', 'SOL', { lastEvaluatedAt: NOW - 55 * M }),   // stamped: replayed
-    trade('eth', 'ETH'),                                      // never stamped: not replayed
-  ]);
   const r = await w.executeTradingTick();
   check('tick ran', r.success === true, r.reason || r.error || '');
   const sol = w.loadLocalTrades().find((t) => t.id === 'sol');
@@ -387,6 +390,67 @@ console.log('\n12. Trade feed: browsers pull the server\'s list, then only chang
   globalThis.__api = async () => ({ ok: false, json: async () => null });
   check('server down: reported, list kept', (await w.pullServerTrades()) === false && w.loadLocalTrades().length === 1);
   globalThis.__api = null;
+}
+
+console.log('\n13. Server is the source of truth: no Firebase reads while it runs, batched writes');
+{
+  reset();
+  prices = { SOL: 100, ETH: 100, BTC: 100 };
+  globalThis.__fsDocs = [trade('a', 'SOL'), trade('b', 'ETH')];
+  const w = await load(false);
+  w.startTradingWorker(1e9);
+  await settle();
+  const readsAfterStart = globalThis.__reads;
+  check('one full read to build the list', readsAfterStart === 2, String(readsAfterStart));
+  check('no Firebase listener', (globalThis.__listeners || []).length === 0);
+  for (let i = 0; i < 3; i++) await w.executeTradingTick();
+  check('ticks make no Firebase reads', globalThis.__reads === readsAfterStart, String(globalThis.__reads));
+
+  // A manual close through the server, with the exit fee charged.
+  const before = w.loadLocalTrades().find((t) => t.id === 'a');
+  const closed = await w.closeTradeById('a', 'manual');
+  check('manual close: closed at the latest price', closed.status === 'COMPLETED' && closed.exitReason === 'CLOSED_MANUAL' && closed.exitPrice === before.currentPrice);
+  check('manual close: exit fee charged', closed.totalFeesUSD > before.totalFeesUSD, `${before.totalFeesUSD} -> ${closed.totalFeesUSD}`);
+  let refused = null;
+  try { await w.closeTradeById('a'); } catch (e) { refused = e.message; }
+  check('closing it again is refused', /already closed/.test(refused || ''), refused);
+  await w.setTradeExcluded('b', true);
+  check('exclusion recorded', w.loadLocalTrades().find((t) => t.id === 'b')?.excludedFromStats === true);
+  check('changes wait for the batch', writes().length === 0, JSON.stringify(writes().map((c) => c.id)));
+  check('status shows them queued', w.getWorkerStatus().sync.pendingWrites === 2, String(w.getWorkerStatus().sync.pendingWrites));
+  const n = await w.flushNow();
+  check('one write per changed trade at the batch', n === 2 && writes().length === 2, String(n));
+  check('status shows the save', w.getWorkerStatus().sync.pendingWrites === 0 && w.getWorkerStatus().sync.lastFlushWritten === 2);
+
+  w.stopTradingWorker();
+}
+{
+  // An action sent while a tick is running must not be overwritten by it.
+  // The tick below loads the list, then waits 80 ms for replay candles; the
+  // action arrives during that wait. Without the lock the tick then saves its
+  // stale copy over the action.
+  reset();
+  prices = { ETH: 100 };
+  candles = { ETH: [[NOW - 5 * M, 100, 100.5, 99.5, 100]] };
+  globalThis.__fsDocs = [trade('b', 'ETH', { lastEvaluatedAt: NOW - 10 * M })];
+  const w = await load(false);
+  w.startTradingWorker(1e9);
+  await settle();
+  globalThis.__klineDelay = 80;
+  const tick = w.executeTradingTick();
+  await new Promise((r) => setTimeout(r, 20));
+  const excl = w.setTradeExcluded('b', true);
+  await Promise.all([tick, excl]);
+  globalThis.__klineDelay = 0;
+  check('action during a tick survives it', w.loadLocalTrades().find((t) => t.id === 'b')?.excludedFromStats === true);
+
+  // Manual deploy uses the server's own scan and the shared limits.
+  const full = Array.from({ length: 10 }, (_, i) => trade('o' + i, 'O' + i));
+  localStorage.setItem('crypto_automated_trades_local_fallback', JSON.stringify(full));
+  let msg = null;
+  try { await w.deploySymbol('SOL'); } catch (e) { msg = e.message; }
+  check('manual deploy refused at 10 open', /Maximum 10|No current signal/.test(msg || ''), msg);
+  w.stopTradingWorker();
 }
 
 console.log('\n11. Firebase quota spent: the server trades on from its saved file');

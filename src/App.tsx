@@ -26,8 +26,9 @@ import {
 } from './services/automatedFeedService';
 import { scanLiveMarketEntries, deploySignalToAutomatedFeed } from './services/entryScannerService';
 import { catchUpOpenTrades } from './services/catchUpService';
-import { selectAutoPilotCandidate } from './services/autopilotEngine';
-import { fetchServerStatus, pullServerTrades, resetServerFeed, serverApiUrl } from './services/serverFeed';
+import { selectAutoPilotCandidate, manualDeployBlockReason } from './services/autopilotEngine';
+import { fetchServerStatus, pullServerTrades, resetServerFeed, serverApiUrl, serverAction } from './services/serverFeed';
+import { closeTradeAt } from './services/cycleEngineService';
 import { StatusStrip, CatchUpStatus } from './components/StatusStrip';
 import { DataHealthPanel } from './components/DataHealthPanel';
 import { checkDataHealth } from './services/dataHealth';
@@ -346,56 +347,18 @@ export default function App() {
 
   // Deploy signal to automated feed with strict balance and 10-trade limit checks
   const handleDeploySignal = async (signal: EntrySignalResult) => {
-    const openCount = trades.filter((t) => t.status === 'OPEN').length;
-    if (openCount >= 10) {
-      showNotification('Maximum 10 active trades limit reached. Please wait for an existing position to exit.', 'warn');
+    const blocked = manualDeployBlockReason(signal, trades, bankroll);
+    if (blocked) {
+      showNotification(blocked, 'warn');
       return;
     }
-
-    // Guard: Prevent duplicate coin entry across the 10 slots
     const sym = signal.symbol.toUpperCase();
-    if (trades.some((t) => t.status === 'OPEN' && t.symbol.toUpperCase() === sym)) {
-      showNotification(
-        `A position for ${signal.symbol} is already active. 10 bankroll slots are strictly reserved for 10 distinct coins for risk diversification.`,
-        'warn'
-      );
-      return;
-    }
 
-    // Guard: Major coins cap (BTC, ETH, BNB, SOL) to max 3 slots
-    const isMajor = MAJOR_COINS.has(sym);
-    const openMajorCount = trades.filter((t) => t.status === 'OPEN' && MAJOR_COINS.has(t.symbol.toUpperCase())).length;
-    if (isMajor && openMajorCount >= MAX_MAJOR_COIN_SLOTS) {
-      showNotification(
-        `Major coins (${Array.from(MAJOR_COINS).join(', ')}) are capped at 3 simultaneous slots to reserve slots for dynamic alts and memes.`,
-        'warn'
-      );
-      return;
-    }
-
-    // Guard: Meme coins cap (DOGE, PEPE, WIF, BONK, POPCAT, FLOKI, etc.) to max 2 slots
-    const isMeme = MEME_COINS.has(sym);
-    const openMemeCount = trades.filter((t) => t.status === 'OPEN' && MEME_COINS.has(t.symbol.toUpperCase())).length;
-    if (isMeme && openMemeCount >= MAX_MEME_COIN_SLOTS) {
-      showNotification(
-        `Meme coins (${Array.from(MEME_COINS).slice(0, 5).join(', ')}...) are capped at ${MAX_MEME_COIN_SLOTS} simultaneous slots to protect against sector-wide flushes while capturing explosive upside.`,
-        'warn'
-      );
-      return;
-    }
-
-    if (!bankroll.canOpenNewTrade) {
-      showNotification(bankroll.blockReason || 'Bankroll slots are currently full.', 'warn');
-      return;
-    }
-
-    if (bankroll.liquidCashUSD < bankroll.trancheSizeUSD) {
-      showNotification(`Insufficient cash ($${bankroll.liquidCashUSD.toFixed(2)} available, $${bankroll.trancheSizeUSD.toFixed(2)} required). Cannot trade more than available balance.`, 'warn');
-      return;
-    }
-
-    if (bankroll.deployedCapitalUSD + bankroll.trancheSizeUSD > bankroll.totalPortfolioValueUSD + 0.05) {
-      showNotification(`Trade would exceed total account balance ($${bankroll.totalPortfolioValueUSD.toFixed(2)}).`, 'warn');
+    // The server is the source of truth: it opens the trade from its own scan.
+    if (serverActiveRef.current) {
+      const r = await serverAction('/api/deploy', { symbol: sym });
+      if (r.ok) showNotification(`Deployed $${Number(r.result?.positionSizeUSD || 0).toFixed(2)} into ${signal.symbol}.`, 'success');
+      else showNotification(r.error || 'The server refused the deploy.', 'warn');
       return;
     }
 
@@ -481,6 +444,12 @@ export default function App() {
   // Exclude a trade from statistics (or include it again). The record is kept;
   // it just stops counting toward P&L, win rate and the other figures.
   const handleSetExcluded = async (trade: AutomatedTradeRecord, excluded: boolean) => {
+    if (serverActiveRef.current) {
+      const r = await serverAction(`/api/trades/${encodeURIComponent(trade.id)}/exclude`, { excluded });
+      if (!r.ok) { showNotification(r.error || 'The server refused the change.', 'warn'); return; }
+      showNotification(excluded ? `${trade.symbol} trade excluded from statistics.` : `${trade.symbol} trade counted in statistics again.`, 'info');
+      return;
+    }
     const updated: AutomatedTradeRecord = {
       ...trade,
       excludedFromStats: excluded,
@@ -497,13 +466,13 @@ export default function App() {
 
   // Close trade manually
   const handleCloseTrade = async (trade: AutomatedTradeRecord, reason: string) => {
-    const updated: AutomatedTradeRecord = {
-      ...trade,
-      status: 'COMPLETED',
-      closedAtTimestamp: Date.now(),
-      exitReason: 'CLOSED_MANUAL',
-      exitPrice: trade.currentPrice || trade.entryPrice,
-    };
+    if (serverActiveRef.current) {
+      const r = await serverAction(`/api/trades/${encodeURIComponent(trade.id)}/close`, { reason: 'manual' });
+      if (!r.ok) { showNotification(r.error || 'The server refused the close.', 'warn'); return; }
+      showNotification(`Closed position for ${trade.symbol}. Slot freed and cash returned to bankroll.`, 'info');
+      return;
+    }
+    const updated = closeTradeAt(trade, trade.currentPrice || trade.entryPrice, 'CLOSED_MANUAL');
     await updateTradeRecord(updated, true);
     setAllTrades((prev) => prev.map((t) => (t.id === trade.id ? updated : t)));
     showNotification(`Closed position for ${trade.symbol}. Slot freed and cash returned to bankroll.`, 'info');
@@ -511,13 +480,13 @@ export default function App() {
 
   // Recycle zombie trade
   const handleRecycleZombieTrade = async (trade: AutomatedTradeRecord) => {
-    const updated: AutomatedTradeRecord = {
-      ...trade,
-      status: 'COMPLETED',
-      closedAtTimestamp: Date.now(),
-      exitReason: 'CLOSED_TIME_DECAY',
-      exitPrice: trade.currentPrice || trade.entryPrice,
-    };
+    if (serverActiveRef.current) {
+      const r = await serverAction(`/api/trades/${encodeURIComponent(trade.id)}/close`, { reason: 'time_decay' });
+      if (!r.ok) { showNotification(r.error || 'The server refused the close.', 'warn'); return; }
+      showNotification(`Recycled stagnant trade ${trade.symbol} to liquid treasury cash!`, 'success');
+      return;
+    }
+    const updated = closeTradeAt(trade, trade.currentPrice || trade.entryPrice, 'CLOSED_TIME_DECAY');
     await updateTradeRecord(updated, true);
     setAllTrades((prev) => prev.map((t) => (t.id === trade.id ? updated : t)));
     showNotification(`Recycled stagnant trade ${trade.symbol} to liquid treasury cash!`, 'success');
@@ -525,6 +494,10 @@ export default function App() {
 
   // Reset trades
   const handleResetTrades = async () => {
+    if (serverActiveRef.current) {
+      showNotification('Reset is not available while the 24/7 server holds the trade history.', 'warn');
+      return;
+    }
     if (window.confirm('Reset all trades back to the default quantitative demonstration dataset?')) {
       await resetTradesToDefault();
       showNotification('Trades reset to default demonstration dataset.', 'info');

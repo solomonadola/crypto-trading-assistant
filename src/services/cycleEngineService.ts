@@ -339,3 +339,42 @@ export function evaluateTradeCycle(
     message
   };
 }
+
+/**
+ * Closes the rest of a position at `price` outside the exit ladder (manual
+ * close, stagnation recycle). The same arithmetic as a stop: gross pnlUSD is
+ * what was banked plus the open remainder at `price`, and closing that
+ * remainder costs one more side of friction. The old manual close kept the
+ * last pnlUSD and charged no exit cost, overstating net by ~15 bps of the
+ * remainder.
+ */
+export function closeTradeAt(
+  trade: AutomatedTradeRecord,
+  price: number,
+  exitReason: string,
+  now: number = Date.now()
+): AutomatedTradeRecord {
+  const isShort = trade.direction === 'SHORT';
+  const entry = trade.entryPrice;
+  const posSize = trade.positionSizeUSD || 0;
+  const returnPct = entry > 0 ? (isShort ? (entry - price) / entry : (price - entry) / entry) * 100 : 0;
+  let activePortion = 1.0;
+  if (trade.harvestTiers) {
+    if (trade.harvestTiers.tier1.status === 'HARVESTED') activePortion -= 0.33;
+    if (trade.harvestTiers.tier2.status === 'HARVESTED') activePortion -= 0.33;
+    if (trade.harvestTiers.tier3.status === 'HARVESTED') activePortion -= 0.17;
+  }
+  activePortion = Math.max(0, activePortion);
+  const banked = trade.realizedCashBankedUSD || 0;
+  return {
+    ...trade,
+    status: 'COMPLETED',
+    exitReason: exitReason as AutomatedTradeRecord['exitReason'],
+    closedAtTimestamp: now,
+    exitPrice: price,
+    currentPrice: price,
+    pnlPercentage: +returnPct.toFixed(2),
+    pnlUSD: +(banked + posSize * activePortion * (returnPct / 100)).toFixed(2),
+    totalFeesUSD: +((trade.totalFeesUSD || 0) + sideCostUSD(posSize * activePortion)).toFixed(4),
+  };
+}

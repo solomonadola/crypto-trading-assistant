@@ -6,7 +6,13 @@ import { fileURLToPath } from 'node:url';
 import fs from 'node:fs';
 import {
   startTradingWorker,
-  stopTradingWorker,
+  shutdownTradingWorker,
+  closeTradeById,
+  setTradeExcluded,
+  deploySymbol,
+  resyncFromFirestore,
+  flushNow,
+  ActionError,
   executeTradingTick,
   getWorkerStatus,
   setWorkerAutoPilot,
@@ -99,8 +105,46 @@ const handleTick = async (_req: Request, res: Response) => {
 app.get('/api/tick', handleTick);
 app.post('/api/tick', handleTick);
 
+// ---------------------------------------------------------------- actions
+//
+// The server is the source of truth, so every change a browser makes comes
+// through here rather than being written to Firestore by the browser. Same
+// origin only (no CORS headers): other websites cannot act on your trades.
+
+type Handler = (req: Request) => Promise<unknown>;
+const action = (fn: Handler) => async (req: Request, res: Response) => {
+  try {
+    res.json({ success: true, result: await fn(req) });
+  } catch (err) {
+    const status = err instanceof ActionError ? 400 : 500;
+    res.status(status).json({ success: false, error: err instanceof Error ? err.message : String(err) });
+  }
+};
+
+/** Close an open trade at its latest price. Body: {"reason": "manual" | "time_decay"} */
+app.post('/api/trades/:id/close', action((req) =>
+  closeTradeById(String(req.params.id), req.body?.reason === 'time_decay' ? 'time_decay' : 'manual')));
+
+/** Exclude a trade from statistics, or count it again. Body: {"excluded": true | false} */
+app.post('/api/trades/:id/exclude', action(async (req) => {
+  if (typeof req.body?.excluded !== 'boolean') throw new ActionError('Expected boolean "excluded"');
+  return setTradeExcluded(String(req.params.id), req.body.excluded);
+}));
+
+/** Open a position from the server's current scan. Body: {"symbol": "SOL"} */
+app.post('/api/deploy', action(async (req) => {
+  if (typeof req.body?.symbol !== 'string' || !req.body.symbol) throw new ActionError('Expected "symbol"');
+  return deploySymbol(req.body.symbol);
+}));
+
+/** Save queued changes to Firestore now instead of at the next scheduled save. */
+app.post('/api/flush', action(() => flushNow()));
+
+/** Rebuild the list from Firestore (after editing trades directly in Firestore). One read per trade. */
+app.post('/api/resync', action(() => resyncFromFirestore()));
+
 /**
- * Remote toggle for auto-pilot state on server.
+ * Remote toggle for auto-pilot state on server. Kept across restarts.
  */
 app.post('/api/autopilot', (req: Request, res: Response) => {
   const { enabled } = req.body ?? {};
@@ -153,9 +197,10 @@ const server = app.listen(PORT, '0.0.0.0', () => {
 });
 
 // Graceful shutdown
-const shutdown = () => {
+// Cloud Run allows 10s after SIGTERM: save queued changes to Firestore first.
+const shutdown = async () => {
   console.log('[Server] Shutting down gracefully...');
-  stopTradingWorker();
+  await shutdownTradingWorker(8000);
   server.close(() => {
     console.log('[Server] HTTP server closed');
     process.exit(0);

@@ -60,3 +60,37 @@ export async function pullServerTrades(): Promise<boolean> {
   cursor = { boot: String(data.bootId), version: data.version };
   return true;
 }
+
+/**
+ * Asks the trading server to change a trade (close, exclude, deploy). While
+ * the server runs it is the only thing that changes trades; the result shows
+ * up in the next pull, which this triggers straight away.
+ *
+ * Actions are same-origin only. A local dev server following a hosted one
+ * must reach it through the dev proxy (BACKEND_URL), not VITE_TRADING_SERVER_URL.
+ */
+export async function serverAction(path: string, body: unknown): Promise<{ ok: boolean; error?: string; result?: any }> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 20_000);
+  try {
+    const res = await fetch(serverApiUrl(path), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body ?? {}),
+      signal: controller.signal,
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data?.success) return { ok: false, error: data?.error || `Server answered ${res.status}` };
+    await pullServerTrades().catch(() => false);
+    return { ok: true, result: data.result };
+  } catch {
+    return {
+      ok: false,
+      error: TRADING_SERVER_URL
+        ? 'Could not reach the trading server. From a local copy, use BACKEND_URL (dev proxy) to send actions.'
+        : 'Could not reach the trading server.',
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}

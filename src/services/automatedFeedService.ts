@@ -185,11 +185,40 @@ function isNotFound(err: unknown): boolean {
   return msg.includes('not-found') || msg.includes('no document');
 }
 
-let flushing = false;
+// ---------------------------------------------------------------- server writer mode
+//
+// In the 24/7 server the trade list it holds is the source of truth and it is
+// the only writer. Firestore becomes a backup: every change is queued and the
+// worker flushes the queue on a timer (one write per changed trade, however
+// often it changed), and the server keeps no Firestore listener - as the only
+// writer it has nothing to hear, and each change echoed back was a read. It
+// reads Firestore only to build its list when it has none (first start, or a
+// restart without its state file) or when asked to (forceFullResync).
 
-/** Retries queued writes. A queued update for a trade deleted in Firestore is dropped: the database wins. */
+let serverWriterMode = false;
+
+export function enableServerWriterMode(): void {
+  serverWriterMode = true;
+}
+
+export function isServerWriterMode(): boolean {
+  return serverWriterMode;
+}
+
+let flushing = false;
+let lastFlush: { at: number; written: number; error: string | null } = { at: 0, written: 0, error: null };
+
+export function getLastFlush(): { at: number; written: number; error: string | null } {
+  return { ...lastFlush };
+}
+
+/**
+ * Sends queued writes to Firestore. A queued update for a trade deleted in
+ * Firestore is dropped: the database wins. In writer mode a spent read quota
+ * does not hold writes back - writes have their own daily allowance.
+ */
 export async function flushPendingWrites(): Promise<number> {
-  if (flushing || !FIRESTORE_WRITES_ENABLED || isQuotaBlocked()) return 0;
+  if (flushing || !FIRESTORE_WRITES_ENABLED || (isQuotaBlocked() && !serverWriterMode)) return 0;
   const pending = getPending();
   const ids = Object.keys(pending);
   if (!ids.length) return 0;
@@ -208,13 +237,20 @@ export async function flushPendingWrites(): Promise<number> {
       } catch (err) {
         if (isNotFound(err)) { setPending(id, null); continue; }
         reportFirestoreResult(err);
-        break;   // still failing; try again on the next snapshot
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg.toLowerCase().includes('resource-exhausted') || msg.toLowerCase().includes('quota')) markQuotaExceeded();
+        lastFlush = { at: Date.now(), written, error: msg };
+        return written;   // still failing; the rest stay queued for the next flush
       }
     }
   } finally {
     flushing = false;
   }
-  if (written) console.info(`[Firestore] ${written} queued write(s) saved.`);
+  if (written) {
+    reportFirestoreResult();
+    console.info(`[Firestore] ${written} queued write(s) saved.`);
+  }
+  lastFlush = { at: Date.now(), written, error: null };
   return written;
 }
 
@@ -487,16 +523,18 @@ function scheduleRetry(): void {
   }, SYNC_RETRY_MS);
 }
 
-async function startSync(): Promise<void> {
+async function startSync(forceFull = false): Promise<void> {
   stopSync();
   if (serverFeedActive) return;   // the trading server is the source; no Firestore reads
+  // Writer mode reads only to build a list it does not have (or on request).
+  if (serverWriterMode && !forceFull && hasConfirmedTradeList()) return;
   if (isQuotaBlocked()) { scheduleRetry(); return; }
   const gen = syncGeneration;
   const now = Date.now();
   let cursor = Number(safeGetLocalStorage(SYNC_CURSOR_KEY)) || 0;
   const lastFull = Number(safeGetLocalStorage(FULL_SYNC_AT_KEY)) || 0;
   const hasSaved = safeGetLocalStorage(LOCAL_STORAGE_KEY) !== null;
-  const needFull = !FIRESTORE_WRITES_ENABLED || !hasSaved || !cursor || now - lastFull > FULL_SYNC_EVERY_MS;
+  const needFull = forceFull || serverWriterMode || !FIRESTORE_WRITES_ENABLED || !hasSaved || !cursor || now - lastFull > FULL_SYNC_EVERY_MS;
 
   if (needFull) {
     try {
@@ -510,6 +548,7 @@ async function startSync(): Promise<void> {
       cursor = now;
       safeSetLocalStorage(SYNC_CURSOR_KEY, String(cursor));
       safeSetLocalStorage(FULL_SYNC_AT_KEY, String(now));
+      if (serverWriterMode) return;   // no listener: it is the only writer
     } catch (err) {
       if (gen !== syncGeneration) return;
       handleSyncError(err);
@@ -545,6 +584,18 @@ async function startSync(): Promise<void> {
     scheduleRetry();
   });
   renewTimer = setTimeout(() => { if (subscribers.size > 0) startSync().catch(() => {}); }, LISTENER_RENEW_MS);
+}
+
+/**
+ * Rebuilds this copy's list from a full Firestore read, keeping queued
+ * changes (they are sent first). For a server whose list must pick up edits
+ * made directly in Firestore. Costs one read per trade.
+ */
+export async function forceFullResync(): Promise<boolean> {
+  await flushPendingWrites();
+  const before = Number(safeGetLocalStorage(FULL_SYNC_AT_KEY)) || 0;
+  await startSync(true);
+  return (Number(safeGetLocalStorage(FULL_SYNC_AT_KEY)) || 0) > before;
 }
 
 // ---------------------------------------------------------------- server hub
@@ -633,7 +684,8 @@ export function subscribeToAutomatedTrades(callback: (trades: AutomatedTradeReco
  * to its own saved list.
  */
 async function fetchOpenTradesFromServer(): Promise<AutomatedTradeRecord[] | null> {
-  if (!FIRESTORE_WRITES_ENABLED || isQuotaBlocked()) return null;
+  // In the server its own list is the truth; there is nothing to check against.
+  if (serverWriterMode || !FIRESTORE_WRITES_ENABLED || isQuotaBlocked()) return null;
   try {
     const q = query(collection(db, TRADES_COLLECTION), where('status', '==', 'OPEN'));
     const snap = await Promise.race([
@@ -719,8 +771,8 @@ export async function executeSimulatedTrade(trade: AutomatedTradeRecord): Promis
   }
 
   // Safe to execute: persist new trade to Firestore (Milestone event)
-  if (FIRESTORE_WRITES_ENABLED && isQuotaBlocked()) {
-    setPending(trade.id, 'create');
+  if (FIRESTORE_WRITES_ENABLED && (serverWriterMode || isQuotaBlocked())) {
+    setPending(trade.id, 'create');   // writer mode: sent with the next batch
   } else if (FIRESTORE_WRITES_ENABLED) {
     try {
       await setDoc(doc(db, TRADES_COLLECTION, trade.id), stamped(trade));
@@ -754,8 +806,8 @@ export async function executeSimulatedTrade(trade: AutomatedTradeRecord): Promis
  */
 export async function updateAutomatedTrade(trade: AutomatedTradeRecord, syncToFirestore: boolean = false): Promise<void> {
   const shouldSync = syncToFirestore || trade.status !== 'OPEN';
-  if (FIRESTORE_WRITES_ENABLED && shouldSync && isQuotaBlocked()) {
-    setPending(trade.id, 'update');
+  if (FIRESTORE_WRITES_ENABLED && shouldSync && (serverWriterMode || isQuotaBlocked())) {
+    setPending(trade.id, 'update');   // writer mode: sent with the next batch
   } else if (FIRESTORE_WRITES_ENABLED && shouldSync) {
     try {
       const docRef = doc(db, TRADES_COLLECTION, trade.id);
@@ -877,7 +929,7 @@ export async function syncOpenTradesWithLivePrices(
 }> {
   const now = Date.now();
   // Retry queued writes on every refresh, not only when a snapshot arrives.
-  if (getPendingWriteCount()) await flushPendingWrites();
+  if (getPendingWriteCount() && !serverWriterMode) await flushPendingWrites();   // the server flushes on its own timer
   // Use knownTrades from caller or cached local storage — zero getDocs calls!
   let currentTrades: AutomatedTradeRecord[] = knownTrades && knownTrades.length > 0 ? [...knownTrades] : [];
   if (currentTrades.length === 0) {

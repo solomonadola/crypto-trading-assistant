@@ -153,3 +153,38 @@ export function selectAutoPilotCandidate(i: AutoPilotInputs): AutoPilotDecision 
     ? { signal: eligibleCandidates[0] }
     : { signal: null, reason: 'No qualifying signal' };
 }
+
+/**
+ * Why a manual deploy of `signal` must not go ahead, or null if it may.
+ * The same limits as auto-pilot except the re-entry cooldown and signal
+ * quality, which a manual deploy overrides by design. Shared by the browser
+ * and the server (POST /api/deploy).
+ */
+export function manualDeployBlockReason(
+  signal: EntrySignalResult,
+  trades: AutomatedTradeRecord[],
+  bankroll: BankrollState
+): string | null {
+  const open = trades.filter((t) => t.status === 'OPEN');
+  const sym = signal.symbol.toUpperCase();
+  if (open.length >= AUTOPILOT_CONFIG.maxConcurrentTrades) {
+    return `Maximum ${AUTOPILOT_CONFIG.maxConcurrentTrades} open positions reached. Wait for one to close.`;
+  }
+  if (open.some((t) => t.symbol.toUpperCase() === sym)) {
+    return `A position for ${signal.symbol} is already open (one position per coin).`;
+  }
+  if (MAJOR_COINS.has(sym) && open.filter((t) => MAJOR_COINS.has(t.symbol.toUpperCase())).length >= MAX_MAJOR_COIN_SLOTS) {
+    return `Major coins (${Array.from(MAJOR_COINS).join(', ')}) are capped at ${MAX_MAJOR_COIN_SLOTS} open positions.`;
+  }
+  if (MEME_COINS.has(sym) && open.filter((t) => MEME_COINS.has(t.symbol.toUpperCase())).length >= MAX_MEME_COIN_SLOTS) {
+    return `Meme coins are capped at ${MAX_MEME_COIN_SLOTS} open positions.`;
+  }
+  if (!bankroll.canOpenNewTrade) return bankroll.blockReason || 'Bankroll slots are full.';
+  if (bankroll.liquidCashUSD < bankroll.trancheSizeUSD) {
+    return `Not enough cash ($${bankroll.liquidCashUSD.toFixed(2)} available, $${bankroll.trancheSizeUSD.toFixed(2)} needed).`;
+  }
+  if (bankroll.deployedCapitalUSD + bankroll.trancheSizeUSD > bankroll.totalPortfolioValueUSD + 0.05) {
+    return `Trade would exceed the account balance ($${bankroll.totalPortfolioValueUSD.toFixed(2)}).`;
+  }
+  return null;
+}

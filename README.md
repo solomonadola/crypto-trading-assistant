@@ -28,42 +28,48 @@ does, every 30 seconds, what an open tab does: fetch prices, replay any time
 it missed, check stops and targets, and run the auto-pilot with the same
 decision code as the browser (`src/services/autopilotEngine.ts`).
 
-- **Browsers step aside and follow the server.** A browser that finds a
-  worker that has completed a tick in the last two minutes only displays: it
-  does not evaluate trades or open new ones, so there is one trader. It shows
-  the server's own list, pulled every 30 seconds from `GET /api/trades`
-  (only the trades changed since its last pull, gzipped), and makes no
-  Firestore reads — so every copy shows the same data even while the
-  Firestore quota is spent. If the worker stops ticking, browsers switch back
-  to Firestore and trade themselves within about 20 seconds.
-- **Which server:** the one the page came from, or the URL in
-  `VITE_TRADING_SERVER_URL` (e.g. a local dev server following the hosted
-  app; see `.env.example`). The status strip shows "24/7 Server Active".
-  Manual deploys and exclusions from a browser still go to Firestore, so the
-  server only sees them once Firestore can be read.
-- **Restarts lose nothing.** Every open trade carries `lastEvaluatedAt`, saved
-  with it to Firestore at each exit-ladder event and every 10 minutes. After a
-  restart or a sleep, the worker replays each trade's candles from exactly
-  there.
-- **It keeps a JSON copy on disk** (`data/worker-state.json`, or
-  `WORKER_STATE_FILE`; `off` to disable): the trade list, sync position and
-  queued writes, saved within 2 seconds of any change. A restart resumes from
-  it with a changes-only sync instead of re-reading the whole history.
-- **It keeps trading when Firebase cannot be read** (daily quota spent,
-  outage), from a list Firebase has confirmed before — this run or the saved
-  file — since it is the only writer while it runs. Stops and targets are
-  still enforced; writes are queued and sent when Firebase is back.
-- **It never trades blind.** With no confirmed list (a first start while
-  Firebase is down) it waits; it also skips ticks when prices are more than
+- **The server is the source of truth.** Its trade list (in memory, mirrored
+  to `data/worker-state.json`) is what every copy of the app shows, and every
+  change goes through it: its own checks and the actions browsers send.
+  - Browsers pull the list every 30 seconds from `GET /api/trades` (only the
+    trades changed since their last pull, gzipped) and make no Firestore
+    reads or writes while the server runs.
+  - Manual deploy, close, recycle and exclude are sent to the server
+    (`POST /api/deploy`, `/api/trades/:id/close`, `/api/trades/:id/exclude`),
+    which applies them one at a time with its own checks, so an action can
+    never be overwritten by a check running at the same moment.
+- **Firestore is the server's backup.** Changes are queued and written every
+  5 minutes (`WORKER_FLUSH_MINUTES`), one write per changed trade, and on
+  shutdown; open trades' prices are included once an hour. The server keeps
+  no Firestore listener and reads Firestore only to build its list when it
+  has none (first start, or a restart that lost the state file) or on
+  `POST /api/resync`, e.g. after editing trades directly in Firestore.
+  A crash (not a normal shutdown) on a host whose disk is wiped loses at most
+  the last 5 minutes of changes; the replay of price candles then re-applies
+  any stop or target crossed meanwhile.
+- **If the server stops**, browsers notice within about 20 seconds, switch
+  back to Firestore and trade themselves. The status strip shows
+  "24/7 Server Active" while the server is in charge.
+- **Following the hosted server from a local copy:** put
+  `BACKEND_URL=https://your-app.run.app` in `.env.local` and restart
+  `bun run dev`; the dev server forwards `/api` there, so the local copy
+  shows the hosted list and its buttons act on it.
+- **Restarts lose nothing** on hosts with a lasting disk: the state file
+  holds the list, the queued changes and each open trade's `lastEvaluatedAt`,
+  and missed candles are replayed from there.
+- **It never trades blind.** Without a list (a first start while Firestore
+  is unavailable) it waits; it also skips checks when prices are more than
   two minutes old.
 - **Settings:** `TRADING_WORKER=off` serves the app without the worker;
-  `WORKER_AUTOPILOT=off` manages open trades but opens no new ones. A
-  read-only copy (`VITE_FIRESTORE_WRITES=off`, also read from `.env.local`)
-  never starts it.
-- **Endpoints:** `GET /api/status` (worker state and recent log),
-  `GET /api/trades?since=&boot=` (the trade list, or changes since a pull),
-  `GET /api/tick` (run a tick now), `POST /api/autopilot` `{"enabled": bool}`.
-  `/api/autopilot` is unauthenticated and its setting resets on restart.
+  `WORKER_AUTOPILOT=off` makes auto-pilot start off (the switch in the app
+  changes it, and the choice survives restarts); `WORKER_FLUSH_MINUTES`;
+  `WORKER_STATE_FILE` (`off` to keep no file). A read-only copy
+  (`VITE_FIRESTORE_WRITES=off`, also read from `.env.local`) never starts it.
+- **Endpoints:** `GET /api/status` (worker state, `sync` section with queued
+  changes and the last Firestore save, recent log), `GET /api/trades`,
+  `GET /api/tick`, `POST /api/autopilot`, `/api/deploy`, `/api/trades/:id/close`,
+  `/api/trades/:id/exclude`, `/api/flush` (save to Firestore now),
+  `/api/resync`. The POST endpoints are same-origin only and unauthenticated.
 
 **Hosting.** The worker needs a process that stays running:
 
@@ -73,8 +79,8 @@ decision code as the browser (`src/services/autopilotEngine.ts`).
   while it is answering a request and is shut down when idle, so the 30s loop
   stalls, and its disk is temporary, so the JSON file lasts only until the
   instance restarts. Either set **minimum instances = 1** with **CPU always allocated**,
-  or have a free uptime pinger (UptimeRobot, Cloud Scheduler) request
-  `/api/tick` every minute. Set **maximum instances = 1** either way: two
+  or have an uptime pinger request `/api/tick` regularly (see the note on
+  pinger intervals below). Set **maximum instances = 1** either way: two
   instances would be two workers trading the same account. After deploying,
   open `/api/status` on the hosted URL — `workerRunning: true` and a
   `tickAgeMs` under 60000 mean it is trading.
@@ -84,6 +90,11 @@ decision code as the browser (`src/services/autopilotEngine.ts`).
 Only one worker should run against the database. `bun run dev` never starts
 one; do not leave `bun run start` running locally while a hosted worker is
 live unless `.env.local` has `VITE_FIRESTORE_WRITES=off`.
+
+Pinger intervals: browsers treat the server as in charge only if it checked
+in the last 2 minutes. With a pinger slower than that, browsers will take
+over trading between pings - use minimum instances = 1 instead, or a pinger
+every minute.
 
 No environment variables are required. `.env.example` lists `GEMINI_API_KEY`
 and `APP_URL` from the AI Studio template; nothing in `src/` reads them.
@@ -233,22 +244,24 @@ possible:
 - Anything that edits trades outside the app must set `updatedAt`, or copies
   only see the change at their weekly full read.
 
-Expected use at about 70 trades a day with the worker running:
+Expected use at about 70 trades a day, with the 24/7 server running (browsers
+then use no Firestore at all; the server is the only reader and writer):
 
 | | per day | free limit |
 |---|---|---|
-| Writes: opens, exit-ladder events, 10-minute checkpoints of ~10 open trades | ~1,700 | 20,000 |
-| Reads: worker listener + open-slot check before each deploy | ~2,400 | |
-| Reads: each browser tab left open all day | ~1,700 | |
-| Reads: each full history read (server start, new browser, weekly) | 1 per trade stored (341 now, ~2,000 more a month) | |
-| **Typical total** (worker + two open tabs, no restarts) | **~6,000** | 50,000 |
+| Writes: one per changed trade per 5-minute save (opens, exit-ladder events, closes, exclusions) | ~250 | 20,000 |
+| Writes: hourly save of open trades' prices (~10 open) | ~240 | |
+| Reads | 0 | 50,000 |
+| Reads: server start without its state file, or `/api/resync` | 1 per trade stored (341 now, ~2,000 more a month) | |
+
+Without the server (browsers trading themselves) each browser tab uses about
+1,700 reads a day, as described above.
 
 Storage is about 3 KB per trade, around 6 MB a month. Usage is shown in the
-Firebase console under Firestore > Usage. If the quota is reached, browsers
-keep working from their saved list and the 24/7 worker from its JSON file;
-both queue their writes and send them once Firebase is readable again (the
-quota resets at midnight Pacific). Browsers cannot see the worker's changes
-until then.
+Firebase console under Firestore > Usage. If the read quota is spent, the
+server carries on from its own list, and its writes (a separate allowance)
+still go out; browsers without a server keep working from their saved list
+and queue their writes until the quota resets (midnight Pacific).
 
 > **Every copy of the app shares the production database**, including a local
 > dev server. For development or testing, put `VITE_FIRESTORE_WRITES=off` in
