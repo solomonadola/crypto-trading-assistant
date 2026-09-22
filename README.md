@@ -114,9 +114,19 @@ All tunables live in `src/config/`. The values below are the current defaults.
 
 ### Market data
 
-- **Universe:** 36 hardcoded USDT pairs in `src/services/binanceService.ts`.
-  Pairs with no live Binance spot ticker (currently FTM, KAS and POPCAT) are
-  skipped rather than scanned at a stale price.
+- **Universe** — `src/config/universe.ts`: the **40 Binance USDT pairs with
+  the most 24-hour trading volume**, taken from the same ticker data as the
+  prices (no extra requests) and re-chosen once a day; the list is saved so a
+  reload or restart keeps it. Stablecoins, wrapped coins, tokenised gold and
+  apparent stock tokens are left out (`UNIVERSE_EXCLUDED`). Coins without
+  known details get a plain name and lettered logo. `mode: 'fixed'` switches
+  back to the old hardcoded 36 (`TOP_ASSETS` in `binanceService.ts`).
+  - Meme coins share the 2-position cap only if they are in `MEME_COINS`
+    (`src/types/entryScanner.ts`); new memes that reach the list must be
+    added there.
+  - The replay studies (`STUDY_A_RESULTS.md`, `tools/`) were run on the fixed
+    36. Their findings do not carry over automatically to a volume-ranked list,
+    which takes in newer, more volatile listings.
 - **Feed:** Binance `/api/v3/ticker/24hr` (global spot, via
   `data-api.binance.vision` or `api.binance.com`), refreshed every 30 seconds.
   Binance.US is deliberately *not* used as a fallback: it is a different

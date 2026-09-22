@@ -1,4 +1,5 @@
 import { CryptoCoin } from '../types';
+import { UNIVERSE_CONFIG, UNIVERSE_EXCLUDED } from '../config/universe';
 
 export interface BinanceFuturesTicker {
   symbol: string;
@@ -109,6 +110,11 @@ interface AssetDefinition {
   description: string;
 }
 
+/**
+ * Coins with known details (name, logo, category). With UNIVERSE_CONFIG.mode
+ * 'fixed' this is also the list that is scanned; with 'volume' it only supplies
+ * details for coins that make the volume list (others get generic ones).
+ */
 export const TOP_ASSETS: AssetDefinition[] = [
   { id: 'bitcoin', symbol: 'BTC', name: 'Bitcoin', category: 'Layer 1', image: 'https://assets.coingecko.com/coins/images/1/large/bitcoin.png', launch_year: 2009, consensus: 'Proof of Work', description: 'Decentralized digital currency and primary store of value.' },
   { id: 'ethereum', symbol: 'ETH', name: 'Ethereum', category: 'Layer 1', image: 'https://assets.coingecko.com/coins/images/279/large/ethereum.png', launch_year: 2015, consensus: 'Proof of Stake', description: 'Global decentralized computing platform for smart contracts and dApps.' },
@@ -151,6 +157,90 @@ export const TOP_ASSETS: AssetDefinition[] = [
 // Pairs we have already warned about, so a missing listing logs once, not every 30s.
 const warnedMissingPairs = new Set<string>();
 
+// ---------------------------------------------------------------- universe
+
+const UNIVERSE_KEY = 'cryptostudy_universe';
+
+function isStableLike(t: BinanceFuturesTicker): boolean {
+  const price = parseFloat(t.lastPrice);
+  const range = (parseFloat(t.highPrice) - parseFloat(t.lowPrice)) / price;
+  return Math.abs(price - 1) < 0.02 && range < 0.01;
+}
+
+/**
+ * The `size` USDT pairs with the most 24h volume, as base symbols, highest
+ * first. Skips stablecoins, wrapped copies and gold (UNIVERSE_EXCLUDED, or a
+ * $1 price that does not move) and pairs with no trades. Pure; tested in
+ * tools/test-universe.mjs.
+ */
+export function selectUniverse(tickers: Map<string, BinanceFuturesTicker>, size: number = UNIVERSE_CONFIG.size): string[] {
+  const candidates: Array<{ base: string; volume: number }> = [];
+  tickers.forEach((t, pair) => {
+    if (!pair.endsWith('USDT')) return;
+    const base = pair.slice(0, -4);
+    if (!base || UNIVERSE_EXCLUDED.has(base)) return;
+    if (typeof t.count === 'number' && t.count <= 0) return;
+    const price = parseFloat(t.lastPrice);
+    const volume = parseFloat(t.quoteVolume);
+    if (!(price > 0) || !(volume > 0) || isStableLike(t)) return;
+    candidates.push({ base, volume });
+  });
+  return candidates.sort((a, b) => b.volume - a.volume).slice(0, size).map((c) => c.base);
+}
+
+let universe: { symbols: string[]; at: number } | null = null;
+
+/**
+ * The coins to scan now. 'fixed': TOP_ASSETS. 'volume': the volume list,
+ * chosen once and kept for UNIVERSE_CONFIG.refreshHours (saved, so a reload or
+ * restart keeps the same list), re-chosen after that.
+ */
+export function currentUniverse(tickers: Map<string, BinanceFuturesTicker>, now: number = Date.now()): string[] {
+  if (UNIVERSE_CONFIG.mode === 'fixed') return TOP_ASSETS.map((a) => a.symbol);
+  if (!universe) {
+    try {
+      const saved = JSON.parse(localStorage.getItem(UNIVERSE_KEY) || 'null');
+      if (saved && Array.isArray(saved.symbols) && typeof saved.at === 'number') universe = saved;
+    } catch {}
+  }
+  const stale = !universe || !universe.symbols.length || now - universe.at > UNIVERSE_CONFIG.refreshHours * 3_600_000;
+  if (stale && tickers.size > 0) {
+    const symbols = selectUniverse(tickers);
+    if (symbols.length) {
+      const before = new Set(universe?.symbols || []);
+      const added = symbols.filter((x) => !before.has(x));
+      const dropped = (universe?.symbols || []).filter((x) => !symbols.includes(x));
+      universe = { symbols, at: now };
+      try { localStorage.setItem(UNIVERSE_KEY, JSON.stringify(universe)); } catch {}
+      console.info(`[Universe] Top ${symbols.length} Binance USDT pairs by 24h volume` +
+        (before.size ? ` (added ${added.join(', ') || 'none'}; dropped ${dropped.join(', ') || 'none'})` : `: ${symbols.join(', ')}`));
+    }
+  }
+  return universe?.symbols ?? [];
+}
+
+const KNOWN_ASSETS = new Map(TOP_ASSETS.map((a) => [a.symbol, a]));
+
+/** A plain lettered badge for coins without a known logo. */
+function badge(symbol: string): string {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><circle cx="32" cy="32" r="32" fill="#44403c"/>` +
+    `<text x="32" y="40" font-family="sans-serif" font-size="22" font-weight="700" fill="#e7e5e4" text-anchor="middle">${symbol.slice(0, 4)}</text></svg>`;
+  return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
+}
+
+function assetFor(symbol: string): AssetDefinition {
+  return KNOWN_ASSETS.get(symbol) ?? {
+    id: symbol.toLowerCase(),
+    symbol,
+    name: symbol,
+    category: 'Other',
+    image: badge(symbol),
+    launch_year: 0,
+    consensus: 'Unknown',
+    description: `${symbol} - one of the most traded USDT pairs on Binance over the last 24 hours.`,
+  };
+}
+
 /**
  * Fetches real-time market coins directly from Binance API without any mock data.
  * Assets without a live ticker are excluded rather than falling back to a
@@ -159,15 +249,16 @@ const warnedMissingPairs = new Set<string>();
 export async function fetchLiveMarketCoins(): Promise<CryptoCoin[]> {
   const tickers = await fetchBinanceTickers();
   const coins: CryptoCoin[] = [];
+  const symbols = currentUniverse(tickers);
 
-  for (let i = 0; i < TOP_ASSETS.length; i++) {
-    const asset = TOP_ASSETS[i];
+  for (let i = 0; i < symbols.length; i++) {
+    const asset = assetFor(symbols[i]);
     const binancePair = `${asset.symbol}USDT`;
     const ticker = tickers.get(binancePair) || tickers.get(`${asset.symbol}USD`);
 
     // Skip assets with no live ticker. There are zero fallback or hardcoded
     // prices; if a coin does not trade on Binance International spot, it is
-    // kicked out completely from the universe.
+    // left out of the scan.
     if (!ticker) {
       if (!warnedMissingPairs.has(binancePair)) {
         warnedMissingPairs.add(binancePair);

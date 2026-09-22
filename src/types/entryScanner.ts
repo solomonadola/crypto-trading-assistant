@@ -9,7 +9,13 @@ export type EntryStrategyArchetype =
 
 export const MAJOR_COINS = new Set(['BTC', 'ETH', 'BNB', 'SOL']);
 export const MAX_MAJOR_COIN_SLOTS = 3;
-export const MEME_COINS = new Set(['DOGE', 'PEPE', 'WIF', 'SHIB', 'BONK', 'POPCAT', 'FLOKI', 'MEME', 'BOME', 'NEIRO']);
+// Meme coins share one cap (MAX_MEME_COIN_SLOTS): they tend to flush together.
+// The scanned coins now follow trading volume (config/universe.ts), so new
+// memes can appear; add them here or they count as ordinary alts.
+export const MEME_COINS = new Set([
+  'DOGE', 'PEPE', 'WIF', 'SHIB', 'BONK', 'POPCAT', 'FLOKI', 'MEME', 'BOME', 'NEIRO',
+  'TRUMP', 'PENGU', 'MUBARAK', 'PNUT', 'TURBO', 'PEOPLE', 'ACT', 'DOGS', 'NOT', '1000SATS', '1MBABYDOGE', 'BROCCOLI714', 'TST',
+]);
 export const MAX_MEME_COIN_SLOTS = 2;
 export const COIN_REENTRY_COOLDOWN_MS = 20 * 60 * 1000; // 20 minutes cooldown
 
