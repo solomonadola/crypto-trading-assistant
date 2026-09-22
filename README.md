@@ -57,6 +57,13 @@ decision code as the browser (`src/services/autopilotEngine.ts`).
 - **Restarts lose nothing** on hosts with a lasting disk: the state file
   holds the list, the queued changes and each open trade's `lastEvaluatedAt`,
   and missed candles are replayed from there.
+- **It enforces the limits on what is already open.** On every check, a
+  second position in the same coin, or anything over 10 open, is closed:
+  the newest go (the oldest were opened legitimately), at their live price
+  with the exit cost, marked `DUPLICATE_COIN_CLOSED` or `SLOT_LIMIT_CLOSED`.
+  Browsers without the server only report such conflicts, as before; a
+  browser acting on its own possibly stale list is what once closed real
+  positions at $0.
 - **It never trades blind.** Without a list (a first start while Firestore
   is unavailable) it waits; it also skips checks when prices are more than
   two minutes old.

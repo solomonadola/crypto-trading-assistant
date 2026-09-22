@@ -188,3 +188,32 @@ export function manualDeployBlockReason(
   }
   return null;
 }
+
+export type ExcessCloseReason = 'DUPLICATE_COIN_CLOSED' | 'SLOT_LIMIT_CLOSED';
+
+/**
+ * Open positions that break the limits and must be closed: a second position
+ * in the same coin, then anything beyond the 10-position limit. The oldest
+ * positions are kept - they were opened legitimately; the newest are the ones
+ * that got through. Used by the 24/7 server only: it holds the one list every
+ * copy trusts, so it cannot close a position on the strength of a stale view,
+ * which is what the old browser-side clean-up did.
+ */
+export function findExcessOpenTrades(
+  trades: AutomatedTradeRecord[],
+  max: number = AUTOPILOT_CONFIG.maxConcurrentTrades
+): Array<{ trade: AutomatedTradeRecord; reason: ExcessCloseReason }> {
+  const open = trades
+    .filter((t) => t.status === 'OPEN')
+    .sort((a, b) => (a.openedAtTimestamp || 0) - (b.openedAtTimestamp || 0) || a.id.localeCompare(b.id));
+  const seen = new Set<string>();
+  const keep: AutomatedTradeRecord[] = [];
+  const excess: Array<{ trade: AutomatedTradeRecord; reason: ExcessCloseReason }> = [];
+  for (const t of open) {
+    const sym = t.symbol.toUpperCase();
+    if (seen.has(sym)) excess.push({ trade: t, reason: 'DUPLICATE_COIN_CLOSED' });
+    else { seen.add(sym); keep.push(t); }
+  }
+  while (keep.length > max) excess.push({ trade: keep.pop()!, reason: 'SLOT_LIMIT_CLOSED' });
+  return excess;
+}

@@ -19,7 +19,7 @@ import { CryptoCoin } from '../types';
 import { scanLiveMarketEntries, deploySignalToAutomatedFeed } from '../services/entryScannerService';
 import { calculateBankrollState } from '../services/bankrollService';
 import { catchUpOpenTrades } from '../services/catchUpService';
-import { computePacing, selectAutoPilotCandidate, manualDeployBlockReason } from '../services/autopilotEngine';
+import { computePacing, selectAutoPilotCandidate, manualDeployBlockReason, findExcessOpenTrades } from '../services/autopilotEngine';
 import { isCounted } from '../services/metrics';
 import { AutomatedTradeRecord } from '../types/automatedFeed';
 
@@ -253,7 +253,22 @@ async function runTick(): Promise<TickResult> {
     // 4. Stops, targets and ratchets at the live price.
     const sync = await syncOpenTradesWithLivePrices(priceMap, trades);
     sync.events.forEach((e) => logEvent(e, 'success'));
-    const open = sync.trades.filter((t) => t.status === 'OPEN');
+
+    // 4b. Enforce the limits on what is already open: a second position in a
+    //     coin, or more than 10 open, got in some other way (two copies
+    //     trading at once before the server was in charge). The newest go, at
+    //     their live price with the exit cost, like a manual close.
+    let current = sync.trades;
+    const excess = findExcessOpenTrades(current);
+    if (excess.length) {
+      for (const { trade, reason } of excess) {
+        const price = trade.currentPrice || trade.entryPrice;
+        await updateAutomatedTrade(closeTradeAt(trade, price, reason), true);
+        logEvent(`${trade.symbol} closed at ${price}: ${reason === 'DUPLICATE_COIN_CLOSED' ? 'second position in the same coin' : 'over the 10-position limit'}`, 'warn');
+      }
+      current = loadLocalTrades();
+    }
+    const open = current.filter((t) => t.status === 'OPEN');
     openPositionsCount = open.length;
 
     // 5. Checkpoint. Only milestones are written as they happen; this saves
@@ -267,7 +282,7 @@ async function runTick(): Promise<TickResult> {
     // 6. Auto-pilot: the browser's decision, from the shared engine.
     let deployedSymbol: string | null = null;
     if (isAutoPilot) {
-      const counted = sync.trades.filter(isCounted);
+      const counted = current.filter(isCounted);
       const bankroll = calculateBankrollState(counted);
       const decision = selectAutoPilotCandidate({
         signals: scanLiveMarketEntries(coins, 'FUTURES_1_2D'),

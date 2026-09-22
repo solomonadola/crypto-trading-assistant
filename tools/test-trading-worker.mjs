@@ -453,6 +453,35 @@ console.log('\n13. Server is the source of truth: no Firebase reads while it run
   w.stopTradingWorker();
 }
 
+console.log('\n14. Over the limit: the server closes the newest excess positions at their live price');
+{
+  reset();
+  // Today's layout: 11 coins plus a second WLD and a second AAVE, oldest first.
+  const syms = ['UNI', 'AVAX', 'OP', 'WLD', 'AAVE', 'DOT', 'ETH', 'LINK', 'TIA', 'LDO', 'ENA', 'WLD', 'AAVE'];
+  prices = Object.fromEntries(syms.map((x) => [x, 101]));
+  globalThis.__fsDocs = syms.map((x, i) => trade(`t${i}`, x, { openedAtTimestamp: NOW - (100 - i) * M }));
+  const w = await load(false);
+  w.startTradingWorker(1e9);
+  await settle();
+  await w.executeTradingTick();
+  const all = w.loadLocalTrades();
+  const open = all.filter((t) => t.status === 'OPEN');
+  const closed = all.filter((t) => t.status !== 'OPEN');
+  check('10 left open', open.length === 10, String(open.length));
+  check('one position per coin', new Set(open.map((t) => t.symbol)).size === 10);
+  const byId = Object.fromEntries(closed.map((t) => [t.id, t]));
+  check('second WLD and second AAVE closed', byId.t11?.exitReason === 'DUPLICATE_COIN_CLOSED' && byId.t12?.exitReason === 'DUPLICATE_COIN_CLOSED');
+  check('newest remaining (ENA) closed for the limit', byId.t10?.exitReason === 'SLOT_LIMIT_CLOSED', Object.keys(byId).join(','));
+  check('the oldest ten kept', ['t0','t1','t2','t3','t4','t5','t6','t7','t8','t9'].every((id) => open.some((t) => t.id === id)));
+  check('closed at the live price, with P&L and exit cost', closed.every((t) => t.exitPrice === 101 && t.pnlUSD === 0.1 && t.totalFeesUSD > 0.015),
+    JSON.stringify(closed.map((t) => [t.id, t.exitPrice, t.pnlUSD, t.totalFeesUSD])));
+  await w.flushNow();
+  check('closes saved to Firestore', ['t10', 't11', 't12'].every((id) => writes().some((c) => c.id === id && c.data.status === 'COMPLETED')));
+  await w.executeTradingTick();
+  check('nothing more closed on the next check', w.loadLocalTrades().filter((t) => t.status === 'OPEN').length === 10);
+  w.stopTradingWorker();
+}
+
 console.log('\n11. Firebase quota spent: the server trades on from its saved file');
 {
   const saved = {
