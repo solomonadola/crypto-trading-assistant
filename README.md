@@ -256,10 +256,11 @@ possible:
   changed since the last sync (each write stamps `updatedAt` with the
   server's clock).
 - **The whole history is read** only by a copy with nothing saved (a new
-  browser, a server start) and once a week (to catch deletions). A reload or
-  reopening reads nothing up front.
+  browser, a server start) and every 6 hours (to catch deletions, and
+  changes saved by copies still on older code, which do not stamp
+  `updatedAt`). A reload within those 6 hours reads nothing up front.
 - Anything that edits trades outside the app must set `updatedAt`, or copies
-  only see the change at their weekly full read.
+  only see the change at their next full read.
 
 Expected use at about 70 trades a day, with the 24/7 server running (browsers
 then use no Firestore at all; the server is the only reader and writer):

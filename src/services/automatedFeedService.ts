@@ -428,7 +428,14 @@ export async function fetchAutomatedTrades(forceNetwork: boolean = false): Promi
 
 const SYNC_CURSOR_KEY = 'crypto_automated_trades_sync_cursor';
 const FULL_SYNC_AT_KEY = 'crypto_automated_trades_full_sync_at';
-const FULL_SYNC_EVERY_MS = 7 * 86_400_000;
+// Every 6 hours, not weekly: copies still running the older code save
+// without updatedAt, so their changes are invisible to the changes-only
+// listener and only arrive with a full read. ~1 read per trade each time.
+const FULL_SYNC_EVERY_MS = 6 * 3_600_000;
+// Bumped when a saved copy may be missing changes the listener could not see;
+// a copy saved under an older version does one full read on its next load.
+const SYNC_VERSION = '2';
+const SYNC_VERSION_KEY = 'crypto_automated_trades_sync_version';
 const CURSOR_MARGIN_MS = 5 * 60_000;        // covers clock differences between copies
 const LISTENER_RENEW_MS = 12 * 3_600_000;   // keeps a long-running listener's result set small
 const SYNC_RETRY_MS = 60_000;
@@ -534,7 +541,8 @@ async function startSync(forceFull = false): Promise<void> {
   let cursor = Number(safeGetLocalStorage(SYNC_CURSOR_KEY)) || 0;
   const lastFull = Number(safeGetLocalStorage(FULL_SYNC_AT_KEY)) || 0;
   const hasSaved = safeGetLocalStorage(LOCAL_STORAGE_KEY) !== null;
-  const needFull = forceFull || serverWriterMode || !FIRESTORE_WRITES_ENABLED || !hasSaved || !cursor || now - lastFull > FULL_SYNC_EVERY_MS;
+  const needFull = forceFull || serverWriterMode || !FIRESTORE_WRITES_ENABLED || !hasSaved || !cursor ||
+    now - lastFull > FULL_SYNC_EVERY_MS || safeGetLocalStorage(SYNC_VERSION_KEY) !== SYNC_VERSION;
 
   if (needFull) {
     try {
@@ -548,6 +556,7 @@ async function startSync(forceFull = false): Promise<void> {
       cursor = now;
       safeSetLocalStorage(SYNC_CURSOR_KEY, String(cursor));
       safeSetLocalStorage(FULL_SYNC_AT_KEY, String(now));
+      safeSetLocalStorage(SYNC_VERSION_KEY, SYNC_VERSION);
       if (serverWriterMode) return;   // no listener: it is the only writer
     } catch (err) {
       if (gen !== syncGeneration) return;
