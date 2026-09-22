@@ -19,3 +19,4 @@ coverage/
 tools/_gen/scanner.mjs
 tools/_gen/vendor/
 /server.js
+/.server-e2e.mjs

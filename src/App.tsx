@@ -23,6 +23,7 @@ import {
   syncOpenTradesWithLivePrices,
   isTradeListAuthoritative,
   setServerFeedActive,
+  setLocalWritesAllowed,
 } from './services/automatedFeedService';
 import { scanLiveMarketEntries, deploySignalToAutomatedFeed } from './services/entryScannerService';
 import { catchUpOpenTrades } from './services/catchUpService';
@@ -44,6 +45,16 @@ import {
 import { fetchLiveMarketCoins, buildPriceMap, getLastTickerFetchTime } from './services/binanceService';
 import { getFirestoreHealth } from './lib/firebase';
 import { Zap, CheckCircle2, AlertCircle } from 'lucide-react';
+
+// Without a reachable 24/7 server a browser only displays the trades (from
+// Firebase) and changes nothing. Two traders writing one history - a browser
+// that could not see the server, plus the server - is what produced duplicate
+// positions and more than 10 open. VITE_BROWSER_TRADING=on lets a browser trade
+// on its own again (for running without any server).
+const BROWSER_TRADING = import.meta.env.VITE_BROWSER_TRADING === 'on';
+setLocalWritesAllowed(BROWSER_TRADING);
+const NO_SERVER_MESSAGE =
+  'The trading server is not reachable, so this page is display-only and nothing was changed. Open the deployed app, or set BACKEND_URL for a local copy.';
 
 // When open trades were last evaluated against the market. Persisted so a
 // reopened app knows how long it was away and can replay the gap.
@@ -107,7 +118,7 @@ export default function App() {
   // completed a tick in the last two minutes counts. A server that answers but
   // is not ticking (Cloud Run throttles CPU between requests, a crashed loop,
   // no Firestore) must not silence the browser, or nothing trades at all.
-  const [serverState, setServerState] = useState<{ active: boolean; lastTickAt?: number | null }>({ active: false });
+  const [serverState, setServerState] = useState<{ active: boolean; lastTickAt?: number | null; warning?: string | null }>({ active: false });
   const serverActiveRef = useRef(false);
   serverActiveRef.current = serverState.active;
 
@@ -247,6 +258,8 @@ export default function App() {
         await pullServerTrades();
         return;
       }
+      // No server: display only (the Firebase listener keeps the list current).
+      if (!BROWSER_TRADING) return;
       // Database first: act only on the list Firestore has delivered.
       if (!isTradeListAuthoritative()) return;
 
@@ -321,6 +334,20 @@ export default function App() {
     return () => document.removeEventListener('visibilitychange', onVisible);
   }, [handleRefreshLiveFeed]);
 
+  // While the 24/7 server is in charge, every open page follows its list
+  // closely: a pull every 5 seconds (only the trades changed since the last
+  // one - usually nothing, a few KB at most), so pages open in different
+  // places show the same within seconds. Paused while the tab is hidden; the
+  // pull on becoming visible (below) catches up at once.
+  useEffect(() => {
+    if (!serverState.active) return;
+    const id = setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      pullServerTrades().catch(() => {});
+    }, 5000);
+    return () => clearInterval(id);
+  }, [serverState.active]);
+
   // Periodic automatic sync every 30 seconds (pauses when browser tab is inactive to protect quota and performance)
   useEffect(() => {
     const intervalId = setInterval(() => {
@@ -361,6 +388,7 @@ export default function App() {
       else showNotification(r.error || 'The server refused the deploy.', 'warn');
       return;
     }
+    if (!BROWSER_TRADING) { showNotification(NO_SERVER_MESSAGE, 'warn'); return; }
 
     // Cooldown status info for manual deployment
     const lastClosed = trades
@@ -395,6 +423,7 @@ export default function App() {
     // When the 24/7 server worker is active, the server handles auto-pilot deployments
     // so the browser and server never trade concurrently.
     if (serverState.active) return;
+    if (!BROWSER_TRADING) return;
     if (!isTradeListAuthoritative()) return;
     if (isDeployingRef.current) return;
 
@@ -450,6 +479,7 @@ export default function App() {
       showNotification(excluded ? `${trade.symbol} trade excluded from statistics.` : `${trade.symbol} trade counted in statistics again.`, 'info');
       return;
     }
+    if (!BROWSER_TRADING) { showNotification(NO_SERVER_MESSAGE, 'warn'); return; }
     const updated: AutomatedTradeRecord = {
       ...trade,
       excludedFromStats: excluded,
@@ -472,6 +502,7 @@ export default function App() {
       showNotification(`Closed position for ${trade.symbol}. Slot freed and cash returned to bankroll.`, 'info');
       return;
     }
+    if (!BROWSER_TRADING) { showNotification(NO_SERVER_MESSAGE, 'warn'); return; }
     const updated = closeTradeAt(trade, trade.currentPrice || trade.entryPrice, 'CLOSED_MANUAL');
     await updateTradeRecord(updated, true);
     setAllTrades((prev) => prev.map((t) => (t.id === trade.id ? updated : t)));
@@ -486,6 +517,7 @@ export default function App() {
       showNotification(`Recycled stagnant trade ${trade.symbol} to liquid treasury cash!`, 'success');
       return;
     }
+    if (!BROWSER_TRADING) { showNotification(NO_SERVER_MESSAGE, 'warn'); return; }
     const updated = closeTradeAt(trade, trade.currentPrice || trade.entryPrice, 'CLOSED_TIME_DECAY');
     await updateTradeRecord(updated, true);
     setAllTrades((prev) => prev.map((t) => (t.id === trade.id ? updated : t)));
@@ -498,6 +530,7 @@ export default function App() {
       showNotification('Reset is not available while the 24/7 server holds the trade history.', 'warn');
       return;
     }
+    if (!BROWSER_TRADING) { showNotification(NO_SERVER_MESSAGE, 'warn'); return; }
     if (window.confirm('Reset all trades back to the default quantitative demonstration dataset?')) {
       await resetTradesToDefault();
       showNotification('Trades reset to default demonstration dataset.', 'info');
@@ -532,6 +565,8 @@ export default function App() {
         onOpenDataHealth={() => setActiveTab('firebase')}
         serverActive={serverState.active}
         lastServerTickAt={serverState.lastTickAt}
+        displayOnly={!serverState.active && !BROWSER_TRADING}
+        serverWarning={serverState.warning}
       />
 
       {/* Main Content Area */}

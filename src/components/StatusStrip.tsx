@@ -21,6 +21,10 @@ interface StatusStripProps {
   onOpenDataHealth?: () => void;
   serverActive?: boolean;
   lastServerTickAt?: number | null;
+  /** No trading server reachable and browser trading off: nothing is traded from this page. */
+  displayOnly?: boolean;
+  /** Set when the server looks misconfigured (several instances, another build). */
+  serverWarning?: string | null;
 }
 
 type Tone = 'good' | 'warn' | 'bad' | 'neutral' | 'info';
@@ -100,7 +104,7 @@ const Item: React.FC<{ tone: Tone; title?: string; className?: string; children:
  * current, why is auto-pilot (not) trading, where is my data actually saved,
  * and what happened while the app was closed.
  */
-export const StatusStrip: React.FC<StatusStripProps> = ({ lastPriceUpdateAt, isRefreshing, pacingInfo, lastCatchUp, suspectRecords = 0, onOpenDataHealth, serverActive = false, lastServerTickAt = null }) => {
+export const StatusStrip: React.FC<StatusStripProps> = ({ lastPriceUpdateAt, isRefreshing, pacingInfo, lastCatchUp, suspectRecords = 0, onOpenDataHealth, serverActive = false, lastServerTickAt = null, displayOnly = false, serverWarning = null }) => {
   const [now, setNow] = useState(() => Date.now());
   const [mountedAt] = useState(() => Date.now());
   const [expanded, setExpanded] = useState(false);
@@ -190,13 +194,24 @@ export const StatusStrip: React.FC<StatusStripProps> = ({ lastPriceUpdateAt, isR
           >
             24/7 Server Active {lastServerTickAt ? `(Tick ${ago(now - lastServerTickAt)})` : ''}
           </Item>
+        ) : displayOnly ? (
+          <Item
+            tone="warn"
+            title="The 24/7 trading server is not reachable from this page, so it only shows the trades saved in Firebase and changes nothing. Open the deployed app to trade."
+          >
+            Display only - no trading server
+          </Item>
         ) : (
           <Item
             tone="neutral"
-            title="In-browser trading mode. Runs while this tab is open in the foreground; time away is replayed on return."
+            title="In-browser trading mode (VITE_BROWSER_TRADING=on). Runs while this tab is open in the foreground; time away is replayed on return."
           >
             Browser Mode
           </Item>
+        )}
+
+        {serverWarning && (
+          <Item tone="bad" title={serverWarning}>{serverWarning}</Item>
         )}
 
         {suspectRecords > 0 && (

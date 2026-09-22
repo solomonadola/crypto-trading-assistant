@@ -27,8 +27,15 @@ const FAKE_FIRESTORE = `
   export const collection = (_db, name) => ({ name });
   export const doc = (_db, col, id) => ({ col, id });
   const maybeFail = () => { if (globalThis.__fsWriteFail) throw new Error(globalThis.__fsWriteFail); };
-  export const setDoc = async (ref, data) => { maybeFail(); log({ op: 'set', id: ref.id, data }); };
-  export const updateDoc = async (ref, data) => { maybeFail(); log({ op: 'update', id: ref.id, data }); };
+  // Writes land in the fake database too, stamped like serverTimestamp().
+  const upsert = (id, data, merge) => {
+    const docs = (globalThis.__fsDocs = globalThis.__fsDocs || []);
+    const clean = Object.fromEntries(Object.entries(data).map(([k, v]) => [k, v && v.serverTs ? Date.now() : v]));
+    const i = docs.findIndex((d) => d.id === id);
+    if (i < 0) docs.push({ ...clean, id }); else docs[i] = merge ? { ...docs[i], ...clean } : { ...clean, id };
+  };
+  export const setDoc = async (ref, data) => { maybeFail(); log({ op: 'set', id: ref.id, data }); upsert(ref.id, data, false); };
+  export const updateDoc = async (ref, data) => { maybeFail(); log({ op: 'update', id: ref.id, data }); upsert(ref.id, data, true); };
   export const deleteDoc = async (ref) => { log({ op: 'delete', id: ref.id }); };
   export const getDocs = async () => { const d = globalThis.__fsDocs || []; count(d.length); return snap(d); };
   export const getDocFromServer = async () => ({});
@@ -41,7 +48,8 @@ const FAKE_FIRESTORE = `
     if (globalThis.__fsQuotaSpent) throw new Error('resource-exhausted: Quota exceeded');
     if (globalThis.__fsHold) await globalThis.__fsHold;
     const status = (q.filters || []).find((f) => f.field === 'status');
-    const d = (globalThis.__fsDocs || []).filter((x) => !status || x.status === status.value);
+    const since = (q.filters || []).find((f) => f.field === 'updatedAt');
+    const d = (globalThis.__fsDocs || []).filter((x) => (!status || x.status === status.value) && (!since || (x.updatedAt || 0) > since.value.ms));
     count(d.length);
     return snap(d);
   };
@@ -308,6 +316,7 @@ console.log('\n9. Database first at startup');
   reset();
   const w = await load(false);
   localStorage.setItem('crypto_automated_trades_local_fallback', JSON.stringify([trade('stale', 'OLD', { status: 'COMPLETED' })]));
+  localStorage.setItem('crypto_automated_trades_sync_version', '3');
   let release;
   globalThis.__fsHold = new Promise((r) => { release = r; });
   const unsub = w.subscribeToAutomatedTrades(() => {});
@@ -482,6 +491,86 @@ console.log('\n14. Over the limit: the server closes the newest excess positions
   w.stopTradingWorker();
 }
 
+console.log('\n15. Fresh start: saved data from the old database is dropped, never re-sent');
+{
+  reset();
+  // A browser saved trades and a queue of unsent changes before the reset.
+  localStorage.setItem('crypto_automated_trades_local_fallback', JSON.stringify([trade('old1', 'OLD')]));
+  localStorage.setItem('crypto_automated_trades_pending_writes', JSON.stringify({ old1: 'create' }));
+  localStorage.setItem('crypto_automated_trades_sync_version', '2');
+  globalThis.__fsDocs = [];                       // the emptied database
+  const w = await load(false);
+  const unsub = w.subscribeToAutomatedTrades(() => {});
+  await settle();
+  check('old trades dropped', w.loadLocalTrades().length === 0, String(w.loadLocalTrades().length));
+  check('old queue dropped', w.getPendingWriteCount() === 0);
+  await w.syncOpenTradesWithLivePrices(new Map(), w.loadLocalTrades());
+  check('nothing written to the fresh database', writes().length === 0, JSON.stringify(writes().map((c) => c.id)));
+  unsub();
+
+  // The server on an empty database: builds an empty list and starts trading.
+  reset();
+  prices = { SOL: 100 };
+  const s2 = await load(false);
+  s2.startTradingWorker(1e9);
+  await settle();
+  const r = await s2.executeTradingTick();
+  check('server starts on an empty database', r.success === true && s2.getTradesFeed(0, '')?.trades.length >= 0, r.reason || r.error || '');
+  s2.stopTradingWorker();
+}
+
+console.log('\n16. Server and Firebase kept in step by revision: behind -> pull, ahead -> push');
+{
+  reset();
+  prices = { SOL: 100, ETH: 100, BTC: 100 };
+  globalThis.__fsDocs = [trade('a', 'SOL', { rev: 1 }), trade('b', 'ETH', { rev: 1 })];
+  const w = await load(false);
+  w.startTradingWorker(1e9);
+  await settle();
+  const r0 = await w.syncWithFirestore(false);
+  check('first check after the build: nothing to do', r0 && r0.pulled === 0 && r0.pushed === 0, JSON.stringify(r0));
+
+  // Edited in Firebase (higher revision): the server is behind and pulls it.
+  const i = globalThis.__fsDocs.findIndex((d) => d.id === 'a');
+  globalThis.__fsDocs[i] = { ...globalThis.__fsDocs[i], rev: 2, excludedFromStats: true, updatedAt: Date.now() };
+  const r1 = await w.syncWithFirestore(false);
+  check('Firebase newer: pulled', r1.pulled === 1 && w.loadLocalTrades().find((t) => t.id === 'a')?.excludedFromStats === true, JSON.stringify(r1));
+
+  // Changed on the server (higher revision): pushed.
+  await w.closeTradeById('b');
+  const localB = w.loadLocalTrades().find((t) => t.id === 'b');
+  await w.syncWithFirestore(false);
+  const fsB = globalThis.__fsDocs.find((d) => d.id === 'b');
+  check('server newer: pushed', fsB?.status === 'COMPLETED' && fsB.rev === localB.rev && localB.rev === 2, `server rev ${localB.rev}, firebase ${fsB?.status} rev ${fsB?.rev}`);
+
+  // Its own write read back: same revision, no churn.
+  const r2 = await w.syncWithFirestore(false);
+  check('own writes read back as in sync', r2.pulled === 0 && r2.pushed === 0 && w.getPendingWriteCount() === 0, JSON.stringify(r2));
+
+  // New in Firebase only: pulled.
+  globalThis.__fsDocs.push({ ...trade('c', 'BTC', { rev: 1 }), updatedAt: Date.now() });
+  const r3 = await w.syncWithFirestore(false);
+  check('only in Firebase: pulled', r3.pulled === 1 && w.loadLocalTrades().some((t) => t.id === 'c'));
+
+  // Missing from Firebase (only the full check can see that): pushed back.
+  globalThis.__fsDocs = globalThis.__fsDocs.filter((d) => d.id !== 'a');
+  const r4 = await w.syncWithFirestore(true);
+  check('only on the server: pushed (full check)', r4.full && r4.pushed === 1 && globalThis.__fsDocs.some((d) => d.id === 'a'), JSON.stringify(r4));
+
+  // A price-only tick changes no revision, so it pushes nothing. (The first
+  // tick after a start includes the hourly save of open positions; later
+  // ones within the hour do not.)
+  await w.executeTradingTick();
+  await w.syncWithFirestore(false);
+  globalThis.__fsCalls = [];
+  prices = { SOL: 100.5, ETH: 100, BTC: 100.2 };
+  await w.executeTradingTick();
+  const r5 = await w.syncWithFirestore(false);
+  check('price-only ticks cause no writes', writes().length === 0 && r5.pushed === 0, JSON.stringify(writes().map((c) => c.id)));
+  check('status reports the last check', w.getWorkerStatus().sync.lastReconcile?.at > 0);
+  w.stopTradingWorker();
+}
+
 console.log('\n11. Firebase quota spent: the server trades on from its saved file');
 {
   const saved = {
@@ -489,6 +578,7 @@ console.log('\n11. Firebase quota spent: the server trades on from its saved fil
     crypto_automated_trades_full_sync_at: String(NOW - 3600_000),
     crypto_automated_trades_sync_cursor: String(NOW - 3600_000),
     firebase_quota_blocked_until: String(NOW + 2 * 3600_000),
+    crypto_automated_trades_sync_version: '3',
   };
   const { result, file, stderr } = runChild(saved);
   check('tick ran on the saved list', result?.r?.success === true, result ? (result.r.reason || result.r.error || '') : stderr.slice(-300));
@@ -498,6 +588,13 @@ console.log('\n11. Firebase quota spent: the server trades on from its saved fil
   const savedSol = JSON.parse(after.crypto_automated_trades_local_fallback || '[]').find((t) => t.id === 'sol');
   check('state file holds the close', savedSol?.status === 'STOPPED');
   check('state file holds the queue', Object.keys(JSON.parse(after.crypto_automated_trades_pending_writes || '{}')).includes('sol'));
+
+  // A state file from before the fresh start (no version 3) is not trusted:
+  // with Firebase unreadable the server waits rather than trade the old list.
+  const { crypto_automated_trades_sync_version: _v, ...oldFile } = saved;
+  const old = runChild(oldFile);
+  check('a state file from before the fresh start is not traded on', old.result?.r?.skipped === true && old.result?.solStatus === null,
+    JSON.stringify(old.result && { skipped: old.result.r.skipped, sol: old.result.solStatus }));
 
   const fresh = runChild(null);
   check('with no saved list it waits instead of trading blind', fresh.result?.r?.skipped === true && /Waiting/.test(fresh.result?.r?.reason || ''), fresh.result?.r?.reason);

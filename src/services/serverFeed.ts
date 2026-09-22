@@ -31,15 +31,52 @@ export interface ServerStatus {
   /** A worker that completed a tick in the last two minutes. */
   active: boolean;
   lastTickAt: number | null;
+  /** Which server process answered (changes on restart). */
+  instanceId: string | null;
+  /** The build the server belongs to; compare with __BUILD_ID__. */
+  buildId: string | null;
+  /** Something is off that the user should fix (another build, several servers). */
+  warning: string | null;
 }
+
+// Instance ids seen recently. Two alternating within minutes means more than
+// one server process is answering - each with its own trade list, so an
+// action can reach one that does not know the trade, or an old revision
+// without the endpoint. That was the "404 once in a while".
+const seenInstances: Array<{ id: string; at: number }> = [];
+const MULTI_INSTANCE_WINDOW_MS = 10 * 60_000;
+
+function noteInstance(id: string | null | undefined): void {
+  if (!id) return;
+  const now = Date.now();
+  if (seenInstances[seenInstances.length - 1]?.id !== id) seenInstances.push({ id, at: now });
+  while (seenInstances.length && now - seenInstances[0].at > MULTI_INSTANCE_WINDOW_MS) seenInstances.shift();
+}
+
+function multipleInstances(): boolean {
+  // A restart shows up once (old id, then new id for good); several
+  // switches inside the window mean they are answering side by side.
+  return seenInstances.length >= 3 && new Set(seenInstances.map((x) => x.id)).size >= 2;
+}
+
+const PAGE_BUILD = typeof __BUILD_ID__ === 'string' ? __BUILD_ID__ : 'dev';
 
 export async function fetchServerStatus(): Promise<ServerStatus> {
   const data = await getJson('/api/status', 5000);
   const w = data?.worker;
-  if (w?.workerRunning && typeof w.tickAgeMs === 'number' && w.tickAgeMs < 120_000) {
-    return { active: true, lastTickAt: Date.now() - w.tickAgeMs };
+  const instanceId = typeof w?.instanceId === 'string' ? w.instanceId : null;
+  const buildId = typeof data?.buildId === 'string' ? data.buildId : null;
+  noteInstance(instanceId);
+  let warning: string | null = null;
+  if (multipleInstances()) {
+    warning = 'More than one trading server is answering. Set Cloud Run maximum instances to 1 and send all traffic to the latest revision.';
+  } else if (buildId && PAGE_BUILD !== 'dev' && buildId !== 'dev' && buildId !== PAGE_BUILD) {
+    warning = `This page (build ${PAGE_BUILD}) and the server (build ${buildId}) are from different deployments. Reload the page; if it persists, an old revision is still taking traffic.`;
   }
-  return { active: false, lastTickAt: null };
+  if (w?.workerRunning && typeof w.tickAgeMs === 'number' && w.tickAgeMs < 120_000) {
+    return { active: true, lastTickAt: Date.now() - w.tickAgeMs, instanceId, buildId, warning };
+  }
+  return { active: false, lastTickAt: null, instanceId, buildId, warning };
 }
 
 let cursor = { boot: '', version: 0 };
@@ -70,6 +107,26 @@ export async function pullServerTrades(): Promise<boolean> {
  * must reach it through the dev proxy (BACKEND_URL), not VITE_TRADING_SERVER_URL.
  */
 export async function serverAction(path: string, body: unknown): Promise<{ ok: boolean; error?: string; result?: any }> {
+  let outcome = await postOnce(path, body);
+  // Retry once, and only when the server certainly did nothing: it had no such
+  // endpoint (another revision or an old build answered) or could not be
+  // reached before sending anything back. A refusal with a reason (400:
+  // "already closed", "10 open") or a server error is never retried - a deploy
+  // must not run twice.
+  if (!outcome.ok && outcome.retryable) {
+    await new Promise((r) => setTimeout(r, 1500));
+    await fetchServerStatus();   // note which instance is answering now
+    outcome = await postOnce(path, body);
+  }
+  if (!outcome.ok) {
+    const status = await fetchServerStatus();
+    return { ok: false, error: status.warning ? `${outcome.error} ${status.warning}` : outcome.error };
+  }
+  await pullServerTrades().catch(() => false);
+  return { ok: true, result: outcome.result };
+}
+
+async function postOnce(path: string, body: unknown): Promise<{ ok: boolean; retryable?: boolean; error?: string; result?: any }> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 20_000);
   try {
@@ -80,20 +137,24 @@ export async function serverAction(path: string, body: unknown): Promise<{ ok: b
       signal: controller.signal,
     });
     const data = await res.json().catch(() => null);
-    if (res.status === 404 && !data) {
-      // The server is running but has no such endpoint: it is older than this
-      // page (e.g. App.tsx updated, server.ts not). Nothing was changed.
-      return { ok: false, error: 'The trading server is running an older version without this action. Update server.ts and src/worker/tradingWorker.ts and redeploy. Nothing was changed.' };
+    noteInstance(data?.instanceId);
+    if (res.ok && data?.success) return { ok: true, result: data.result };
+    if (res.status === 404) {
+      return {
+        ok: false,
+        retryable: true,
+        error: data?.error || 'The trading server answered that it has no such action - it is an older version than this page. Nothing was changed.',
+      };
     }
-    if (!res.ok || !data?.success) return { ok: false, error: data?.error || `Server answered ${res.status}` };
-    await pullServerTrades().catch(() => false);
-    return { ok: true, result: data.result };
+    return { ok: false, error: data?.error || `The trading server answered ${res.status}.` };
   } catch {
+    // Timed out or could not connect. fetch does not say whether the request
+    // reached the server first, so it may have gone through: never retried.
     return {
       ok: false,
       error: TRADING_SERVER_URL
         ? 'Could not reach the trading server. From a local copy, use BACKEND_URL (dev proxy) to send actions.'
-        : 'Could not reach the trading server.',
+        : 'Could not reach the trading server. Check the positions list before trying again - the action may or may not have gone through.',
     };
   } finally {
     clearTimeout(timer);

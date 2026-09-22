@@ -17,6 +17,8 @@ import {
   getWorkerStatus,
   setWorkerAutoPilot,
   getTradesFeed,
+  getInstanceId,
+  syncWithFirestore,
 } from './src/worker/tradingWorker';
 import zlib from 'node:zlib';
 
@@ -24,6 +26,15 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
+
+// The build this server belongs to (written by vite.config.ts next to the
+// page). Browsers compare it with their own: a mismatch means an old page or
+// an old server revision is answering.
+let BUILD_ID = 'dev';
+try {
+  BUILD_ID = JSON.parse(fs.readFileSync(path.join(__dirname, 'dist', 'build-info.json'), 'utf8')).buildId || 'dev';
+} catch {}
+
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
 app.use(express.json());
@@ -46,7 +57,7 @@ const allowAnyOrigin = (_req: Request, res: Response, next: () => void) => {
  */
 app.get('/api/status', allowAnyOrigin, (_req: Request, res: Response) => {
   res.set('Cache-Control', 'no-store');
-  res.json({ serverActive: true, worker: getWorkerStatus() });
+  res.json({ serverActive: true, buildId: BUILD_ID, worker: getWorkerStatus() });
 });
 
 /**
@@ -114,10 +125,10 @@ app.post('/api/tick', handleTick);
 type Handler = (req: Request) => Promise<unknown>;
 const action = (fn: Handler) => async (req: Request, res: Response) => {
   try {
-    res.json({ success: true, result: await fn(req) });
+    res.json({ success: true, result: await fn(req), instanceId: getInstanceId(), buildId: BUILD_ID });
   } catch (err) {
     const status = err instanceof ActionError ? 400 : 500;
-    res.status(status).json({ success: false, error: err instanceof Error ? err.message : String(err) });
+    res.status(status).json({ success: false, error: err instanceof Error ? err.message : String(err), instanceId: getInstanceId(), buildId: BUILD_ID });
   }
 };
 
@@ -137,8 +148,8 @@ app.post('/api/deploy', action(async (req) => {
   return deploySymbol(req.body.symbol);
 }));
 
-/** Save queued changes to Firestore now instead of at the next scheduled save. */
-app.post('/api/flush', action(() => flushNow()));
+/** Sync with Firestore now instead of at the next minute: write queued changes, pull anything newer there. */
+app.post('/api/flush', action(() => syncWithFirestore(false)));
 
 /** Rebuild the list from Firestore (after editing trades directly in Firestore). One read per trade. */
 app.post('/api/resync', action(() => resyncFromFirestore()));
@@ -154,6 +165,17 @@ app.post('/api/autopilot', (req: Request, res: Response) => {
   } else {
     res.status(400).json({ success: false, error: 'Expected boolean "enabled" in request body' });
   }
+});
+
+// Any other /api address, any method: a JSON answer saying so, instead of
+// Express's bare HTML 404 (which the page could only report as "404").
+app.all('/api/*', (req: Request, res: Response) => {
+  res.status(404).json({
+    success: false,
+    error: `This server has no ${req.method} ${req.path}. It may be an older version than the page (server build ${BUILD_ID}).`,
+    instanceId: getInstanceId(),
+    buildId: BUILD_ID,
+  });
 });
 
 // ---------------------------------------------------------------- Static Serving

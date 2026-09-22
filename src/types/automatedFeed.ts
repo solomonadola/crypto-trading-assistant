@@ -201,6 +201,13 @@ export interface AutomatedTradeRecord {
    * 24/7 worker after a restart - replays candles from exactly here.
    */
   lastEvaluatedAt?: number;
+  /**
+   * Revision: 1 when opened, +1 with every change that is saved to Firebase
+   * (targets, stop moves, close, exclusion). Price-only updates leave it.
+   * The copy with the higher revision is the newer one - the server pulls a
+   * trade whose Firebase revision is higher and pushes one whose own is.
+   */
+  rev?: number;
   excludedFromStats?: boolean;
   excludedReason?: string;
   /** Explanation written when a record was corrected by hand. */

@@ -3,11 +3,29 @@ import react from '@vitejs/plugin-react';
 import path from 'path';
 import {defineConfig, loadEnv} from 'vite';
 
-export default defineConfig(({mode}) => {
+// One ID per build, shared by the page (__BUILD_ID__) and the server (it reads
+// dist/build-info.json). A page talking to a server from another build - an
+// old revision still taking traffic, a cached page - is then detectable.
+const BUILD_ID = `${new Date().toISOString().slice(0, 16).replace('T', ' ')}-${Math.random().toString(36).slice(2, 6)}`;
+
+export default defineConfig(({mode, command}) => {
   // .env.local etc. too, not only the shell environment.
   const backendUrl = process.env.BACKEND_URL || loadEnv(mode, process.cwd(), '').BACKEND_URL;
   return {
-    plugins: [react(), tailwindcss()],
+    plugins: [
+      react(),
+      tailwindcss(),
+      {
+        name: 'build-info',
+        apply: 'build',
+        generateBundle() {
+          this.emitFile({ type: 'asset', fileName: 'build-info.json', source: JSON.stringify({ buildId: BUILD_ID }) });
+        },
+      },
+    ],
+    define: {
+      __BUILD_ID__: JSON.stringify(command === 'build' ? BUILD_ID : 'dev'),
+    },
     resolve: {
       alias: {
         '@': path.resolve(import.meta.dirname, '.'),

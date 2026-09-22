@@ -31,25 +31,43 @@ decision code as the browser (`src/services/autopilotEngine.ts`).
 - **The server is the source of truth.** Its trade list (in memory, mirrored
   to `data/worker-state.json`) is what every copy of the app shows, and every
   change goes through it: its own checks and the actions browsers send.
-  - Browsers pull the list every 30 seconds from `GET /api/trades` (only the
-    trades changed since their last pull, gzipped) and make no Firestore
-    reads or writes while the server runs.
+  - Browsers pull the list every 5 seconds from `GET /api/trades` (only the
+    trades changed since their last pull, gzipped; paused while the tab is
+    hidden), so every open page shows the same within seconds. They make no
+    Firestore reads or writes while the server runs.
   - Manual deploy, close, recycle and exclude are sent to the server
     (`POST /api/deploy`, `/api/trades/:id/close`, `/api/trades/:id/exclude`),
     which applies them one at a time with its own checks, so an action can
     never be overwritten by a check running at the same moment.
-- **Firestore is the server's backup.** Changes are queued and written every
-  5 minutes (`WORKER_FLUSH_MINUTES`), one write per changed trade, and on
-  shutdown; open trades' prices are included once an hour. The server keeps
-  no Firestore listener and reads Firestore only to build its list when it
-  has none (first start, or a restart that lost the state file) or on
-  `POST /api/resync`, e.g. after editing trades directly in Firestore.
-  A crash (not a normal shutdown) on a host whose disk is wiped loses at most
-  the last 5 minutes of changes; the replay of price candles then re-applies
-  any stop or target crossed meanwhile.
-- **If the server stops**, browsers notice within about 20 seconds, switch
-  back to Firestore and trade themselves. The status strip shows
-  "24/7 Server Active" while the server is in charge.
+- **Firestore is the server's backup, kept in step both ways.** Every trade
+  carries a revision (`rev`): 1 when opened, +1 with every change that is
+  saved (targets, stop moves, close, exclusion; price-only updates leave it).
+  Every minute (`WORKER_FLUSH_MINUTES`) the server writes its queued changes
+  (one write per changed trade), then asks Firestore for trades changed since
+  the last check and compares revisions:
+  - Firestore higher: the server is behind — it takes Firestore's version
+  - server higher: the server is ahead — it writes its version
+  - only in Firestore: taken; only on the server: written (full check only)
+  Every trade is compared at startup from a saved state file and once a day.
+  Open positions' prices are saved hourly; everything queued is written on
+  shutdown. `POST /api/flush` runs a round now; `POST /api/resync` rebuilds
+  the list from Firestore. A crash (not a normal shutdown) on a host whose
+  disk is wiped loses at most the last minute of changes; the candle replay
+  re-applies any stop or target crossed meanwhile.
+  - To empty Firestore for a fresh start, do it with the server stopped:
+    a running server would write back the trades it holds.
+- **If the server is not reachable**, a browser shows the trades saved in
+  Firebase and changes nothing ("Display only - no trading server" in the
+  status strip); its buttons say so. Browsers trading on their own - a second
+  trader beside the server - is what produced duplicate positions and more
+  than 10 open. `VITE_BROWSER_TRADING=on` lets a browser trade without a
+  server, for running with no server at all.
+- **Misconfiguration is reported.** Every answer carries the server's
+  instance id and build id. If two instances answer (Cloud Run maximum
+  instances above 1, or an old revision still taking traffic) or the page and
+  server come from different builds, the status strip says so. Unknown `/api`
+  addresses answer with a JSON explanation rather than a bare 404, and an
+  action refused that way is retried once (nothing was changed).
 - **Following the hosted server from a local copy:** put
   `BACKEND_URL=https://your-app.run.app` in `.env.local` and restart
   `bun run dev`; the dev server forwards `/api` there, so the local copy
@@ -267,10 +285,11 @@ then use no Firestore at all; the server is the only reader and writer):
 
 | | per day | free limit |
 |---|---|---|
-| Writes: one per changed trade per 5-minute save (opens, exit-ladder events, closes, exclusions) | ~250 | 20,000 |
+| Writes: one per changed trade, saved every minute (opens, exit-ladder events, closes, exclusions) | ~250 | 20,000 |
 | Writes: hourly save of open trades' prices (~10 open) | ~240 | |
-| Reads | 0 | 50,000 |
-| Reads: server start without its state file, or `/api/resync` | 1 per trade stored (341 now, ~2,000 more a month) | |
+| Reads: the minute-by-minute check (the server's own writes read back, plus any made elsewhere) | ~500 | 50,000 |
+| Reads: daily full comparison, and a start from the state file | 1 per trade stored, each time | |
+| Reads: start without the state file, or `/api/resync` | 1 per trade stored | |
 
 Without the server (browsers trading themselves) each browser tab uses about
 1,700 reads a day, as described above.
@@ -337,6 +356,8 @@ node tools/test-catchup.mjs                  # replay of time spent away
 node tools/test-data-safety.mjs              # no forced closes; read-only switch; data health rules
 node tools/test-network.mjs                  # a stalled Binance response cannot hang the refresh
 node tools/test-trading-worker.mjs           # 24/7 worker: no blind trading, restart replay, Firestore merge
+node tools/test-universe.mjs                 # volume-ranked coin list
+npm run build && node tools/test-server-e2e.mjs  # the real server over HTTP: open/close from the web, saves, restart
 node tools/diagnose-trades.mjs trades.json   # find corrupt records in an exported feed
 ```
 
