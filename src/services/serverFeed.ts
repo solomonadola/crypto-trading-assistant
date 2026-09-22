@@ -80,6 +80,11 @@ export async function serverAction(path: string, body: unknown): Promise<{ ok: b
       signal: controller.signal,
     });
     const data = await res.json().catch(() => null);
+    if (res.status === 404 && !data) {
+      // The server is running but has no such endpoint: it is older than this
+      // page (e.g. App.tsx updated, server.ts not). Nothing was changed.
+      return { ok: false, error: 'The trading server is running an older version without this action. Update server.ts and src/worker/tradingWorker.ts and redeploy. Nothing was changed.' };
+    }
     if (!res.ok || !data?.success) return { ok: false, error: data?.error || `Server answered ${res.status}` };
     await pullServerTrades().catch(() => false);
     return { ok: true, result: data.result };
