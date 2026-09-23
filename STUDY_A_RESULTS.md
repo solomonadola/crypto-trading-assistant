@@ -200,3 +200,61 @@ a regime difference from the 76.8% gate-admission rate measured in Study A.
 node tools/replay.mjs --dir data/klines2024 --out data/entries2024.json --top-only
 node tools/sim-exits.mjs --dir data/klines2024 --entries data/entries2024.json
 ```
+
+# Addendum 2 — profit taking: trailing, locks and caps, measured
+
+**Run date:** 2026-09-23 · `tools/sim-exits.mjs --sample 8000`
+
+Question: should the ladder lock profit earlier (e.g. "up 10%, lock 7%; up 15%,
+lock 12.5%; close at 20%"), or trail the peak instead? The entry set is held
+fixed; only the exit varies. Expectancy in bp per trade, PF = profit factor.
+
+| Exit rule | In-sample (6mo) | Out-of-sample (24mo) | max win | top 5% of trades |
+|---|---|---|---|---|
+| OLD (capped 3.2/3.8/7.5/12) | −24.2 · 0.87 | −37.0 · 0.81 | 11% | 26% |
+| CURRENT (tiers 1R/2R/3.5R, trail after T3) | **+56.0 · 1.16** | −79.3 · 0.82 | 27% | 26% |
+| trail after T1, 1.0–2.0× ATR | +46.7…+59.5 | −84.1…−75.7 | 26–41% | 22–27% |
+| trail after T2, 1.5× ATR | +59.0 | −80.8 | 34% | 26% |
+| fixed locks 10/7, 15/12.5, cap +20% | +48.3 · 1.14 | **−84.8 · 0.82** | 20% | 25% |
+| T1 33% then trail 3.5× ATR | +36.3 | −40.3 · 0.91 | 168% | 43% |
+| pure trail 3.5× ATR (no tiers) | +37.7 | −4.2 · 0.99 | 247% | 49% |
+| pure trail 5–8× ATR | +42…+44 | +17.6…+21.8 · 1.03 | 385% | 50% |
+| initial stop only, hold to 7d | +42.3 | +24.5 · 1.04 | 385% | 50% |
+| **no stop at all, hold to 7d** | +28.1 | **+70.8 · 1.11** | 385% | 43% |
+
+## Verdict: the exit is not where the money is
+
+**Locking profit earlier is the worst option.** Every tighter variant loses more
+out of sample than the current ladder, and the fixed "lock 7% / 12.5%, cap 20%"
+scheme is the worst of all at −84.8 bp. The cap is visible in the tail: max win
+20% against 385% for the wide variants, which is the mechanism - it removes
+exactly the trades that pay for the rest.
+
+**Wider is better, monotonically, until there is no exit rule left.** 3.5× ATR
+beats 2.5×, 5× beats 3.5×, and "initial stop only" beats them all - and *no stop
+at all* is the best line in the table. That is the tell. These are not exit
+skill; they are market exposure. The entry carries no edge (Study A), so every
+stop placed on top of it mostly converts drift into realised losses, and the
+2024-25 sample rose.
+
+**"No stop" is not a strategy.** It has unbounded downside per trade and its
+result is the sample's beta. It is in the table as the null that the exit rules
+have to beat, and none of them do.
+
+**The in-sample advantage of the current ladder does not replicate** (+56.0 →
+−79.3), the same non-replication as the geometry study above.
+
+## Consequences
+
+- Keep the current ladder. `trailAfterTier` stays 3. Trailing earlier is inside
+  noise (−75.7 to −84.1 against −79.3) and is not worth the change.
+- Do not add fixed-percentage locks or a profit cap.
+- `trailAfterTier` / `trailAtrMultiple` (config/geometry.ts) remain as knobs so
+  this can be re-measured if the entry ever changes.
+- Risk-based sizing is back on: it does not add edge, but it keeps dollar risk
+  constant across coins, which makes every later comparison readable.
+
+The one real finding for a trade like BCH (+13% then a full retrace keeps only
+2.5% on a 5% ATR coin) is that the give-back is real per trade, but fixing it
+does not change the aggregate: the trades cut short and the trades saved cancel
+out. Any further exit work is re-tuning noise.

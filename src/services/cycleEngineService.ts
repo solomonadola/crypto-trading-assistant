@@ -236,22 +236,46 @@ export function evaluateTradeCycle(
     }
   }
 
-  // DYNAMIC TRAILING FOR ACTIVE RUNNER (Post Tier 3 with Parabolic Climax Acceleration)
-  if (updated.status === 'OPEN' && updated.harvestTiers?.tier3.status === 'HARVESTED') {
-    const tier2Floor = updated.harvestTiers.tier2.targetPrice;
-    const peakPrice = isShort ? (updated.sessionLowPrice || livePrice) : (updated.sessionHighPrice || livePrice);
-    
-    // Parabolic Climax Rule: If coin pumps > 20% or > 35%, tighten trailing stop to protect windfall gains!
-    const trailingBufferPct = currentReturnPct >= 35 ? 0.018 : currentReturnPct >= 20 ? 0.025 : 0.04;
-    const trailingFloor = isShort
-      ? roundPrice(peakPrice * (1 + trailingBufferPct))
-      : roundPrice(peakPrice * (1 - trailingBufferPct));
+  // TRAILING STOP once the ladder has reached GEOMETRY_CONFIG.trailAfterTier.
+  //
+  // The stop follows the highest price reached, one trailAtrMultiple of ATR
+  // behind it, and never moves backwards. Before this existed the stop sat at a
+  // fixed tier floor between tiers, so a run that stalled short of the next
+  // tier gave the whole move back (see the note in config/geometry.ts).
+  //
+  // After tier 3 the old parabolic rule still applies on top: on a violent pump
+  // (+20%, +35%) it tightens to 2.5% / 1.8% of the peak, whichever is closer.
+  if (updated.status === 'OPEN' && updated.harvestTiers) {
+    const tiersTaken = [updated.harvestTiers.tier1, updated.harvestTiers.tier2, updated.harvestTiers.tier3]
+      .filter((t) => t && t.status === 'HARVESTED').length;
 
-    const newStop = isShort ? Math.min(tier2Floor, trailingFloor) : Math.max(tier2Floor, trailingFloor);
-    const isStopMoreProtective = isShort ? newStop < updated.stopLossPrice : newStop > updated.stopLossPrice;
-    if (isStopMoreProtective) {
-      updated.stopLossPrice = newStop;
-      hasChanged = true;
+    if (tiersTaken >= GEOMETRY_CONFIG.trailAfterTier) {
+      const peakPrice = isShort ? (updated.sessionLowPrice || livePrice) : (updated.sessionHighPrice || livePrice);
+      // ATR in price terms; tier 1 sits at 1R = stopAtrMultiple x ATR from entry.
+      const atrPrice = updated.atrValue && updated.atrValue > 0
+        ? updated.atrValue
+        : (entryP * (updated.harvestTiers.tier1.targetPct / 100)) / GEOMETRY_CONFIG.stopAtrMultiple;
+      const trailDistance = atrPrice * GEOMETRY_CONFIG.trailAtrMultiple;
+
+      let trailingFloor = isShort ? peakPrice + trailDistance : peakPrice - trailDistance;
+
+      if (updated.harvestTiers.tier3.status === 'HARVESTED') {
+        // Parabolic climax rule, kept from before: tighten on a violent pump.
+        const bufferPct = currentReturnPct >= 35 ? 0.018 : currentReturnPct >= 20 ? 0.025 : 0.04;
+        const pctFloor = isShort ? peakPrice * (1 + bufferPct) : peakPrice * (1 - bufferPct);
+        trailingFloor = isShort ? Math.min(trailingFloor, pctFloor) : Math.max(trailingFloor, pctFloor);
+      }
+      trailingFloor = roundPrice(trailingFloor);
+
+      const isMoreProtective = isShort ? trailingFloor < updated.stopLossPrice : trailingFloor > updated.stopLossPrice;
+      if (isMoreProtective) {
+        updated.stopLossPrice = trailingFloor;
+        updated.stopLossPct = entryP > 0
+          ? +(((isShort ? entryP - trailingFloor : trailingFloor - entryP) / entryP) * 100).toFixed(2)
+          : 0;
+        if (updated.ratchet) updated.ratchet.currentProtection = 'RUNNER_TRAILING';
+        hasChanged = true;
+      }
     }
   }
 

@@ -82,6 +82,28 @@ export interface GeometryConfig {
   riskPerTradePct: number;
 
   /**
+   * When the stop starts following the price, as the number of harvest tiers
+   * already taken: 1 = after tier 1, 2 = after tier 2, 3 = after tier 3,
+   * 99 = never (the stop only steps to the fixed tier floors).
+   *
+   * This was effectively 3, and tier 3 sits at 3.5R, which is rarely reached -
+   * so in practice the stop never followed the price. Between tiers it sat at
+   * breakeven (after tier 1) or at the tier-1 price (after tier 2), however far
+   * the trade ran. On a $10 position that runs +13% and falls back, a 5% ATR
+   * coin (tiers at 7.5/15/26%) fills only tier 1 and exits the rest at
+   * breakeven: 2.5% kept out of a 13% move.
+   */
+  trailAfterTier: number;
+
+  /**
+   * Trailing distance, as a multiple of ATR below the highest price reached
+   * (above the lowest, for a short). Scaled by ATR for the same reason the stop
+   * is: a fixed percentage is a day's range on one coin and ten minutes' noise
+   * on another.
+   */
+  trailAtrMultiple: number;
+
+  /**
    * Ceiling on a gap-through harvest, as a multiple of the tier's target.
    *
    * The engine harvests at max(targetPct, currentReturnPct) so a price that
@@ -103,7 +125,9 @@ export const GEOMETRY_CONFIG: GeometryConfig = {
   minStopPct: 1.5,
   maxStopPct: 15.0,
   breakevenFloorRMultiple: 0.1,
-  useRiskBasedSizing: false,
+  trailAfterTier: 3,
+  trailAtrMultiple: 1.5,
+  useRiskBasedSizing: true,
   riskPerTradePct: 0.4,
   maxGapHarvestMultiple: 3.0,
 };
