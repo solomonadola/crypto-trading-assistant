@@ -132,7 +132,7 @@ All tunables live in `src/config/`. The values below are the current defaults.
 
 ### Market data
 
-- **Universe** — `src/config/universe.ts`: the **40 Binance USDT pairs with
+- **Universe** — `src/config/universe.ts`: the **80 Binance USDT pairs with
   the most 24-hour trading volume**, taken from the same ticker data as the
   prices (no extra requests) and re-chosen once a day; the list is saved so a
   reload or restart keeps it. Stablecoins, wrapped coins, tokenised gold and
@@ -190,10 +190,10 @@ Everything is expressed in **R**, where 1R is the stop distance.
 
 | Stage | Trigger | Action |
 |---|---|---|
-| Entry | — | Stop at **1.5 × ATR** below entry (bounded 1.5%–15%) |
+| Entry | — | Stop at **0.75 × ATR** below entry (bounded 1.5%–15%) |
 | Tier 1 | **+1R** | Bank 33%. Stop moves to entry **+0.1R** |
 | Tier 2 | **+2R** | Bank 33%. Stop moves to the Tier 1 price |
-| Tier 3 | **+3.5R** | Bank 17%. Remaining 17% trails 4% below the session high (2.5% once the trade is up 20%, 1.8% once up 35%), never below the Tier 2 price |
+| Tier 3 | **+3R** | Bank 17%. Remaining 17% trails 1.5 × ATR below the session high, and at least 4% below it (2.5% once the trade is up 20%, 1.8% once up 35%), never below the Tier 2 price |
 
 Because the stop scales with each coin's volatility, a quiet coin gets a tight
 stop and a volatile one a wide stop. If a price gaps past a tier it is banked
@@ -205,11 +205,13 @@ closed to free the slot.
 
 ### Sizing
 
-- **Risk-based:** each trade is sized so that hitting its stop loses **0.4% of
-  equity**, whatever the stop distance.
-- **Capped** at the slot size (equity ÷ 10, minimum $5), so a tight stop never
-  takes an oversized position.
+- **Equal slots:** every trade takes the same slot — equity ÷ 10, minimum $5 —
+  so all ten slots stay deployed.
 - Equity compounds: slot size tracks the current portfolio value.
+- The cost of equal slots is that risk per trade varies with the coin: the stop
+  is 0.75 × ATR, so a quiet coin risks ~2% of its slot and a volatile one ~7%.
+  Setting `useRiskBasedSizing: true` in `src/config/geometry.ts` sizes for a
+  constant **0.8% of equity** per trade instead, capped at the slot.
 
 ### Costs — `src/config/costs.ts`
 

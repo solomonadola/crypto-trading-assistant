@@ -31,8 +31,8 @@ export interface TradeHealth {
   worst: HealthSeverity;
 }
 
-// Under the current ladder (1R / 2R / 3.5R, R <= 15%) the most a trade can bank
-// is ~1.6R ~= 24% of the position, so 30% leaves headroom for legitimate gaps.
+// Under the current ladder (1R / 2R / 3R, R <= 15%) the most a trade can bank
+// is 1.5R ~= 23% of the position, so 30% leaves headroom for legitimate gaps.
 const MAX_PLAUSIBLE_BANKED = 0.30;
 const MAX_PLAUSIBLE_PNL = 0.50;
 

@@ -316,3 +316,99 @@ entries, so it stays off until live trade counts justify it.
 **Not yet measured:** whether a tighter ATR ladder on gated entries beats the
 current one in both samples. That is the next exit question, and now it has a
 reason to be asked.
+
+---
+
+# Addendum 4 — the exit ladder for gated entries, measured
+
+**Run date:** 2026-09-23 · `tools/sim-exits.mjs --entries data/entries2024-levels.json --dir data/klines2024`
+
+Addendum 3 left one question open: the gates changed the entry, so the exit
+built for ungated entries need not still be right. The entry set is held fixed
+(16,527 gated LONG entries, 24 months, out of sample; 8,829 in the 6-month
+in-sample set) and only the ladder varies. Every variant uses the shipped shape
+- 33/33/17 at three tiers, breakeven floor after tier 1, tier-1 floor after
+tier 2, trail after tier 3 - so what is compared is where the barriers sit.
+
+## Out of sample, 24 months, 15 bp per side
+
+| ladder | expectancy | PF | avg hold | rot/day | bp/day/slot |
+|---|---|---|---|---|---|
+| OLD fixed (3.2 / 3.8 / 7.5 / 12%) | +39.8 bp | 1.25 | 23.4h | 1.0 | +40.8 |
+| previous: 1.5× ATR, 1R/2R/3.5R | −7.6 | 0.98 | 82.6h | 0.3 | −2.2 |
+| 1.5× ATR, 0.5R/1R/2R | +23.9 | 1.09 | 47.3h | 0.5 | +12.2 |
+| 1.0× ATR, 1R/2R/3R | +32.3 | 1.12 | 46.9h | 0.5 | +16.5 |
+| 1.0× ATR, 0.75R/1.5R/2.5R | +36.3 | 1.17 | 36.6h | 0.7 | +23.8 |
+| **0.75× ATR, 1R/2R/3R** | **+37.5** | **1.19** | **30.5h** | **0.8** | **+29.5** |
+| 0.5× ATR, 1R/2R/3R | +31.5 | 1.25 | 15.9h | 1.5 | +47.5 |
+
+In sample (6 months) every ladder is positive, so the in-sample ranking is the
+wrong thing to read. What it does show is which ladder is fitted to it:
+
+| ladder | in-sample | out-of-sample |
+|---|---|---|
+| previous: 1.5× ATR, 1R/2R/3.5R | +143.8 bp (PF 1.48) | **−7.6** (0.98) |
+| 1.5× ATR, 0.5R/1R/2R | +89.4 (1.43) | +23.9 (1.09) |
+| 1.0× ATR, 1R/2R/3R | +90.3 (1.37) | +32.3 (1.12) |
+| 0.75× ATR, 1R/2R/3R | +57.8 (1.31) | +37.5 (1.19) |
+| 0.5× ATR, 1R/2R/3R | +38.5 (1.31) | +31.5 (1.25) |
+
+The wider the ladder, the larger the gap between the two samples. The shipped
+1.5× ATR ladder is the extreme case: best in sample by a distance, negative out
+of it.
+
+## Why wider stopped working
+
+Addendum 2 widened the barriers because turnover cost is certain and edge was
+not: with no edge at entry, holding longer is strictly cheaper. The gates gave
+the entry an edge, and that edge is short-horizon - Addendum 3 measured it at
+1h and 4h. A ladder that needs 82 hours to resolve spends most of that time
+holding a position whose reason for existing expired on day one. The exit's job
+changed from "cost as little as possible" to "collect the edge before it
+decays".
+
+## Cost sensitivity
+
+Expectancy per trade out of sample, with the cost per side overridden
+(`--cost-bps`). 15 bp is what `src/config/costs.ts` assumes; the others ask what
+happens if real slippage is worse.
+
+| ladder | 15 bp | 25 bp | 35 bp |
+|---|---|---|---|
+| OLD fixed | +39.8 (1.25) | +19.8 (1.12) | −0.2 (1.00) |
+| previous: 1.5× ATR | −7.6 (0.98) | −27.6 (0.94) | −47.6 (0.89) |
+| 1.0× ATR, 1R/2R/3R | +32.3 (1.12) | +12.3 (1.04) | −7.7 (0.97) |
+| 1.0× ATR, 0.75R/1.5R/2.5R | +36.3 (1.17) | +16.3 (1.07) | −3.7 (0.98) |
+| **0.75× ATR, 1R/2R/3R** | **+37.5 (1.19)** | **+17.5 (1.09)** | **−2.5 (0.99)** |
+| 0.5× ATR, 1R/2R/3R | +31.5 (1.25) | +11.5 (1.09) | −8.5 (0.94) |
+
+Nothing survives 35 bp per side. That is the honest limit of the whole result:
+the edge measured here is about 20-40 bp a trade, and a 70 bp round trip eats
+it. The ladders that rotate fastest lose it first, which is why 0.5× ATR - the
+best earner per unit of time at +47.5 bp/day/slot - is not the one adopted.
+
+## Consequence
+
+`src/config/geometry.ts`: `stopAtrMultiple` 1.5 → **0.75**, `tier3RMultiple`
+3.5 → **3.0**. Tiers stay at 1R/2R/3R with 33/33/17, the trail still starts
+after tier 3 at 1.5× ATR.
+
+The OLD fixed ladder scores as well or better, and it is not adopted: 3.2% is a
+different thing on a 2% ATR coin than on a 10% one, and the gated universe
+contains both. At a typical 4-5% ATR, 0.75× ATR is 3.0-3.75% - the same
+distance OLD used - so the two agree where most trades live and differ where
+OLD is wrong.
+
+Alongside this, `src/config/universe.ts` `size` goes 40 → **80**. The ladder
+change roughly doubles the number of trades per day per slot (0.3 → 0.8
+rotations); the wider universe keeps the candidate pool ahead of that demand so
+the extra rotations are filled by the best available setups rather than by
+whatever is left.
+
+## Reproduce
+
+```bash
+node tools/sim-exits.mjs --entries data/entries-levels.json     --dir data/klines
+node tools/sim-exits.mjs --entries data/entries2024-levels.json --dir data/klines2024
+node tools/sim-exits.mjs --entries data/entries2024-levels.json --dir data/klines2024 --cost-bps 25
+```

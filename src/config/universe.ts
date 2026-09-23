@@ -15,7 +15,7 @@
  */
 export const UNIVERSE_CONFIG = {
   mode: 'volume' as 'volume' | 'fixed',
-  size: 40,
+  size: 80,
   refreshHours: 24,
 };
 

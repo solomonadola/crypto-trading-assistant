@@ -177,9 +177,9 @@ export function calculateBankrollState(
 
   // 2. Realized Cash & Closed PnL (with safety guard against corrupted legacy unit mismatches or anomalous feed jumps)
   // Banked harvest cash as recorded. This was clamped to 20% of position,
-  // which ATR geometry now legitimately exceeds (tiers at 1R/2R/3.5R bank up
-  // to ~1.6R, and R can reach 15%). The bad-tick source it was guarding
-  // against is bounded at write time by capGapHarvest instead.
+  // which ATR geometry now legitimately exceeds (tiers at 1R/2R/3R bank up to
+  // 1.5R, and R can reach 15%). The bad-tick source it was guarding against is
+  // bounded at write time by capGapHarvest instead.
   const sanitizedRealizedBanked = (t: AutomatedTradeRecord) => {
     const rawBanked = Number(t.realizedCashBankedUSD);
     return Number.isFinite(rawBanked) && rawBanked > 0 ? rawBanked : 0;

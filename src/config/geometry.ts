@@ -16,9 +16,10 @@
  * classification were all deleted before they reached an order. See AUDIT.md
  * section 2, which verifies this across a +/-20% sweep of 24h change.
  *
- * Effective stop distance was 0.34-0.81x daily ATR. Conventional placement is
- * 1.5-3x. A stop that far inside the noise band is hit by ordinary intraday
- * movement regardless of whether the entry thesis was right.
+ * Effective stop distance was 0.34-0.81x daily ATR, and - more to the point -
+ * it was unrelated to the coin's own volatility, so the same 3.2% was a day's
+ * noise on one coin and a real break on another. Every distance here is a
+ * multiple of ATR for that reason.
  *
  * WHAT CHANGED
  *
@@ -26,15 +27,32 @@
  * structure is explicit rather than emergent. Caps remain only as sanity
  * bounds and are wide enough not to bind in normal conditions.
  *
- * Widening the barriers is also the most reliable improvement available. Time
- * to touch a barrier scales roughly with the square of its distance, so
- * doubling the stop distance cuts rotations by roughly 4x. Turnover cost is
- * the one drag the studies showed is certain (STUDY_A_RESULTS.md); the edge is
- * not. Trading less often is therefore a better-founded change than trying to
- * predict better.
+ * Widening the barriers was the first change, on the argument that time to
+ * touch a barrier scales roughly with the square of its distance, so a wider
+ * stop cuts rotations and therefore cost. That holds when the entry carries no
+ * edge, which was true of the ungated entries it was measured on.
  *
- * NOTE: this reduces cost drag. It does not create edge - no exit rule can.
- * The harvest ladder returns profit factor 1.001 on a zero-drift null.
+ * WHAT CHANGED AGAIN (2026-09-23)
+ *
+ * The level gates (src/config/entry.ts) changed the entry. An entry taken at
+ * support, with room to the next resistance, does its work in the first day or
+ * two; held for the 82 hours the 1.5x ATR ladder needed, the edge had decayed
+ * and the trade was back to a coin flip. Measured on 16,527 gated entries over
+ * 24 months out of sample (tools/sim-exits.mjs, STUDY_A_RESULTS.md addendum 4):
+ *
+ *   stop 1.5x ATR, 1R/2R/3.5R   -7.6bp/trade   PF 0.98   82.6h    -2.2 bp/day/slot
+ *   stop 1.0x ATR, 1R/2R/3R    +32.3bp         PF 1.12   46.9h   +16.5
+ *   stop 0.75x ATR, 1R/2R/3R   +37.5bp         PF 1.19   30.5h   +29.5   <- this
+ *   stop 0.5x ATR, 1R/2R/3R    +31.5bp         PF 1.25   15.9h   +47.5
+ *
+ * 0.5x ATR earns the most per unit of time, but it rotates 1.5x a day and its
+ * edge is gone by 35bp of cost per side; 0.75x ATR still pays at 25bp
+ * (+17.5bp, PF 1.09) and is the best of the set at 35bp (-2.5bp). It is picked
+ * for that reason, not for the highest number in the table.
+ *
+ * NOTE: this is not edge from the exit - no exit rule creates edge. The
+ * harvest ladder returns profit factor 1.001 on a zero-drift null. It is the
+ * exit that collects the entry's edge before it decays.
  */
 export interface GeometryConfig {
   /** false restores the original capped behaviour for a controlled comparison. */
@@ -84,10 +102,11 @@ export interface GeometryConfig {
    *
    * It is off: every trade takes the same slot (equity / 10), which keeps the
    * capital fully deployed. The trade-off is that risk per trade then varies
-   * with the coin - a stop is 1.5x ATR, so on 2026-09-23 a BTC stop was 4.1%
-   * of the slot and a PUMP stop 14.0%, i.e. one trade can lose three times
-   * what another does. Set useRiskBasedSizing back to true to equalise that
-   * (a PUMP position would then be $5.67 of a $10 slot).
+   * with the coin - a stop is 0.75x ATR, so on 2026-09-23 a BTC stop was 2.1%
+   * of the slot and a PUMP stop 7.0%, i.e. one trade can lose three times what
+   * another does. Turning this back on would change little at this stop width:
+   * the size is capped at the slot, and 0.8% of equity against a slot of 10%
+   * only sizes down when the stop is wider than 8% - an ATR above about 11%.
    */
   riskPerTradePct: number;
 
@@ -96,12 +115,13 @@ export interface GeometryConfig {
    * already taken: 1 = after tier 1, 2 = after tier 2, 3 = after tier 3,
    * 99 = never (the stop only steps to the fixed tier floors).
    *
-   * This was effectively 3, and tier 3 sits at 3.5R, which is rarely reached -
-   * so in practice the stop never followed the price. Between tiers it sat at
-   * breakeven (after tier 1) or at the tier-1 price (after tier 2), however far
-   * the trade ran. On a $10 position that runs +13% and falls back, a 5% ATR
-   * coin (tiers at 7.5/15/26%) fills only tier 1 and exits the rest at
-   * breakeven: 2.5% kept out of a 13% move.
+   * This was effectively 3, and tier 3 then sat at 3.5R of a 1.5x ATR stop -
+   * 5.25x ATR, rarely reached - so in practice the stop never followed the
+   * price. Between tiers it sat at breakeven (after tier 1) or at the tier-1
+   * price (after tier 2), however far the trade ran. With the ladder now at
+   * 0.75x ATR, tier 3 is 2.25x ATR: a 5% ATR coin has tiers at 3.8/7.5/11.3%,
+   * so the +13% move that used to exit at breakeven now fills all three and
+   * trails the rest.
    */
   trailAfterTier: number;
 
@@ -128,10 +148,10 @@ export interface GeometryConfig {
 
 export const GEOMETRY_CONFIG: GeometryConfig = {
   useAtrGeometry: true,
-  stopAtrMultiple: 1.5,
+  stopAtrMultiple: 0.75,
   tier1RMultiple: 1.0,
   tier2RMultiple: 2.0,
-  tier3RMultiple: 3.5,
+  tier3RMultiple: 3.0,
   minStopPct: 1.5,
   maxStopPct: 15.0,
   breakevenFloorRMultiple: 0.1,

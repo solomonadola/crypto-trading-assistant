@@ -32,7 +32,10 @@ const cfgBundle = await esbuild.build({
 });
 const { costPerSideRate, GEOMETRY_CONFIG, resolveGeometry } = await import(
   'data:text/javascript;base64,' + Buffer.from(cfgBundle.outputFiles[0].text).toString('base64'));
-const COST_PER_SIDE = costPerSideRate();
+// --cost-bps overrides the configured cost, to see which exit still works if
+// real slippage is worse than assumed. Turnover-heavy ladders fail first.
+const COST_OVERRIDE = arg('cost-bps', '');
+const COST_PER_SIDE = COST_OVERRIDE ? Number(COST_OVERRIDE) / 1e4 : costPerSideRate();
 
 // ---------- load bars ----------
 const src = readFileSync('src/services/binanceService.ts', 'utf8');
@@ -66,11 +69,25 @@ for (const sym of [...src.matchAll(/symbol: '([A-Z0-9]+)'/g)].map(m => m[1])) {
 const oldLadder = () => ({ stop: 3.2, t1: 3.8, t2: 7.5, t3: 12.0, bePct: 0.3,
   fracs: [0.33, 0.33, 0.17], trailAfterTier: 3, trailPctOfEntry: null, climaxTighten: true });
 
-const currentLadder = (atrPct) => {
-  const g = resolveGeometry(atrPct);
+const currentLadder = (atrPct) => ladderOf(
+  GEOMETRY_CONFIG.stopAtrMultiple, GEOMETRY_CONFIG.tier1RMultiple,
+  GEOMETRY_CONFIG.tier2RMultiple, GEOMETRY_CONFIG.tier3RMultiple)(atrPct);
+
+/**
+ * The shipped ladder shape with different multiples: stop `stopAtr` x ATR,
+ * tiers at R multiples. Everything else - the breakeven floor, the tier
+ * fractions, when trailing starts and how far behind the peak it follows, the
+ * parabolic-climax tightening - comes from src/config/geometry.ts, so what is
+ * measured here is what cycleEngineService actually does.
+ */
+const ladderOf = (stopAtr, t1R, t2R, t3R) => (atrPct) => {
+  const cfg = { ...GEOMETRY_CONFIG, stopAtrMultiple: stopAtr, tier1RMultiple: t1R, tier2RMultiple: t2R, tier3RMultiple: t3R };
+  const g = resolveGeometry(atrPct, cfg);
   return { stop: g.stopPct, t1: g.tier1Pct, t2: g.tier2Pct, t3: g.tier3Pct,
-           bePct: g.stopPct * GEOMETRY_CONFIG.breakevenFloorRMultiple,
-           fracs: [0.33, 0.33, 0.17], trailAfterTier: 3, trailPctOfEntry: null, climaxTighten: true };
+           bePct: g.stopPct * cfg.breakevenFloorRMultiple,
+           fracs: [0.33, 0.33, 0.17],
+           trailAfterTier: cfg.trailAfterTier, trailPctOfEntry: cfg.trailAtrMultiple * atrPct,
+           climaxTighten: true };
 };
 
 /** The current ladder, but trailing starts after tier `after`, k x ATR behind the peak. */
@@ -226,6 +243,12 @@ console.log(`costs ${(COST_PER_SIDE * 1e4).toFixed(0)}bp/side | ${newLabel} from
 const results = [
   run('OLD (capped 3.2/3.8/7.5/12)', oldLadder),
   run(`CURRENT ${newLabel}`, currentLadder),
+  run('previous (1.5x ATR, 1R/2R/3.5R)', ladderOf(1.5, 1, 2, 3.5)),
+  run('tight: 1.0x ATR, 1R/2R/3R', ladderOf(1.0, 1, 2, 3)),
+  run('tight: 0.75x ATR, 1R/2R/3R', ladderOf(0.75, 1, 2, 3)),
+  run('tight: 1.0x ATR, 0.75R/1.5R/2.5R', ladderOf(1.0, 0.75, 1.5, 2.5)),
+  run('tight: 0.5x ATR, 1R/2R/3R', ladderOf(0.5, 1, 2, 3)),
+  run('tight: 1.5x ATR, 0.5R/1R/2R', ladderOf(1.5, 0.5, 1, 2)),
   run('trail after T1, 1.0x ATR', trailLadder(1, 1.0)),
   run('trail after T1, 1.5x ATR', trailLadder(1, 1.5)),
   run('trail after T1, 2.0x ATR', trailLadder(1, 2.0)),
