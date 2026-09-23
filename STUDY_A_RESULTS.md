@@ -258,3 +258,61 @@ The one real finding for a trade like BCH (+13% then a full retrace keeps only
 2.5% on a 5% ATR coin) is that the give-back is real per trade, but fixing it
 does not change the aggregate: the trades cut short and the trades saved cancel
 out. Any further exit work is re-tuning noise.
+
+# Addendum 3 — entering at real levels, measured
+
+**Run date:** 2026-09-23 · `tools/study-levels.mjs`, `tools/sim-exits.mjs`
+
+The scanner's "levels" were formulas applied to the 24h ticker snapshot, so no
+rule about support, resistance or pullbacks could mean what it said (see
+Addendum 2's note and services/marketAnalysisService.ts). With real candles in
+place, the same historical entry set - the entries the scanner actually took -
+was labelled with what the real analysis said at that moment, and bucketed.
+Forward return at 4h, net of a 30 bp round trip:
+
+| Bucket | n (OOS) | in-sample 6mo | out-of-sample 24mo | t (OOS) |
+|---|---|---|---|---|
+| every entry | 12,445 | −25.6 bp | −30.9 bp | −13.0 |
+| resistance within 0.25 ATR overhead | 5,119 | −70.9 | **−78.6** | −25.6 |
+| 4h structure bearish | 2,326 | −90.6 | **−101.8** | −20.2 |
+| price within 0.25 ATR of a real support | 4,989 | +13.3 | **+14.3** | +4.0 |
+| headroom > 1 ATR | 205 | +109.0 | +148.7 | +3.1 |
+| pullback with a reclaim candle | 1,412 | +12.3 | +8.9 | +1.3 |
+| **all three gates (support, headroom, not bearish)** | 2,702 | **+40.5** | **+54.3** | **+9.7** |
+| the three gates plus a reclaim candle | 623 | +82.2 | +92.6 | +9.2 |
+
+Both samples agree on sign and magnitude, on thousands of entries, and the two
+strongest effects are the negative ones: buying under resistance or into a 4h
+downtrend. The gates keep about a fifth of entries.
+
+## Through the bot's own exits (out-of-sample, 24mo)
+
+| Entry set | OLD tight ladder | CURRENT ladder (1R/2R/3.5R) |
+|---|---|---|
+| every entry | −37.0 bp · PF 0.81 | −79.3 bp · PF 0.82 |
+| level-gated | **+37.2 bp · PF 1.24** | −7.5 bp · PF 0.98 |
+
+In-sample the gated set gives +52.7 bp (PF 1.33) on the old ladder and
++143.8 bp (PF 1.48) on the current one.
+
+Two readings worth keeping:
+
+1. **The gates are worth about 70 bp a trade out of sample, whatever the exit.**
+2. **On gated entries a stop finally pays.** Addendum 2 found that on ungated
+   entries the best exit rule was no stop at all - the "edge" was market
+   exposure. On gated entries "initial stop only" (+125.4 bp) and the 5× ATR
+   trail (+118.3) beat holding with no stop (+103.7), which is the signature of
+   entry selection rather than beta. The tight old ladder is also the only exit
+   that is positive in *both* samples (+52.7 / +37.2), consistent with the edge
+   being short-horizon: the 1h and 4h forward returns are where it shows.
+
+## Consequence
+
+`config/entry.ts` gates are on: support within 0.25 ATR, resistance no closer
+than 0.25 ATR, and no entry while the 4h structure is bearish. The reclaim
+requirement is measured and stronger per trade but keeps a quarter as many
+entries, so it stays off until live trade counts justify it.
+
+**Not yet measured:** whether a tighter ATR ladder on gated entries beats the
+current one in both samples. That is the next exit question, and now it has a
+reason to be asked.

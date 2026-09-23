@@ -70,7 +70,20 @@ export interface PillarScores {
   tradeGeometry: number;  // max 20 pts
 }
 
+/** Why a real-level gate rejected an entry, and the measurements behind it. */
+export interface LevelGate {
+  passed: boolean;
+  reason?: string;
+  distToSupportAtr?: number | null;
+  distToResistanceAtr?: number | null;
+  trend?: string;
+  /** False when no candle analysis was available, so the gates could not run. */
+  measured: boolean;
+}
+
 export interface EntrySignalResult {
+  /** Real-level gate: whether price is at a level worth entering (config/entry.ts). */
+  levelGate?: LevelGate;
   id: string;
   coinId: string;
   symbol: string;

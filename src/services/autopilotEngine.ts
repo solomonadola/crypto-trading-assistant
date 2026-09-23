@@ -115,6 +115,11 @@ export function selectAutoPilotCandidate(i: AutoPilotInputs): AutoPilotDecision 
       // was six months of alts trending, not an edge. See STUDY_A_RESULTS.md.
       if (!AUTOPILOT_CONFIG.allowShorts && s.direction === 'SHORT') return false;
 
+      // Real-level gates (config/entry.ts): no entry under resistance, in a 4h
+      // downtrend, or far from a support that has held. Measured to be worth
+      // about 54 bp a trade out of sample; see the note in config/entry.ts.
+      if (s.levelGate && s.levelGate.measured && !s.levelGate.passed) return false;
+
       // Multi-timeframe confluence guard: reject disqualified or weak C-grade setups.
       const confluence = s.timeframeConfluence?.confluenceRating;
       const alignedCount = s.timeframeConfluence?.alignedCount ?? 3;
@@ -182,6 +187,9 @@ export function manualDeployBlockReason(
   }
   if (MEME_COINS.has(sym) && open.filter((t) => MEME_COINS.has(t.symbol.toUpperCase())).length >= MAX_MEME_COIN_SLOTS) {
     return `Meme coins are capped at ${MAX_MEME_COIN_SLOTS} open positions.`;
+  }
+  if (signal.levelGate && signal.levelGate.measured && !signal.levelGate.passed) {
+    return `Not at a level: ${signal.levelGate.reason}`;
   }
   if (!bankroll.canOpenNewTrade) return bankroll.blockReason || 'Bankroll slots are full.';
   const minRequiredCash = Math.max(1.00, +(bankroll.totalPortfolioValueUSD * 0.07).toFixed(2));

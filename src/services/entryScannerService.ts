@@ -10,7 +10,8 @@ import {
   ScannerTradingMode,
   FuturesContext,
   ExecutionDecision,
-  SetupQualityRating
+  SetupQualityRating,
+  LevelGate
 } from '../types/entryScanner';
 import { AutomatedTradeRecord } from '../types/automatedFeed';
 import { executeSimulatedTrade, fetchAutomatedTrades } from './automatedFeedService';
@@ -18,6 +19,7 @@ import { calculateBankrollState } from './bankrollService';
 import { calculateCoinOrderFlow, formatOrderFlowUSD, formatCashUSD } from './orderFlowService';
 import { sideCostUSD } from '../config/costs';
 import { GEOMETRY_CONFIG, resolveGeometry, resolvePositionSizeUSD } from '../config/geometry';
+import { ENTRY_CONFIG } from '../config/entry';
 
 // In-Memory & LocalStorage Signal Persistence Registry (Anti-Jitter Rule #1)
 interface SignalPersistenceRecord {
@@ -166,6 +168,39 @@ export function scanLiveMarketEntries(coins: CryptoCoin[], mode: ScannerTradingM
     const mcap = coin.market_cap || 1000000000;
     const isBtc = coin.symbol.toUpperCase() === 'BTC';
     const isMegaCap = isBtc || coin.symbol.toUpperCase() === 'ETH';
+
+    // Real-level gates (config/entry.ts). Measured on 24 months of entries:
+    // buying with resistance within 0.25 ATR overhead, or while the 4h
+    // structure is in a downtrend, loses about 80-100 bp a trade; entering
+    // within 0.25 ATR of a real support that has held before gains about 14 bp,
+    // and the three together about 54 bp - both samples agreeing.
+    const levelGate = ((): LevelGate => {
+      if (!a) return { passed: true, measured: false, reason: 'No candle analysis; gates not applied' };
+      const gate: LevelGate = {
+        passed: true,
+        measured: true,
+        distToSupportAtr: a.distToSupportAtr,
+        distToResistanceAtr: a.distToResistanceAtr,
+        trend: a.structure.trend,
+      };
+      if (ENTRY_CONFIG.rejectBearishTrend && a.structure.trend === 'BEARISH') {
+        return { ...gate, passed: false, reason: '4h structure is in a downtrend' };
+      }
+      if (ENTRY_CONFIG.minHeadroomToResistanceAtr > 0 && a.distToResistanceAtr !== null &&
+          a.distToResistanceAtr <= ENTRY_CONFIG.minHeadroomToResistanceAtr) {
+        return { ...gate, passed: false, reason: `Resistance ${a.distToResistanceAtr} ATR overhead (needs > ${ENTRY_CONFIG.minHeadroomToResistanceAtr})` };
+      }
+      if (ENTRY_CONFIG.requireSupportProximity) {
+        if (a.distToSupportAtr === null) return { ...gate, passed: false, reason: 'No support level below with enough touches' };
+        if (a.distToSupportAtr > ENTRY_CONFIG.maxDistanceToSupportAtr) {
+          return { ...gate, passed: false, reason: `${a.distToSupportAtr} ATR above support (needs <= ${ENTRY_CONFIG.maxDistanceToSupportAtr})` };
+        }
+      }
+      if (ENTRY_CONFIG.requireReclaim && !a.pullback.reclaimed) {
+        return { ...gate, passed: false, reason: 'Waiting for a candle to close back up (reclaim)' };
+      }
+      return gate;
+    })();
 
     const orderFlow = calculateCoinOrderFlow(coin);
 
@@ -1186,6 +1221,7 @@ export function scanLiveMarketEntries(coins: CryptoCoin[], mode: ScannerTradingM
     const stability = getOrUpdateSignalPersistence(coin.id, signalScore);
 
     return {
+      levelGate,
       id: `signal-${coin.id}`,
       coinId: coin.id,
       symbol: coin.symbol.toUpperCase(),
