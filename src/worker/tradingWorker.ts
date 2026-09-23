@@ -25,6 +25,7 @@ import { calculateBankrollState } from '../services/bankrollService';
 import { catchUpOpenTrades } from '../services/catchUpService';
 import { computePacing, selectAutoPilotCandidate, manualDeployBlockReason, findExcessOpenTrades } from '../services/autopilotEngine';
 import { isCounted, isClosed } from '../services/metrics';
+import { getUsage, usageSummary, Usage } from '../services/firestoreMeter';
 import { AutomatedTradeRecord } from '../types/automatedFeed';
 
 /**
@@ -49,7 +50,7 @@ import { AutomatedTradeRecord } from '../types/automatedFeed';
  * Settings (environment):
  *   TRADING_WORKER=off        do not start the worker (the server still serves the app)
  *   WORKER_AUTOPILOT=off      default auto-pilot state (POST /api/autopilot changes it; kept across restarts)
- *   WORKER_FLUSH_MINUTES=1    how often changes are written to / checked against Firestore
+ *   WORKER_FLUSH_MINUTES=5    how often Firestore is compared and written
  * A read-only copy (VITE_FIRESTORE_WRITES=off) never starts it: its trades
  * would exist only in this process's memory.
  */
@@ -86,6 +87,8 @@ export interface WorkerStatus {
     flushEveryMs: number;
     /** Last comparison with Firestore: what was pulled (Firestore newer) and pushed (server newer). */
     lastReconcile: ReconcileResult | null;
+    /** What this server has actually cost Firestore since it started. */
+    usage: Usage;
     stateFile: string;
   };
   recentLogs: WorkerLogEntry[];
@@ -107,7 +110,7 @@ const CATCH_UP_MIN_GAP_MS = 90_000;
 // with the next flush. Hourly: the state file has them to the second, and the
 // candle replay covers anything older after a restart without it.
 const CHECKPOINT_EVERY_MS = 60 * 60_000;
-const FLUSH_EVERY_MS = Math.max(1, Number(process.env.WORKER_FLUSH_MINUTES) || 1) * 60_000;
+const FLUSH_EVERY_MS = Math.max(1, Number(process.env.WORKER_FLUSH_MINUTES) || 5) * 60_000;
 const FULL_RECONCILE_EVERY_MS = 24 * 3_600_000;
 const AUTOPILOT_KEY = 'cryptostudy_worker_autopilot';
 const MAX_PRICE_AGE_MS = 120_000;
@@ -118,6 +121,7 @@ let disabledReason: string | null = null;
 let intervalTimer: ReturnType<typeof setInterval> | null = null;
 let flushTimer: ReturnType<typeof setInterval> | null = null;
 let fullReconcileTimer: ReturnType<typeof setInterval> | null = null;
+let usageTimer: ReturnType<typeof setInterval> | null = null;
 let lastCoins: CryptoCoin[] = [];
 let unsubscribe: (() => void) | null = null;
 let configUnsubscribe: (() => void) | null = null;
@@ -354,16 +358,22 @@ export function flushNow(): Promise<number> {
 }
 
 /**
- * One sync round: write what is queued, then compare with Firestore (changes
- * since the last round, or every trade when `full`) - pulling trades Firestore
- * has newer, queueing trades the server has newer - and write those too.
+ * One sync round: compare with Firestore first (changes since the last round,
+ * or every trade when `full`), pulling what Firestore has newer and queueing
+ * what the server has newer, and only then write.
+ *
+ * The order matters. Pushing first overwrote changes made elsewhere: a trade
+ * closed in a browser, with the server still holding it open and a routine
+ * checkpoint queued, was written back as open - and because a write merges
+ * fields, Firestore was left with status OPEN still carrying exitReason and
+ * closedAtTimestamp. That is the trade "coming back to life" with its original
+ * entry price. Reading first lets the close cancel the queued write instead.
  */
 export function syncWithFirestore(full = false): Promise<ReconcileResult | null> {
   return exclusive(async () => {
     if (!hasConfirmedTradeList()) return null;
-    await flushPendingWrites();
     const r = await reconcileWithFirestore(full);
-    if (r.pushed) await flushPendingWrites();
+    await flushPendingWrites();
     const f = getLastFlush();
     if (r.error) logEvent(`Firestore check failed: ${r.error}`, 'warn');
     else if (r.pulled || r.pushed) logEvent(`Firestore ${r.full ? 'full ' : ''}check: pulled ${r.pulled} newer from Firestore, pushed ${r.pushed} newer from the server`);
@@ -498,6 +508,7 @@ export function startTradingWorker(intervalMs = 30_000): void {
   if (hasConfirmedTradeList()) syncWithFirestore(true).catch((e) => console.error('Startup sync error:', e));
   flushTimer = setInterval(() => { syncWithFirestore(false).catch((e) => console.error('Sync error:', e)); }, FLUSH_EVERY_MS);
   fullReconcileTimer = setInterval(() => { syncWithFirestore(true).catch((e) => console.error('Sync error:', e)); }, FULL_RECONCILE_EVERY_MS);
+  usageTimer = setInterval(() => logEvent(`Firestore usage: ${usageSummary()}`), 3_600_000);
   executeTradingTick().catch((e) => console.error('Worker tick error:', e));
   intervalTimer = setInterval(() => {
     executeTradingTick().catch((e) => console.error('Worker tick error:', e));
@@ -509,7 +520,8 @@ export function stopTradingWorker(): void {
   if (intervalTimer) clearInterval(intervalTimer);
   if (flushTimer) clearInterval(flushTimer);
   if (fullReconcileTimer) clearInterval(fullReconcileTimer);
-  intervalTimer = flushTimer = fullReconcileTimer = null;
+  if (usageTimer) clearInterval(usageTimer);
+  intervalTimer = flushTimer = fullReconcileTimer = usageTimer = null;
   unsubscribe?.();
   unsubscribe = null;
   configUnsubscribe?.();
@@ -580,6 +592,7 @@ export function getWorkerStatus(): WorkerStatus {
       lastFlushError: getLastFlush().error,
       flushEveryMs: FLUSH_EVERY_MS,
       lastReconcile: getLastReconcile(),
+      usage: getUsage(),
       stateFile: STATE_FILE,
     },
     recentLogs: recentLogs.slice(0, 20),

@@ -68,7 +68,7 @@ let build = 0;
 async function load(writesOff) {
   const out = await esbuild.build({
     stdin: {
-      contents: "export * from './src/worker/tradingWorker'; export { mergeRemoteTrades, loadLocalTrades, executeSimulatedTrade, updateAutomatedTrade, subscribeToAutomatedTrades, isTradeListAuthoritative, getPendingWriteCount, syncOpenTradesWithLivePrices, applyServerTrades } from './src/services/automatedFeedService'; export { pullServerTrades, resetServerFeed } from './src/services/serverFeed';",
+      contents: "export * from './src/worker/tradingWorker'; export { mergeRemoteTrades, loadLocalTrades, executeSimulatedTrade, updateAutomatedTrade, subscribeToAutomatedTrades, isTradeListAuthoritative, getPendingWriteCount, syncOpenTradesWithLivePrices, applyServerTrades, forceResyncTrades, fetchCompletedTrades } from './src/services/automatedFeedService'; export { getUsage, resetUsage, usageSummary } from './src/services/firestoreMeter'; export { pullServerTrades, resetServerFeed } from './src/services/serverFeed';",
       resolveDir: process.cwd(), loader: 'ts',
     },
     bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'error',
@@ -610,6 +610,59 @@ console.log('\n17. Deletions reach an open page: the minute count check re-reads
   await settle(); await settle();
   check('counts match: nothing re-read', globalThis.__reads === 0, String(globalThis.__reads));
   unsub2();
+}
+
+console.log('\n18. A close made elsewhere is never overwritten by the server');
+{
+  // The server holds the trade open with a routine write queued; meanwhile the
+  // trade is closed in a browser. Pushing before pulling wrote the open version
+  // back over the close and left Firestore with status OPEN still carrying
+  // exitReason - the trade "returning to life" with its original entry price.
+  reset();
+  prices = { SOL: 100 };
+  globalThis.__fsDocs = [trade('sol', 'SOL', { rev: 1 })];
+  const w = await load(false);
+  w.startTradingWorker(1e9);
+  await settle();
+  await w.executeTradingTick();                    // queues the hourly checkpoint
+  check('the server has a write queued', w.getPendingWriteCount() >= 1);
+
+  const i = globalThis.__fsDocs.findIndex((d) => d.id === 'sol');
+  globalThis.__fsDocs[i] = { ...globalThis.__fsDocs[i], status: 'COMPLETED', exitReason: 'CLOSED_MANUAL',
+    exitPrice: 100, closedAtTimestamp: Date.now(), rev: (globalThis.__fsDocs[i].rev || 0) + 1, updatedAt: Date.now() };
+
+  await w.syncWithFirestore(false);
+  const onServer = w.loadLocalTrades().find((t) => t.id === 'sol');
+  const inFirebase = globalThis.__fsDocs.find((d) => d.id === 'sol');
+  check('the server adopts the close', onServer?.status === 'COMPLETED', onServer?.status);
+  check('Firebase still says closed', inFirebase?.status === 'COMPLETED', inFirebase?.status);
+  check('no half-closed record (open with an exit reason)',
+    !(inFirebase?.status === 'OPEN' && inFirebase?.exitReason), true);
+  check('the trade is not open anywhere', !w.loadLocalTrades().some((t) => t.id === 'sol' && t.status === 'OPEN'), true);
+  w.stopTradingWorker();
+}
+
+console.log('\n19. Firestore reads are counted, and History costs one full read');
+{
+  reset();
+  const w = await load(false);
+  globalThis.__fsDocs = Array.from({ length: 120 }, (_, i) => trade('h' + i, 'H' + i, { status: 'COMPLETED', closedAtTimestamp: NOW }));
+  globalThis.__api = async () => ({ ok: false, json: async () => null });   // no trading server
+  w.resetUsage();
+  globalThis.__reads = 0;
+
+  await w.forceResyncTrades(true);          // the Force Sync button
+  const afterResync = globalThis.__reads;
+  await w.fetchCompletedTrades(true);       // what History then asks for
+  const afterHistory = globalThis.__reads;
+
+  check('a full read costs one read per trade', afterResync === 120, String(afterResync));
+  check('History adds no second full read', afterHistory === afterResync, `${afterResync} -> ${afterHistory}`);
+  const usage = w.getUsage();
+  check('the meter counted it', usage.reads >= 120, String(usage.reads));
+  check('and attributes it to History', (usage.bySource.history?.reads ?? 0) >= 120, JSON.stringify(usage.bySource));
+  check('summary line reads sensibly', /reads/.test(w.usageSummary()), w.usageSummary().slice(0, 60));
+  globalThis.__api = null;
 }
 
 console.log('\n11. Firebase quota spent: the server trades on from its saved file');

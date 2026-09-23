@@ -169,7 +169,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
   const fetchHistoricalData = useCallback(async (isUserRefresh: boolean = false) => {
     if (isUserRefresh) setIsRefreshing(true);
     try {
-      const closed = await loadCompletedTrades(isUserRefresh);
+      const closed = await loadCompletedTrades();   // the saved list; the shared sync keeps it current
       setCompletedTrades(closed.filter(isCounted));   // excluded in Data Health
     } catch (err) {
       console.error('Failed to load completed trades history:', err);
@@ -186,7 +186,9 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
     setIsRefreshing(true);
     try {
       const res = await forceResyncTrades(directFirestore);
-      const closed = await loadCompletedTrades(true);
+      // loadCompletedTrades reads the saved list the resync just refreshed:
+      // no second trip to Firestore.
+      const closed = await loadCompletedTrades();
       setCompletedTrades(closed.filter(isCounted));
       if (res.success) {
         const sourceName = res.source === 'firestore' ? 'Firebase Firestore' : '24/7 Cloud Trading Server';

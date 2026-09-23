@@ -15,6 +15,7 @@ import {
 } from 'firebase/firestore';
 import { db, isQuotaBlocked, markQuotaExceeded, reportFirestoreResult, getFirestoreHealth, FIRESTORE_WRITES_ENABLED } from '../lib/firebase';
 import { outcome, isClosed } from './metrics';
+import { countRead, countWrite } from './firestoreMeter';
 import { AutomatedTradeRecord, AutomatedFeedAuditStats, StrategyVerificationReport } from '../types/automatedFeed';
 import { CryptoCoin } from '../types';
 import { evaluateTradeCycle } from './cycleEngineService';
@@ -245,6 +246,7 @@ export async function flushPendingWrites(): Promise<number> {
       try {
         if (pending[id] === 'create') await setDoc(doc(db, TRADES_COLLECTION, id), stamped(t));
         else await updateDoc(doc(db, TRADES_COLLECTION, id), stamped(t));
+        countWrite('reconcile');
         setPending(id, null);
         written++;
       } catch (err) {
@@ -386,6 +388,7 @@ export async function fetchAutomatedTrades(forceNetwork: boolean = false): Promi
         new Promise<never>((_, reject) =>
           setTimeout(() => reject(new Error('Firestore read timed out (offline)')), FIRESTORE_READ_TIMEOUT_MS)),
       ]);
+      countRead('startup-full', snap.size ?? snap.docs?.length ?? 1);
       if (!snap.empty) {
         const trades: AutomatedTradeRecord[] = [];
         snap.forEach((docSnap) => {
@@ -572,6 +575,7 @@ async function checkCount(gen: number): Promise<void> {
   if (gen !== syncGeneration || isQuotaBlocked()) return;
   try {
     const remote = (await withTimeout(getCountFromServer(collection(db, TRADES_COLLECTION)), 10_000)).data().count;
+    countRead('count-check', 1);
     if (gen !== syncGeneration) return;
     const pending = getPending();
     const confirmedLocal = loadLocalTrades().filter((t) => pending[t.id] !== 'create').length;
@@ -620,6 +624,7 @@ async function startSync(forceFull = false): Promise<void> {
   if (needFull) {
     try {
       const snap = await withTimeout(getDocsFromServer(collection(db, TRADES_COLLECTION)), 15_000);
+      countRead(forceFull ? 'weekly-full' : 'startup-full', snap.size ?? snap.docs?.length ?? 1);
       if (gen !== syncGeneration) return;
       const remote: AutomatedTradeRecord[] = [];
       snap.forEach((d) => remote.push(fromDoc(d.data())));
@@ -649,6 +654,7 @@ async function startSync(forceFull = false): Promise<void> {
     if (!firstSnapshotAt) firstSnapshotAt = Date.now();
     const changed: AutomatedTradeRecord[] = [];
     let newest = cursor;
+    countRead('listener', snapshot.docChanges().length);
     snapshot.docChanges().forEach((c) => {
       if (c.type === 'removed') return;
       const data = c.doc.data();
@@ -712,6 +718,7 @@ export async function reconcileWithFirestore(full: boolean): Promise<ReconcileRe
     const col = collection(db, TRADES_COLLECTION);
     const q = doFull ? col : query(col, where('updatedAt', '>', Timestamp.fromMillis(since - RECONCILE_MARGIN_MS)));
     const snap = await withTimeout(getDocsFromServer(q), 20_000);
+    countRead('reconcile', snap.size ?? snap.docs?.length ?? 1);
     reportFirestoreResult();
     const remote: AutomatedTradeRecord[] = [];
     snap.forEach((d) => remote.push(fromDoc(d.data())));
@@ -879,6 +886,7 @@ async function fetchOpenTradesFromServer(): Promise<AutomatedTradeRecord[] | nul
       getDocsFromServer(q),
       new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timed out')), FIRESTORE_READ_TIMEOUT_MS)),
     ]);
+    countRead('open-check', snap.size ?? snap.docs?.length ?? 1);
     const open: AutomatedTradeRecord[] = [];
     snap.forEach((d) => open.push(d.data() as AutomatedTradeRecord));
     return open;
@@ -979,6 +987,7 @@ export async function executeSimulatedTrade(trade: AutomatedTradeRecord): Promis
   } else if (FIRESTORE_WRITES_ENABLED) {
     try {
       await setDoc(doc(db, TRADES_COLLECTION, trade.id), stamped(trade));
+      countWrite('other');
       reportFirestoreResult();
     } catch (err) {
       reportFirestoreResult(err);
@@ -1020,6 +1029,7 @@ export async function updateAutomatedTrade(trade: AutomatedTradeRecord, syncToFi
     try {
       const docRef = doc(db, TRADES_COLLECTION, trade.id);
       await updateDoc(docRef, stamped(trade));
+      countWrite('other');
       setPending(trade.id, null);
     } catch (err) {
       reportFirestoreResult(err);
@@ -1276,6 +1286,7 @@ export async function forceResyncTrades(directFirestore: boolean = false): Promi
   if (directFirestore) {
     try {
       const snap = await withTimeout(getDocsFromServer(collection(db, TRADES_COLLECTION)), 15_000);
+      countRead('history', snap.size ?? snap.docs?.length ?? 1);
       const remote: AutomatedTradeRecord[] = [];
       snap.forEach((d) => remote.push(fromDoc(d.data())));
       if (remote.length > 0) {
@@ -1318,6 +1329,7 @@ export async function forceResyncTrades(directFirestore: boolean = false): Promi
   // 3. Fallback to direct Firestore getDocsFromServer
   try {
     const snap = await withTimeout(getDocsFromServer(collection(db, TRADES_COLLECTION)), 15_000);
+    countRead('history', snap.size ?? snap.docs?.length ?? 1);
     const remote: AutomatedTradeRecord[] = [];
     snap.forEach((d) => remote.push(fromDoc(d.data())));
     const sorted = sortTrades(sanitizeActiveTrades(remote));
@@ -1339,15 +1351,17 @@ export async function forceResyncTrades(directFirestore: boolean = false): Promi
 /**
  * Loads all completed historical trades from the trade records service
  */
-export async function fetchCompletedTrades(forceNetwork: boolean = false): Promise<AutomatedTradeRecord[]> {
-  if (forceNetwork) {
-    try {
-      await forceResyncTrades(false);
-    } catch (e) {
-      console.warn('forceResyncTrades failed in fetchCompletedTrades:', e);
-    }
-  }
-  const allTrades = await fetchAutomatedTrades(forceNetwork);
+/**
+ * Closed trades from the saved list, which the shared sync keeps current.
+ *
+ * `forceNetwork` is ignored on purpose. It used to call forceResyncTrades and
+ * then fetchAutomatedTrades(true), each a full read of the collection, and
+ * History called it right after its own forceResyncTrades: three full reads per
+ * click, about one read per trade each time. Use forceResyncTrades directly
+ * when a genuine re-read is wanted.
+ */
+export async function fetchCompletedTrades(_forceNetwork: boolean = false): Promise<AutomatedTradeRecord[]> {
+  const allTrades = await fetchAutomatedTrades(false);
   return allTrades.filter(isClosed);
 }
 export const loadCompletedTrades = fetchCompletedTrades;
