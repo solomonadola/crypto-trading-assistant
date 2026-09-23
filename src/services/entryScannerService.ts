@@ -1622,17 +1622,26 @@ export async function deploySignalToAutomatedFeed(
   }
 
   const bankroll = calculateBankrollState(currentTrades);
-  const baseTrancheUSD = typeof customTrancheUSD === 'number' && customTrancheUSD > 0
+  const minRequiredCash = Math.max(1.00, +(bankroll.totalPortfolioValueUSD * 0.07).toFixed(2));
+  if (bankroll.liquidCashUSD < minRequiredCash) {
+    throw new Error(
+      `Remaining balance ($${bankroll.liquidCashUSD.toFixed(2)}) is below the 7% minimum ($${minRequiredCash.toFixed(2)}).`
+    );
+  }
+
+  const requestedTranche = typeof customTrancheUSD === 'number' && customTrancheUSD > 0
     ? customTrancheUSD
     : bankroll.trancheSizeUSD;
+  const baseTrancheUSD = Math.min(requestedTranche, bankroll.liquidCashUSD);
 
   // Size for constant dollar risk rather than constant notional, so a wide
   // ATR stop takes a smaller position instead of a proportionally bigger loss.
-  const trancheUSD = resolvePositionSizeUSD(
+  const sizedUSD = resolvePositionSizeUSD(
     baseTrancheUSD,
     bankroll.totalPortfolioValueUSD,
     signal.tradePlan.stopLossPct
   );
+  const trancheUSD = Math.min(sizedUSD, bankroll.liquidCashUSD);
 
   const currentP = signal.currentPrice;
   const units = currentP > 0 ? +(trancheUSD / currentP).toFixed(currentP < 0.01 ? 2 : 6) : 0.1;

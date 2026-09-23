@@ -25,6 +25,8 @@ interface StatusStripProps {
   displayOnly?: boolean;
   /** Set when the server looks misconfigured (several instances, another build). */
   serverWarning?: string | null;
+  /** State of Firestore on the background server worker */
+  firestoreStatus?: string | null;
 }
 
 type Tone = 'good' | 'warn' | 'bad' | 'neutral' | 'info';
@@ -104,7 +106,7 @@ const Item: React.FC<{ tone: Tone; title?: string; className?: string; children:
  * current, why is auto-pilot (not) trading, where is my data actually saved,
  * and what happened while the app was closed.
  */
-export const StatusStrip: React.FC<StatusStripProps> = ({ lastPriceUpdateAt, isRefreshing, pacingInfo, lastCatchUp, suspectRecords = 0, onOpenDataHealth, serverActive = false, lastServerTickAt = null, displayOnly = false, serverWarning = null }) => {
+export const StatusStrip: React.FC<StatusStripProps> = ({ lastPriceUpdateAt, isRefreshing, pacingInfo, lastCatchUp, suspectRecords = 0, onOpenDataHealth, serverActive = false, lastServerTickAt = null, displayOnly = false, serverWarning = null, firestoreStatus = null }) => {
   const [now, setNow] = useState(() => Date.now());
   const [mountedAt] = useState(() => Date.now());
   const [expanded, setExpanded] = useState(false);
@@ -131,6 +133,14 @@ export const StatusStrip: React.FC<StatusStripProps> = ({ lastPriceUpdateAt, isR
         tone: 'info' as Tone,
         label: 'Firebase read-only - changes stay in this browser',
         detail: 'VITE_FIRESTORE_WRITES=off: this copy reads the shared trade history but never writes to it.',
+      }
+    : serverActive
+    ? {
+        tone: (firestoreStatus === 'ok' ? 'good' : firestoreStatus === 'offline' ? 'warn' : 'good') as Tone,
+        label: firestoreStatus === 'ok' ? 'Synced to Firebase (24/7 Worker)' : 'Trading Server Active',
+        detail: firestoreStatus === 'ok'
+          ? 'Trades are synchronized continuously to Firebase Firestore by the 24/7 background worker.'
+          : '24/7 trading server is active and managing trades.',
       }
     : health === 'unknown' && now - mountedAt > 20_000
     ? {

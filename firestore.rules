@@ -1,32 +1,147 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Global default deny
+
+    // Default deny catch-all
     match /{document=**} {
       allow read, write: if false;
     }
 
-    // Helper functions
-    function isValidId(id) {
-      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    // Common security primitives
+    function isSignedIn() {
+      return request.auth != null;
     }
 
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // User profile validation
+    function isValidUser(data) {
+      return data.keys().hasAll(['uid', 'email', 'createdAt'])
+        && data.keys().hasOnly(['uid', 'email', 'displayName', 'createdAt', 'updatedAt', 'riskTolerance', 'autoPilotEnabled'])
+        && data.uid is string && data.uid == request.auth.uid
+        && data.email is string && data.email.size() <= 120
+        && data.createdAt is string && data.createdAt.size() <= 40;
+    }
+
+    match /users/{userId} {
+      allow get: if isOwner(userId);
+      allow list: if false; // PII protection: cannot scrape all user accounts
+      allow create: if isOwner(userId) && isValidUser(incoming());
+      allow update: if isOwner(userId) 
+        && incoming().uid == existing().uid
+        && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'updatedAt', 'riskTolerance', 'autoPilotEnabled']);
+      allow delete: if false;
+    }
+
+    // Quant Trade validation
     function isValidTrade(data) {
+      return data.keys().hasAll(['id', 'userId', 'symbol', 'side', 'price', 'size', 'timestamp', 'status'])
+        && data.id is string && data.id.size() <= 128
+        && data.userId is string && data.userId == request.auth.uid
+        && data.symbol is string && data.symbol.size() <= 20
+        && data.side in ['BUY', 'SELL']
+        && data.price is number && data.price > 0
+        && data.size is number && data.size > 0
+        && data.timestamp is number
+        && data.status in ['FILLED', 'PARTIALLY_FILLED', 'CANCELLED', 'CLOSED'];
+    }
+
+    match /trades/{tradeId} {
+      allow get: if isSignedIn() && existing().userId == request.auth.uid;
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isSignedIn() && isValidId(tradeId) && isValidTrade(incoming());
+      allow update: if isSignedIn() 
+        && existing().userId == request.auth.uid
+        && incoming().userId == existing().userId
+        && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'pnl', 'pnlPercentage', 'fee']);
+      allow delete: if isSignedIn() && existing().userId == request.auth.uid;
+    }
+
+    // Algorithmic Signals validation
+    function isValidSignal(data) {
+      return data.keys().hasAll(['id', 'symbol', 'score', 'direction', 'timestamp'])
+        && data.id is string && data.id.size() <= 128
+        && data.symbol is string && data.symbol.size() <= 20
+        && data.score is number
+        && data.direction in ['LONG', 'SHORT', 'NEUTRAL']
+        && data.timestamp is number;
+    }
+
+    match /signals/{signalId} {
+      allow get: if isSignedIn();
+      allow list: if isSignedIn();
+      allow create: if isSignedIn() && isValidId(signalId) && isValidSignal(incoming());
+      allow update: if isSignedIn() && isValidSignal(incoming());
+      allow delete: if isSignedIn();
+    }
+
+    // Bankroll Snapshots
+    function isValidSnapshot(data) {
+      return data.keys().hasAll(['id', 'userId', 'balance', 'equity', 'timestamp'])
+        && data.id is string && data.id.size() <= 128
+        && data.userId is string && data.userId == request.auth.uid
+        && data.balance is number
+        && data.equity is number
+        && data.timestamp is number;
+    }
+
+    match /bankroll_snapshots/{snapshotId} {
+      allow get: if isSignedIn() && existing().userId == request.auth.uid;
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isSignedIn() && isValidId(snapshotId) && isValidSnapshot(incoming());
+      allow update: if false; // Snapshots are immutable
+      allow delete: if isSignedIn() && existing().userId == request.auth.uid;
+    }
+
+    // Autopilot and Audit Logs
+    function isValidAuditLog(data) {
+      return data.keys().hasAll(['id', 'userId', 'category', 'severity', 'message', 'timestamp'])
+        && data.id is string && data.id.size() <= 128
+        && data.userId is string && data.userId == request.auth.uid
+        && data.category in ['CONSOLIDATION_LOSS', 'PACING_GUARD', 'CIRCUIT_BREAKER', 'CYCLE_TICK', 'ORDER_FLOW']
+        && data.severity in ['INFO', 'WARNING', 'CRITICAL', 'PROTECTION_TRIGGERED']
+        && data.message is string && data.message.size() <= 1000
+        && data.timestamp is number;
+    }
+
+    match /audit_logs/{logId} {
+      allow get: if isSignedIn() && existing().userId == request.auth.uid;
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isSignedIn() && isValidId(logId) && isValidAuditLog(incoming());
+      allow update: if false;
+      allow delete: if isSignedIn() && existing().userId == request.auth.uid;
+    }
+    // Automated Trade Feed Collection from Bot
+    function isValidAutomatedTrade(data) {
       return data is map &&
         data.id is string && data.id.size() <= 128 &&
         data.symbol is string && data.symbol.size() <= 32 &&
-        data.coinId is string && data.coinId.size() <= 64 &&
-        (data.status in ['OPEN', 'COMPLETED', 'STOPPED', 'CLOSED_TAKE_PROFIT', 'CLOSED_STOP_LOSS', 'CLOSED_SIGNAL_REVERSAL', 'CLOSED_TIME_DECAY', 'CLOSED_ORDER_FLOW_DUMP', 'CLOSED_MANUAL']) &&
-        (data.direction in ['LONG', 'SHORT']) &&
-        data.entryPrice is number &&
-        data.currentPrice is number;
+        (data.direction in ['LONG', 'SHORT']);
     }
 
-    // Automated Trade Feed Collection
     match /crypto_automated_trades/{tradeId} {
       allow read: if true;
-      allow create, update: if isValidId(tradeId) && isValidTrade(request.resource.data);
+      allow create, update: if isValidId(tradeId) && isValidAutomatedTrade(incoming());
       allow delete: if isValidId(tradeId);
+    }
+
+    match /crypto_automated_config/{configId} {
+      allow read: if true;
+      allow write: if isValidId(configId);
     }
   }
 }

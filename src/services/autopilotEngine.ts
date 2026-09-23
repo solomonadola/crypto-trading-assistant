@@ -76,8 +76,12 @@ export function selectAutoPilotCandidate(i: AutoPilotInputs): AutoPilotDecision 
   const openTrades = trades.filter((t) => t.status === 'OPEN');
   if (openTrades.length >= AUTOPILOT_CONFIG.maxConcurrentTrades) return { signal: null, reason: 'All slots full' };
   if (!bankroll.canOpenNewTrade) return { signal: null, reason: bankroll.blockReason || 'Cannot open a new trade' };
-  if (bankroll.liquidCashUSD < bankroll.trancheSizeUSD) return { signal: null, reason: 'Not enough cash' };
-  if (bankroll.deployedCapitalUSD + bankroll.trancheSizeUSD > bankroll.totalPortfolioValueUSD + 0.05) {
+  const minRequiredCash = Math.max(1.00, +(bankroll.totalPortfolioValueUSD * 0.07).toFixed(2));
+  if (bankroll.liquidCashUSD < minRequiredCash) {
+    return { signal: null, reason: `Remaining balance ($${bankroll.liquidCashUSD.toFixed(2)}) is below 7% minimum ($${minRequiredCash.toFixed(2)})` };
+  }
+  const nextDeploySize = Math.min(bankroll.trancheSizeUSD, bankroll.liquidCashUSD);
+  if (bankroll.deployedCapitalUSD + nextDeploySize > bankroll.totalPortfolioValueUSD + 0.05) {
     return { signal: null, reason: 'Would exceed account balance' };
   }
 
@@ -180,10 +184,12 @@ export function manualDeployBlockReason(
     return `Meme coins are capped at ${MAX_MEME_COIN_SLOTS} open positions.`;
   }
   if (!bankroll.canOpenNewTrade) return bankroll.blockReason || 'Bankroll slots are full.';
-  if (bankroll.liquidCashUSD < bankroll.trancheSizeUSD) {
-    return `Not enough cash ($${bankroll.liquidCashUSD.toFixed(2)} available, $${bankroll.trancheSizeUSD.toFixed(2)} needed).`;
+  const minRequiredCash = Math.max(1.00, +(bankroll.totalPortfolioValueUSD * 0.07).toFixed(2));
+  if (bankroll.liquidCashUSD < minRequiredCash) {
+    return `Remaining balance ($${bankroll.liquidCashUSD.toFixed(2)}) is below the 7% minimum ($${minRequiredCash.toFixed(2)} = 7% of $${bankroll.totalPortfolioValueUSD.toFixed(2)}).`;
   }
-  if (bankroll.deployedCapitalUSD + bankroll.trancheSizeUSD > bankroll.totalPortfolioValueUSD + 0.05) {
+  const nextDeploySize = Math.min(bankroll.trancheSizeUSD, bankroll.liquidCashUSD);
+  if (bankroll.deployedCapitalUSD + nextDeploySize > bankroll.totalPortfolioValueUSD + 0.05) {
     return `Trade would exceed the account balance ($${bankroll.totalPortfolioValueUSD.toFixed(2)}).`;
   }
   return null;

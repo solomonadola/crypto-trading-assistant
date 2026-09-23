@@ -14,6 +14,8 @@ const require = createRequire(import.meta.url);
 const CHILD = process.argv[2];   // set when this file re-runs itself for the restart tests
 // Never write a state file into the project.
 if (!process.env.WORKER_STATE_FILE) process.env.WORKER_STATE_FILE = join(mkdtempSync(join(tmpdir(), 'cs-worker-')), 'state.json');
+// The worker only trades from a deployed server (NODE_ENV=production) unless asked.
+process.env.TRADING_WORKER = 'on';
 const esbuild = require('./_gen/vendor/node_modules/esbuild');
 
 const FAKE_FIRESTORE = `
@@ -40,7 +42,13 @@ const FAKE_FIRESTORE = `
   export const getDocs = async () => { const d = globalThis.__fsDocs || []; count(d.length); return snap(d); };
   export const getDocFromServer = async () => ({});
   export const getCountFromServer = async () => { globalThis.__counts = (globalThis.__counts || 0) + 1; return { data: () => ({ count: (globalThis.__fsDocs || []).length }) }; };
-  export const onSnapshot = (_ref, next) => { (globalThis.__listeners = globalThis.__listeners || []).push(next); return () => {}; };
+  // A document reference (doc()) and a collection reference listen to different
+  // things, as in Firestore: deliver() feeds only the collection listeners.
+  export const onSnapshot = (ref, next) => {
+    if (ref && ref.id) { (globalThis.__docListeners = globalThis.__docListeners || []).push({ ref, next }); return () => {}; }
+    (globalThis.__listeners = globalThis.__listeners || []).push(next);
+    return () => {};
+  };
   export const where = (field, op, value) => ({ field, op, value });
   export const query = (c, ...filters) => ({ ...c, filters });
   export const serverTimestamp = () => ({ serverTs: true });
@@ -106,7 +114,7 @@ globalThis.fetch = async (url) => {
   return { ok: false, json: async () => null };
 };
 const deliver = (docs) => { globalThis.__fsDocs = docs; (globalThis.__listeners || []).forEach((l) => l(globalThis.__snap(docs))); };
-const reset = () => { globalThis.__fsHold = null; globalThis.__reads = 0; globalThis.__fsWriteFail = null; globalThis.__fsCalls = []; globalThis.__listeners = []; globalThis.__fsDocs = []; globalThis.localStorage?.clear(); };
+const reset = () => { globalThis.__docListeners = []; globalThis.__fsHold = null; globalThis.__reads = 0; globalThis.__fsWriteFail = null; globalThis.__fsCalls = []; globalThis.__listeners = []; globalThis.__fsDocs = []; globalThis.localStorage?.clear(); };
 const settle = () => new Promise((r) => setTimeout(r, 30));
 const writes = () => globalThis.__fsCalls || [];
 

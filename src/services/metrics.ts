@@ -63,7 +63,10 @@ export function isCounted(t: AutomatedTradeRecord): boolean {
 }
 
 export function isClosed(t: AutomatedTradeRecord): boolean {
-  return t.status !== 'OPEN';
+  if (!t) return false;
+  if (t.status && t.status !== 'OPEN') return true;
+  if (t.exitReason && (t.closedAtTimestamp || t.exitPrice !== undefined)) return true;
+  return false;
 }
 
 export function closeTime(t: AutomatedTradeRecord): number {

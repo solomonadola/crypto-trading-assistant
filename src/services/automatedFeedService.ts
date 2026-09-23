@@ -14,7 +14,7 @@ import {
   getCountFromServer,
 } from 'firebase/firestore';
 import { db, isQuotaBlocked, markQuotaExceeded, reportFirestoreResult, getFirestoreHealth, FIRESTORE_WRITES_ENABLED } from '../lib/firebase';
-import { outcome } from './metrics';
+import { outcome, isClosed } from './metrics';
 import { AutomatedTradeRecord, AutomatedFeedAuditStats, StrategyVerificationReport } from '../types/automatedFeed';
 import { CryptoCoin } from '../types';
 import { evaluateTradeCycle } from './cycleEngineService';
@@ -310,19 +310,24 @@ export function mergeRemoteTrades(
 
 /** Which version of one trade to keep: Firestore's (r) or this copy's (l). See mergeRemoteTrades. */
 function pickTrade(r: AutomatedTradeRecord, l: AutomatedTradeRecord | undefined, pendingIds: Set<string>): AutomatedTradeRecord {
+  // A closed trade is permanent: once closed in either copy, it should never be revived as OPEN
+  if (r && isClosed(r) && l && !isClosed(l)) return r;
+  if (l && isClosed(l) && r && !isClosed(r) && !pendingIds.has(r.id)) return l;
   // Revisions decide when they differ: the higher one is the newer change.
   if (l && (r.rev ?? 0) !== (l.rev ?? 0)) return (r.rev ?? 0) > (l.rev ?? 0) ? r : l;
   if (l && pendingIds.has(r.id)) return l;   // our change has not landed yet
-  if (!l || r.status !== 'OPEN') return r;
-  if (l.status !== 'OPEN') return l;
+  if (!l || isClosed(r)) return r;
+  if (isClosed(l)) return l;
   if (filledTiers(r) > filledTiers(l)) return r;
   return { ...l, excludedFromStats: r.excludedFromStats, excludedReason: r.excludedReason };
 }
 
 function sortTrades(trades: AutomatedTradeRecord[]): AutomatedTradeRecord[] {
   return trades.sort((a, b) => {
-    if (a.status === 'OPEN' && b.status !== 'OPEN') return -1;
-    if (a.status !== 'OPEN' && b.status === 'OPEN') return 1;
+    const aOpen = !isClosed(a);
+    const bOpen = !isClosed(b);
+    if (aOpen && !bOpen) return -1;
+    if (!aOpen && bOpen) return 1;
     return (b.openedAtTimestamp || 0) - (a.openedAtTimestamp || 0);
   });
 }
@@ -340,7 +345,14 @@ export const SEED_TRADES: AutomatedTradeRecord[] = [];
 export function loadLocalTrades(): AutomatedTradeRecord[] {
   try {
     const parsed = JSON.parse(safeGetLocalStorage(LOCAL_STORAGE_KEY) || '[]');
-    return Array.isArray(parsed) ? sanitizeActiveTrades(parsed) : [];
+    if (!Array.isArray(parsed)) return [];
+    const normalized = parsed.map((t: AutomatedTradeRecord) => {
+      if (t && t.status === 'OPEN' && t.exitReason && (t.closedAtTimestamp || t.exitPrice !== undefined)) {
+        return { ...t, status: 'COMPLETED' as const };
+      }
+      return t;
+    });
+    return sanitizeActiveTrades(normalized);
   } catch {
     return [];
   }
@@ -368,9 +380,9 @@ export async function fetchAutomatedTrades(forceNetwork: boolean = false): Promi
   if (!loadedTrades && !isQuotaBlocked()) {
     try {
       const colRef = collection(db, TRADES_COLLECTION);
-      // The SDK can retry silently instead of failing; never wait on it forever.
+      // Use getDocsFromServer when forceNetwork is true to bypass SDK local cache
       const snap = await Promise.race([
-        getDocs(colRef),
+        forceNetwork ? getDocsFromServer(colRef) : getDocs(colRef),
         new Promise<never>((_, reject) =>
           setTimeout(() => reject(new Error('Firestore read timed out (offline)')), FIRESTORE_READ_TIMEOUT_MS)),
       ]);
@@ -471,7 +483,11 @@ function updatedAtMs(data: Record<string, unknown>): number {
 /** The trade as stored locally: the server timestamp is sync bookkeeping only. */
 function fromDoc(data: Record<string, unknown>): AutomatedTradeRecord {
   const { updatedAt: _u, ...rest } = data;
-  return rest as unknown as AutomatedTradeRecord;
+  const t = rest as unknown as AutomatedTradeRecord;
+  if (t && t.status === 'OPEN' && t.exitReason && (t.closedAtTimestamp || t.exitPrice !== undefined)) {
+    return { ...t, status: 'COMPLETED' };
+  }
+  return t;
 }
 
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
@@ -547,7 +563,8 @@ function stopSync(): void {
 // matching), nor changes saved without updatedAt. Once a minute the page asks
 // Firestore how many trades there are - a count costs 1 read per 1,000 trades -
 // and if that differs from what it holds, it re-reads everything. Emptying the
-// database, for example, reaches every open page within a minute.
+// database, for example, reaches every open page within a minute. (Pages
+// following a trading server do not run this: they take the list from it.)
 const COUNT_CHECK_MS = 60_000;
 let lastCountResync = 0;
 
@@ -708,6 +725,13 @@ export async function reconcileWithFirestore(full: boolean): Promise<ReconcileRe
       const i = index.get(r.id);
       if (i === undefined) {
         local.push(r);
+        pulled++;
+        continue;
+      }
+      // If remote trade is closed but local is still open, always adopt remote closed state
+      if (isClosed(r) && !isClosed(local[i])) {
+        local[i] = r;
+        setPending(r.id, null);
         pulled++;
         continue;
       }
@@ -919,9 +943,23 @@ export async function executeSimulatedTrade(trade: AutomatedTradeRecord): Promis
     }
   }
 
-  // GUARD 4: Must NOT exceed balance or liquid cash
+  // GUARD 4: Must NOT exceed balance or liquid cash (flexible down to 7% minimum)
   const bankroll = calculateBankrollState(sanitizedCurrent);
-  const tradeSize = trade.positionSizeUSD || bankroll.trancheSizeUSD || 10.00;
+  const minRequiredCash = Math.max(1.00, +(bankroll.totalPortfolioValueUSD * 0.07).toFixed(2));
+
+  if (bankroll.liquidCashUSD < minRequiredCash) {
+    console.warn(`[Bankroll Guard] Blocked execution for ${trade.symbol}: Remaining balance ($${bankroll.liquidCashUSD.toFixed(2)}) is below 7% minimum ($${minRequiredCash.toFixed(2)}).`);
+    return false;
+  }
+
+  let tradeSize = trade.positionSizeUSD || bankroll.trancheSizeUSD || 10.00;
+  if (tradeSize > bankroll.liquidCashUSD && bankroll.liquidCashUSD >= minRequiredCash) {
+    tradeSize = +bankroll.liquidCashUSD.toFixed(2);
+    trade.positionSizeUSD = tradeSize;
+    if (trade.entryPrice > 0) {
+      trade.units = +(tradeSize / trade.entryPrice).toFixed(trade.entryPrice < 0.01 ? 2 : 6);
+    }
+  }
 
   if (bankroll.liquidCashUSD < tradeSize) {
     console.warn(`[Bankroll Guard] Blocked execution for ${trade.symbol}: Insufficient liquid cash ($${bankroll.liquidCashUSD.toFixed(2)} available, $${tradeSize.toFixed(2)} required).`);
@@ -1211,14 +1249,106 @@ export const loadAutomatedTrades = fetchAutomatedTrades;
 export const updateTradeRecord = updateAutomatedTrade;
 export const resetTradesToDefault = resetAutomatedTrades;
 
+export interface ForceResyncResult {
+  success: boolean;
+  count: number;
+  closedCount: number;
+  source: 'server' | 'firestore';
+  error?: string;
+}
+
+/**
+ * Explicitly forces a fresh reconciliation of trades from Firebase Firestore or the 24/7 Server.
+ * Clears stale local cursors and un-sticks browsers (like Edge or private sessions) where local storage was stale.
+ */
+export async function forceResyncTrades(directFirestore: boolean = false): Promise<ForceResyncResult> {
+  // Clear stale cached cursors and any temporary quota block flag
+  try {
+    localStorage.removeItem('firebase_quota_blocked_until');
+    localStorage.removeItem(SYNC_CURSOR_KEY);
+    localStorage.removeItem(FULL_SYNC_AT_KEY);
+    if (directFirestore) {
+      localStorage.removeItem(LOCAL_STORAGE_KEY);
+    }
+  } catch {}
+
+  // 1. If directFirestore is requested, pull directly from Firestore collection
+  if (directFirestore) {
+    try {
+      const snap = await withTimeout(getDocsFromServer(collection(db, TRADES_COLLECTION)), 15_000);
+      const remote: AutomatedTradeRecord[] = [];
+      snap.forEach((d) => remote.push(fromDoc(d.data())));
+      if (remote.length > 0) {
+        const sorted = sortTrades(sanitizeActiveTrades(remote));
+        safeSetLocalStorage(LOCAL_STORAGE_KEY, JSON.stringify(sorted));
+        safeSetLocalStorage(FULL_SYNC_AT_KEY, String(Date.now()));
+        safeSetLocalStorage(SYNC_CURSOR_KEY, String(Date.now()));
+        safeSetLocalStorage(SYNC_VERSION_KEY, SYNC_VERSION);
+        notifySubscribers(sorted);
+        reportFirestoreResult();
+        const closedCount = sorted.filter((t) => t.status !== 'OPEN').length;
+        // Also ping the server to trigger a background resync if reachable
+        try {
+          fetch('/api/resync', { method: 'POST' }).catch(() => {});
+        } catch {}
+        return { success: true, count: sorted.length, closedCount, source: 'firestore' };
+      }
+    } catch (err: any) {
+      reportFirestoreResult(err);
+      console.warn('Direct Firestore fetch error:', err);
+    }
+  }
+
+  // 2. Try pulling full list from server /api/trades
+  try {
+    const res = await fetch('/api/trades?since=0&boot=', { cache: 'no-store' });
+    if (res.ok) {
+      const data = await res.json();
+      if (data && Array.isArray(data.trades) && data.trades.length > 0) {
+        applyServerTrades(true, data.trades as AutomatedTradeRecord[], []);
+        const local = loadLocalTrades();
+        const closedCount = local.filter((t) => t.status !== 'OPEN').length;
+        return { success: true, count: local.length, closedCount, source: 'server' };
+      }
+    }
+  } catch (err) {
+    console.warn('Server trades pull failed, attempting Firestore fallback:', err);
+  }
+
+  // 3. Fallback to direct Firestore getDocsFromServer
+  try {
+    const snap = await withTimeout(getDocsFromServer(collection(db, TRADES_COLLECTION)), 15_000);
+    const remote: AutomatedTradeRecord[] = [];
+    snap.forEach((d) => remote.push(fromDoc(d.data())));
+    const sorted = sortTrades(sanitizeActiveTrades(remote));
+    safeSetLocalStorage(LOCAL_STORAGE_KEY, JSON.stringify(sorted));
+    safeSetLocalStorage(FULL_SYNC_AT_KEY, String(Date.now()));
+    safeSetLocalStorage(SYNC_CURSOR_KEY, String(Date.now()));
+    safeSetLocalStorage(SYNC_VERSION_KEY, SYNC_VERSION);
+    notifySubscribers(sorted);
+    reportFirestoreResult();
+    const closedCount = sorted.filter(isClosed).length;
+    return { success: true, count: sorted.length, closedCount, source: 'firestore' };
+  } catch (err: any) {
+    reportFirestoreResult(err);
+    const msg = err instanceof Error ? err.message : String(err);
+    return { success: false, count: 0, closedCount: 0, source: 'firestore', error: msg };
+  }
+}
+
 /**
  * Loads all completed historical trades from the trade records service
  */
-// forceNetwork is ignored: the shared listener keeps the saved list current,
-// and a forced read of the whole collection cost one read per trade ever made.
-export async function fetchCompletedTrades(_forceNetwork: boolean = false): Promise<AutomatedTradeRecord[]> {
-  const allTrades = await fetchAutomatedTrades(false);
-  return allTrades.filter((t) => t.status !== 'OPEN');
+export async function fetchCompletedTrades(forceNetwork: boolean = false): Promise<AutomatedTradeRecord[]> {
+  if (forceNetwork) {
+    try {
+      await forceResyncTrades(false);
+    } catch (e) {
+      console.warn('forceResyncTrades failed in fetchCompletedTrades:', e);
+    }
+  }
+  const allTrades = await fetchAutomatedTrades(forceNetwork);
+  return allTrades.filter(isClosed);
 }
 export const loadCompletedTrades = fetchCompletedTrades;
 

@@ -37,6 +37,10 @@ export interface ServerStatus {
   buildId: string | null;
   /** Something is off that the user should fix (another build, several servers). */
   warning: string | null;
+  /** Background worker Firestore connection state: 'ok', 'offline', etc. */
+  firestoreStatus?: string | null;
+  /** Background worker auto-pilot enabled state */
+  isAutoPilot?: boolean;
 }
 
 // Instance ids seen recently. Two alternating within minutes means more than
@@ -73,10 +77,12 @@ export async function fetchServerStatus(): Promise<ServerStatus> {
   } else if (buildId && PAGE_BUILD !== 'dev' && buildId !== 'dev' && buildId !== PAGE_BUILD) {
     warning = `This page (build ${PAGE_BUILD}) and the server (build ${buildId}) are from different deployments. Reload the page; if it persists, an old revision is still taking traffic.`;
   }
+  const firestoreStatus = typeof w?.sync?.firestore === 'string' ? w.sync.firestore : null;
+  const isAutoPilot = typeof w?.isAutoPilot === 'boolean' ? w.isAutoPilot : undefined;
   if (w?.workerRunning && typeof w.tickAgeMs === 'number' && w.tickAgeMs < 120_000) {
-    return { active: true, lastTickAt: Date.now() - w.tickAgeMs, instanceId, buildId, warning };
+    return { active: true, lastTickAt: Date.now() - w.tickAgeMs, instanceId, buildId, warning, firestoreStatus, isAutoPilot };
   }
-  return { active: false, lastTickAt: null, instanceId, buildId, warning };
+  return { active: false, lastTickAt: null, instanceId, buildId, warning, firestoreStatus, isAutoPilot };
 }
 
 let cursor = { boot: '', version: 0 };
@@ -106,7 +112,7 @@ export async function pullServerTrades(): Promise<boolean> {
  * Actions are same-origin only. A local dev server following a hosted one
  * must reach it through the dev proxy (BACKEND_URL), not VITE_TRADING_SERVER_URL.
  */
-export async function serverAction(path: string, body: unknown): Promise<{ ok: boolean; error?: string; result?: any }> {
+export async function serverAction(path: string, body: unknown): Promise<{ ok: boolean; error?: string; result?: any; unreachable?: boolean }> {
   let outcome = await postOnce(path, body);
   // Retry once, and only when the server certainly did nothing: it had no such
   // endpoint (another revision or an old build answered) or could not be
@@ -120,13 +126,20 @@ export async function serverAction(path: string, body: unknown): Promise<{ ok: b
   }
   if (!outcome.ok) {
     const status = await fetchServerStatus();
-    return { ok: false, error: status.warning ? `${outcome.error} ${status.warning}` : outcome.error };
+    // unreachable: the server never answered, so it certainly did nothing. A
+    // caller may then act by itself. Anything else (a refusal with a reason, a
+    // server error, a timeout that may have gone through) must not be redone.
+    return {
+      ok: false,
+      unreachable: outcome.unreachable,
+      error: status.warning ? `${outcome.error} ${status.warning}` : outcome.error,
+    };
   }
   await pullServerTrades().catch(() => false);
   return { ok: true, result: outcome.result };
 }
 
-async function postOnce(path: string, body: unknown): Promise<{ ok: boolean; retryable?: boolean; error?: string; result?: any }> {
+async function postOnce(path: string, body: unknown): Promise<{ ok: boolean; retryable?: boolean; unreachable?: boolean; error?: string; result?: any }> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 20_000);
   try {
@@ -152,6 +165,7 @@ async function postOnce(path: string, body: unknown): Promise<{ ok: boolean; ret
     // reached the server first, so it may have gone through: never retried.
     return {
       ok: false,
+      unreachable: true,
       error: TRADING_SERVER_URL
         ? 'Could not reach the trading server. From a local copy, use BACKEND_URL (dev proxy) to send actions.'
         : 'Could not reach the trading server. Check the positions list before trying again - the action may or may not have gone through.',

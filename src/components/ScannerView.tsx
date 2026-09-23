@@ -120,6 +120,33 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
     return true;
   });
 
+  const candidateList = useMemo(() => {
+    if (topCandidates && topCandidates.length > 0) return topCandidates;
+    return signals
+      .filter((s) => s.score >= 65 && !openTradeSymbols.has(s.symbol.toUpperCase()))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 3)
+      .map((signal, idx) => ({
+        signal,
+        rank: idx + 1,
+        convictionScore: signal.score,
+        rewardRiskRatio: signal.tradePlan?.rewardRiskRatio || 2.5,
+        archetype: signal.archetypeName,
+        category: MAJOR_COINS.has(signal.symbol.toUpperCase()) ? 'Majors' : MEME_COINS.has(signal.symbol.toUpperCase()) ? 'Memes' : 'Alts',
+        isEligibleNow: true,
+      }));
+  }, [signals, topCandidates, openTradeSymbols]);
+
+  const derivedCategoryExposure = useMemo(() => {
+    if (Object.keys(categoryExposure).length > 0) return categoryExposure;
+    const exp: Record<string, number> = {};
+    for (const t of trades.filter((t) => t.status === 'OPEN')) {
+      const cat = MAJOR_COINS.has(t.symbol.toUpperCase()) ? 'Majors' : MEME_COINS.has(t.symbol.toUpperCase()) ? 'Memes' : 'Alts';
+      exp[cat] = (exp[cat] || 0) + 1;
+    }
+    return exp;
+  }, [trades, categoryExposure]);
+
   const triggeredCount = signals.filter(s => s.status === 'TRIGGERED').length;
   const triggeredShortCount = signals.filter(s => s.status === 'TRIGGERED' && s.direction === 'SHORT').length;
   const formingCount = signals.filter(s => s.status === 'FORMING').length;
@@ -239,8 +266,8 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
           onToggleAutoPilot={onToggleAutoPilot || (() => {})}
           bankroll={bankroll}
           btcRegime={btcRegime}
-          categoryExposure={categoryExposure}
-          topCandidates={topCandidates}
+          categoryExposure={derivedCategoryExposure}
+          topCandidates={candidateList}
           onDeployManualCandidate={(cand) => onDeploySignal(cand.signal)}
           activityRadar={activityRadar}
           lossCircuitBreaker={lossCircuitBreaker}

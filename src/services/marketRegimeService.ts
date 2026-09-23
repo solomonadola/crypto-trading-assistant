@@ -324,33 +324,15 @@ export function evaluateRecentLossCircuitBreaker(trades: AutomatedTradeRecord[])
   const count = recentLosses.length;
   const totalLossUSD = +(recentLosses.reduce((acc, t) => acc + Math.abs(netPnlUSD(t)), 0)).toFixed(2);
 
-  // If 2 or more losses within the 2-hour window, trip the circuit breaker
-  if (count >= 2) {
-    const mostRecentTimestamp = recentLosses[0]?.closedAtTimestamp || now;
-    const cooldownDurationMs = 60 * 60 * 1000; // 60 minutes
-    const cooldownUntil = mostRecentTimestamp + cooldownDurationMs;
-    const minutesRemaining = Math.max(0, Math.round((cooldownUntil - now) / 60000));
-
-    if (minutesRemaining > 0) {
-      return {
-        isTripped: true,
-        recentLossesCount: count,
-        recentLossUSD: totalLossUSD,
-        cooldownUntil,
-        minutesRemaining,
-        reason: `Loss Streak Dampener Active: ${count} stop-outs in last 2h (-$${totalLossUSD.toFixed(2)}). Market is in a chop whipsaw trap. Auto-Pilot paused for ${minutesRemaining}m to preserve capital.`
-      };
-    }
-  }
-
+  // Auto-Pilot continuous execution: do not trip cooldown lock
   return {
     isTripped: false,
     recentLossesCount: count,
     recentLossUSD: totalLossUSD,
     cooldownUntil: 0,
     minutesRemaining: 0,
-    reason: count === 1 
-      ? `1 isolated stop-out in last 2h (-$${totalLossUSD.toFixed(2)}). Well within normal 10-slot variance.`
+    reason: count > 0
+      ? `${count} recent stop-out(s) in last 2h (-$${totalLossUSD.toFixed(2)}). Auto-Pilot continuous scanning active.`
       : `Zero stop-outs in last 2h. System operating in optimal win regime.`
   };
 }

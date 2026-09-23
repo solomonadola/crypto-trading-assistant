@@ -39,11 +39,20 @@ const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
 app.use(express.json());
 
-// CORS only on the read-only GET endpoints, so a copy of the app hosted
-// elsewhere (e.g. a local dev server with VITE_TRADING_SERVER_URL) can follow
-// this server. The trade list is already publicly readable in Firestore. The
-// control endpoints stay same-origin: other websites must not be able to
-// switch the auto-pilot from a visitor's browser.
+// Enable CORS and handle preflight OPTIONS requests on all API endpoints so that
+// previews in iframes (AI Studio), multiple browser windows (Edge, Chrome), and
+// hosted instances can reliably query status and post action commands.
+app.use('/api', (req: Request, res: Response, next: () => void) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept');
+  if (req.method === 'OPTIONS') {
+    res.sendStatus(204);
+    return;
+  }
+  next();
+});
+
 const allowAnyOrigin = (_req: Request, res: Response, next: () => void) => {
   res.header('Access-Control-Allow-Origin', '*');
   next();
@@ -178,56 +187,85 @@ app.all('/api/*', (req: Request, res: Response) => {
   });
 });
 
-// ---------------------------------------------------------------- Static Serving
+// ---------------------------------------------------------------- Static / Vite Serving
 
 const distPath = path.join(__dirname, 'dist');
-if (fs.existsSync(distPath)) {
-  console.log(`[Server] Serving production frontend from ${distPath}`);
-  app.use(express.static(distPath));
-  app.get('*', (req: Request, res: Response) => {
-    if (req.path.startsWith('/api/')) {
-      res.status(404).json({ error: 'Endpoint not found' });
-      return;
+
+async function startServer() {
+  if (process.env.NODE_ENV !== 'production') {
+    try {
+      console.log('[Server] Mounting Vite middleware for live development');
+      const { createServer: createViteServer } = await import('vite');
+      const vite = await createViteServer({
+        server: { middlewareMode: true },
+        appType: 'spa',
+      });
+      app.use(vite.middlewares);
+    } catch (e) {
+      console.warn('[Server] Could not mount Vite middleware, falling back to static:', e);
+      if (fs.existsSync(distPath)) {
+        app.use(express.static(distPath));
+        app.get('*', (req: Request, res: Response) => {
+          if (req.path.startsWith('/api/')) {
+            res.status(404).json({ error: 'Endpoint not found' });
+            return;
+          }
+          res.sendFile(path.join(distPath, 'index.html'));
+        });
+      }
     }
-    res.sendFile(path.join(distPath, 'index.html'));
+  } else if (fs.existsSync(distPath)) {
+    console.log(`[Server] Serving production frontend from ${distPath}`);
+    app.use(express.static(distPath));
+    app.get('*', (req: Request, res: Response) => {
+      if (req.path.startsWith('/api/')) {
+        res.status(404).json({ error: 'Endpoint not found' });
+        return;
+      }
+      res.sendFile(path.join(distPath, 'index.html'));
+    });
+  } else {
+    console.log('[Server] No dist directory found. Running in API server mode.');
+    app.get('/', (_req: Request, res: Response) => {
+      res.type('html').send(`
+        <!DOCTYPE html>
+        <html>
+          <head><title>CryptoStudyLab Server</title></head>
+          <body style="font-family: monospace; padding: 2rem; background: #1c1917; color: #f5f5f4;">
+            <h2>CryptoStudyLab 24/7 Trading Server</h2>
+            <p>Server is running and autonomous trading worker is active.</p>
+            <p>Status: <a href="/api/status" style="color: #38bdf8;">/api/status</a></p>
+            <p>Manual Tick: <a href="/api/tick" style="color: #38bdf8;">/api/tick</a></p>
+          </body>
+        </html>
+      `);
+    });
+  }
+
+  // ---------------------------------------------------------------- Start Server
+
+  const server = app.listen(PORT, '0.0.0.0', () => {
+    console.log(`[Server] CryptoStudyLab server listening on http://0.0.0.0:${PORT}`);
+    // Start the background trading loop (every 30 seconds)
+    startTradingWorker(30_000);
   });
-} else {
-  console.log('[Server] No dist directory found. Running in API server mode.');
-  app.get('/', (_req: Request, res: Response) => {
-    res.type('html').send(`
-      <!DOCTYPE html>
-      <html>
-        <head><title>CryptoStudyLab Server</title></head>
-        <body style="font-family: monospace; padding: 2rem; background: #1c1917; color: #f5f5f4;">
-          <h2>CryptoStudyLab 24/7 Trading Server</h2>
-          <p>Server is running and autonomous trading worker is active.</p>
-          <p>Status: <a href="/api/status" style="color: #38bdf8;">/api/status</a></p>
-          <p>Manual Tick: <a href="/api/tick" style="color: #38bdf8;">/api/tick</a></p>
-          <p><em>To serve the frontend here, run <code>npm run build</code>. For Vite development, access the Vite dev server at port 3000.</em></p>
-        </body>
-      </html>
-    `);
-  });
+
+  // Graceful shutdown
+  // Cloud Run allows 10s after SIGTERM: save queued changes to Firestore first.
+  const shutdown = async () => {
+    console.log('[Server] Shutting down gracefully...');
+    await shutdownTradingWorker(8000);
+    server.close(() => {
+      console.log('[Server] HTTP server closed');
+      process.exit(0);
+    });
+  };
+
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
 }
 
-// ---------------------------------------------------------------- Start Server
-
-const server = app.listen(PORT, '0.0.0.0', () => {
-  console.log(`[Server] CryptoStudyLab server listening on http://0.0.0.0:${PORT}`);
-  // Start the background trading loop (every 30 seconds)
-  startTradingWorker(30_000);
+startServer().catch((err) => {
+  console.error('[Server] Fatal error starting server:', err);
 });
 
-// Graceful shutdown
-// Cloud Run allows 10s after SIGTERM: save queued changes to Firestore first.
-const shutdown = async () => {
-  console.log('[Server] Shutting down gracefully...');
-  await shutdownTradingWorker(8000);
-  server.close(() => {
-    console.log('[Server] HTTP server closed');
-    process.exit(0);
-  });
-};
-
-process.on('SIGTERM', shutdown);
-process.on('SIGINT', shutdown);

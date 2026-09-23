@@ -1,8 +1,6 @@
 {
-  "name": "CryptoStudy Lab",
-  "description": "Short-term 1-week to 2-week crypto investment engine featuring Live Signal Scanner & Quantitative Entry Strategy Screener, asymmetric 1/3rd harvest ladders, dynamic zero-risk breakeven ratchets, and statistical proofing audits.",
+  "name": "Crypto Quant HFT Trading Bot",
+  "description": "High-frequency crypto quantitative trading bot with real-time order flow analytics, scanner, autopilot engine, and Firebase persistence.",
   "requestFramePermissions": [],
-  "majorCapabilities": [
-    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
-  ]
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

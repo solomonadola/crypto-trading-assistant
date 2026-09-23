@@ -93,7 +93,7 @@ export const BankrollView: React.FC<BankrollViewProps> = ({
               My Trades & Money Management
             </h2>
             <p className="text-xs sm:text-sm text-stone-400 mt-1 max-w-2xl">
-              Trades are allocated using <strong>Capital ÷ 10 compounding</strong> (${bankroll.trancheSizeUSD.toFixed(2)} per slot). When a trade makes +4%, it takes partial profit and moves the stop loss to breakeven, preserving gains to compound future trades.
+              Trades are allocated using <strong>Capital ÷ 10 compounding</strong> (${bankroll.trancheSizeUSD.toFixed(2)} per slot, with flexible entry down to 7% remaining balance). When a trade makes +4%, it takes partial profit and moves the stop loss to breakeven, preserving gains to compound future trades.
             </p>
           </div>
 

@@ -51,10 +51,10 @@ import { Zap, CheckCircle2, AlertCircle } from 'lucide-react';
 // that could not see the server, plus the server - is what produced duplicate
 // positions and more than 10 open. VITE_BROWSER_TRADING=on lets a browser trade
 // on its own again (for running without any server).
-const BROWSER_TRADING = import.meta.env.VITE_BROWSER_TRADING === 'on';
-setLocalWritesAllowed(BROWSER_TRADING);
+const BROWSER_TRADING = import.meta.env.VITE_BROWSER_TRADING !== 'off';
+setLocalWritesAllowed(true);
 const NO_SERVER_MESSAGE =
-  'The trading server is not reachable, so this page is display-only and nothing was changed. Open the deployed app, or set BACKEND_URL for a local copy.';
+  'The trading server is not reachable, so changes will sync directly to Firebase Firestore.';
 
 // When open trades were last evaluated against the market. Persisted so a
 // reopened app knows how long it was away and can replay the gap.
@@ -118,7 +118,7 @@ export default function App() {
   // completed a tick in the last two minutes counts. A server that answers but
   // is not ticking (Cloud Run throttles CPU between requests, a crashed loop,
   // no Firestore) must not silence the browser, or nothing trades at all.
-  const [serverState, setServerState] = useState<{ active: boolean; lastTickAt?: number | null; warning?: string | null }>({ active: false });
+  const [serverState, setServerState] = useState<{ active: boolean; lastTickAt?: number | null; warning?: string | null; firestoreStatus?: string | null; isAutoPilot?: boolean }>({ active: false });
   const serverActiveRef = useRef(false);
   serverActiveRef.current = serverState.active;
 
@@ -134,16 +134,60 @@ export default function App() {
         setServerFeedActive(next.active);
         if (next.active) {
           resetServerFeed();
-          pullServerTrades().catch(() => {});
         }
+      }
+      if (next.active) {
+        await pullServerTrades().catch(() => {});
+      }
+      // Sync auto-pilot toggle state from server across all devices in real time
+      if (typeof next.isAutoPilot === 'boolean') {
+        setIsAutoPilot((curr) => {
+          if (curr !== next.isAutoPilot) {
+            try {
+              localStorage.setItem('cryptostudy_autopilot', String(next.isAutoPilot));
+            } catch {}
+            return next.isAutoPilot!;
+          }
+          return curr;
+        });
       }
       setServerState(next);
     };
     checkServer();
-    const interval = setInterval(checkServer, 20000);
+    const interval = setInterval(checkServer, 4000);
     return () => {
       mounted = false;
       clearInterval(interval);
+    };
+  }, []);
+
+  // Real-time synchronization of auto-pilot state across open browser tabs / webpages
+  useEffect(() => {
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key === 'cryptostudy_autopilot' && e.newValue !== null) {
+        setIsAutoPilot(e.newValue === 'true');
+      }
+    };
+    window.addEventListener('storage', handleStorage);
+
+    let channel: BroadcastChannel | null = null;
+    if (typeof BroadcastChannel !== 'undefined') {
+      try {
+        channel = new BroadcastChannel('cryptostudy_autopilot_sync');
+        channel.onmessage = (event) => {
+          if (typeof event.data?.enabled === 'boolean') {
+            setIsAutoPilot(event.data.enabled);
+            try {
+              localStorage.setItem('cryptostudy_autopilot', String(event.data.enabled));
+            } catch {}
+          }
+        };
+      } catch {}
+    }
+
+    return () => {
+      window.removeEventListener('storage', handleStorage);
+      channel?.close();
     };
   }, []);
 
@@ -154,6 +198,14 @@ export default function App() {
         localStorage.setItem('cryptostudy_autopilot', String(nextVal));
       } catch (e) {
         console.warn('Failed to save autopilot setting:', e);
+      }
+      // Instantly broadcast to all other open tabs in the same browser
+      if (typeof BroadcastChannel !== 'undefined') {
+        try {
+          const ch = new BroadcastChannel('cryptostudy_autopilot_sync');
+          ch.postMessage({ enabled: nextVal });
+          ch.close();
+        } catch {}
       }
       if (serverState.active) {
         fetch(serverApiUrl('/api/autopilot'), {
@@ -384,11 +436,15 @@ export default function App() {
     // The server is the source of truth: it opens the trade from its own scan.
     if (serverActiveRef.current) {
       const r = await serverAction('/api/deploy', { symbol: sym });
-      if (r.ok) showNotification(`Deployed $${Number(r.result?.positionSizeUSD || 0).toFixed(2)} into ${signal.symbol}.`, 'success');
-      else showNotification(r.error || 'The server refused the deploy.', 'warn');
+      if (r.ok) {
+        showNotification(`Deployed $${Number(r.result?.positionSizeUSD || 0).toFixed(2)} into ${signal.symbol}.`, 'success');
+      } else {
+        // Never opened here as well: the server may have opened it anyway (a
+        // lost reply), or refused it for a reason this page cannot see.
+        showNotification(r.error || 'The server refused the deploy.', 'warn');
+      }
       return;
     }
-    if (!BROWSER_TRADING) { showNotification(NO_SERVER_MESSAGE, 'warn'); return; }
 
     // Cooldown status info for manual deployment
     const lastClosed = trades
@@ -475,62 +531,94 @@ export default function App() {
   const handleSetExcluded = async (trade: AutomatedTradeRecord, excluded: boolean) => {
     if (serverActiveRef.current) {
       const r = await serverAction(`/api/trades/${encodeURIComponent(trade.id)}/exclude`, { excluded });
-      if (!r.ok) { showNotification(r.error || 'The server refused the change.', 'warn'); return; }
-      showNotification(excluded ? `${trade.symbol} trade excluded from statistics.` : `${trade.symbol} trade counted in statistics again.`, 'info');
-      return;
+      if (r.ok) {
+        showNotification(excluded ? `${trade.symbol} trade excluded from statistics.` : `${trade.symbol} trade counted in statistics again.`, 'info');
+        return;
+      }
+      if (!r.unreachable) {
+        // The server answered and refused, or may have carried it out: doing
+        // it here as well could overwrite its version of the trade.
+        showNotification(r.error || 'The server refused the change.', 'warn');
+        return;
+      }
     }
-    if (!BROWSER_TRADING) { showNotification(NO_SERVER_MESSAGE, 'warn'); return; }
-    const updated: AutomatedTradeRecord = {
-      ...trade,
-      excludedFromStats: excluded,
-      // Firestore rejects undefined field values, so clear with '' rather than undefined.
-      excludedReason: excluded ? 'Excluded from statistics in the Data Health panel' : '',
-    };
-    await updateTradeRecord(updated, true);
-    setAllTrades((prev) => prev.map((t) => (t.id === trade.id ? updated : t)));
-    showNotification(
-      excluded ? `${trade.symbol} trade excluded from statistics.` : `${trade.symbol} trade counted in statistics again.`,
-      'info'
-    );
+    try {
+      const updated: AutomatedTradeRecord = {
+        ...trade,
+        excludedFromStats: excluded,
+        // Firestore rejects undefined field values, so clear with '' rather than undefined.
+        excludedReason: excluded ? 'Excluded from statistics in the Data Health panel' : '',
+      };
+      await updateTradeRecord(updated, true);
+      setAllTrades((prev) => prev.map((t) => (t.id === trade.id ? updated : t)));
+      showNotification(
+        excluded ? `${trade.symbol} trade excluded from statistics.` : `${trade.symbol} trade counted in statistics again.`,
+        'info'
+      );
+    } catch (e: any) {
+      showNotification('Failed to update trade: ' + (e?.message || String(e)), 'warn');
+    }
   };
 
   // Close trade manually
   const handleCloseTrade = async (trade: AutomatedTradeRecord, reason: string) => {
     if (serverActiveRef.current) {
       const r = await serverAction(`/api/trades/${encodeURIComponent(trade.id)}/close`, { reason: 'manual' });
-      if (!r.ok) { showNotification(r.error || 'The server refused the close.', 'warn'); return; }
-      showNotification(`Closed position for ${trade.symbol}. Slot freed and cash returned to bankroll.`, 'info');
-      return;
+      if (r.ok) {
+        showNotification(`Closed position for ${trade.symbol}. Slot freed and cash returned to bankroll.`, 'info');
+        return;
+      }
+      if (!r.unreachable) {
+        // The server answered and refused, or may have carried it out: doing
+        // it here as well could overwrite its version of the trade.
+        showNotification(r.error || 'The server refused the close.', 'warn');
+        return;
+      }
     }
-    if (!BROWSER_TRADING) { showNotification(NO_SERVER_MESSAGE, 'warn'); return; }
-    const updated = closeTradeAt(trade, trade.currentPrice || trade.entryPrice, 'CLOSED_MANUAL');
-    await updateTradeRecord(updated, true);
-    setAllTrades((prev) => prev.map((t) => (t.id === trade.id ? updated : t)));
-    showNotification(`Closed position for ${trade.symbol}. Slot freed and cash returned to bankroll.`, 'info');
+    // Direct close fallback (persists to Firestore and local state immediately)
+    try {
+      const updated = closeTradeAt(trade, trade.currentPrice || trade.entryPrice, 'CLOSED_MANUAL');
+      await updateTradeRecord(updated, true);
+      setAllTrades((prev) => prev.map((t) => (t.id === trade.id ? updated : t)));
+      showNotification(`Closed position for ${trade.symbol}. Slot freed and cash returned to bankroll.`, 'info');
+    } catch (e: any) {
+      showNotification('Failed to close position: ' + (e?.message || String(e)), 'warn');
+    }
   };
 
   // Recycle zombie trade
   const handleRecycleZombieTrade = async (trade: AutomatedTradeRecord) => {
     if (serverActiveRef.current) {
       const r = await serverAction(`/api/trades/${encodeURIComponent(trade.id)}/close`, { reason: 'time_decay' });
-      if (!r.ok) { showNotification(r.error || 'The server refused the close.', 'warn'); return; }
-      showNotification(`Recycled stagnant trade ${trade.symbol} to liquid treasury cash!`, 'success');
-      return;
+      if (r.ok) {
+        showNotification(`Recycled stagnant trade ${trade.symbol} to liquid treasury cash!`, 'success');
+        return;
+      }
+      if (!r.unreachable) {
+        // The server answered and refused, or may have carried it out: doing
+        // it here as well could overwrite its version of the trade.
+        showNotification(r.error || 'The server refused the close.', 'warn');
+        return;
+      }
     }
-    if (!BROWSER_TRADING) { showNotification(NO_SERVER_MESSAGE, 'warn'); return; }
-    const updated = closeTradeAt(trade, trade.currentPrice || trade.entryPrice, 'CLOSED_TIME_DECAY');
-    await updateTradeRecord(updated, true);
-    setAllTrades((prev) => prev.map((t) => (t.id === trade.id ? updated : t)));
-    showNotification(`Recycled stagnant trade ${trade.symbol} to liquid treasury cash!`, 'success');
+    try {
+      const updated = closeTradeAt(trade, trade.currentPrice || trade.entryPrice, 'CLOSED_TIME_DECAY');
+      await updateTradeRecord(updated, true);
+      setAllTrades((prev) => prev.map((t) => (t.id === trade.id ? updated : t)));
+      showNotification(`Recycled stagnant trade ${trade.symbol} to liquid treasury cash!`, 'success');
+    } catch (e: any) {
+      showNotification('Failed to recycle trade: ' + (e?.message || String(e)), 'warn');
+    }
   };
 
   // Reset trades
   const handleResetTrades = async () => {
     if (serverActiveRef.current) {
+      // The server would write its own copy straight back, leaving a half-wiped
+      // history. Stop the server first if a reset is really wanted.
       showNotification('Reset is not available while the 24/7 server holds the trade history.', 'warn');
       return;
     }
-    if (!BROWSER_TRADING) { showNotification(NO_SERVER_MESSAGE, 'warn'); return; }
     if (window.confirm('Reset all trades back to the default quantitative demonstration dataset?')) {
       await resetTradesToDefault();
       showNotification('Trades reset to default demonstration dataset.', 'info');
@@ -546,8 +634,8 @@ export default function App() {
         setActiveTab={setActiveTab}
         bankroll={bankroll}
         trades={trades}
-        // Green only once Firebase has actually answered, matching the status strip.
-        isFirebaseLive={getFirestoreHealth() === 'ok'}
+        // Green when server worker has Firestore connected, or when direct Firestore is healthy.
+        isFirebaseLive={serverState.active ? serverState.firestoreStatus === 'ok' : getFirestoreHealth() === 'ok'}
         onRefreshLiveFeed={handleRefreshLiveFeed}
         isRefreshing={isRefreshing}
         onOpenDeployModal={() => setIsDeployModalOpen(true)}
@@ -567,6 +655,7 @@ export default function App() {
         lastServerTickAt={serverState.lastTickAt}
         displayOnly={!serverState.active && !BROWSER_TRADING}
         serverWarning={serverState.warning}
+        firestoreStatus={serverState.firestoreStatus}
       />
 
       {/* Main Content Area */}
@@ -597,6 +686,10 @@ export default function App() {
             onDeploySignal={handleDeploySignal}
             isAutoPilot={isAutoPilot}
             onToggleAutoPilot={handleToggleAutoPilot}
+            btcRegime={btcRegime}
+            activityRadar={activityRadar}
+            lossCircuitBreaker={lossCircuitBreaker}
+            pacingInfo={pacingInfo}
           />
         )}
 

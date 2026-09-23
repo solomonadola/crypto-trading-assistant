@@ -91,7 +91,7 @@ export const AutoPilotMonitorHUD: React.FC<AutoPilotMonitorHUDProps> = ({
               </h3>
             </div>
             <p className="text-xs text-stone-400 mt-0.5">
-              Autonomous execution engine evaluating 5 safety checkpoints and dynamic <strong className="text-stone-200">Capital ÷ 10 (${bankroll.trancheSizeUSD.toFixed(2)})</strong> compounding.
+              Autonomous execution engine evaluating 5 safety checkpoints, dynamic <strong className="text-stone-200">Capital ÷ 10 (${bankroll.trancheSizeUSD.toFixed(2)})</strong> compounding, and flexible entry down to 7% balance.
             </p>
           </div>
         </div>

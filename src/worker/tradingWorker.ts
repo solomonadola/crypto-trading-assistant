@@ -1,6 +1,7 @@
 // Must be first: the data layer below keeps its working state in localStorage.
 import { saveStateNow, STATE_FILE } from './memoryStorage';
-import { FIRESTORE_WRITES_ENABLED, getFirestoreHealth, FirestoreHealth } from '../lib/firebase';
+import { db, FIRESTORE_WRITES_ENABLED, getFirestoreHealth, FirestoreHealth } from '../lib/firebase';
+import { doc, setDoc, onSnapshot } from 'firebase/firestore';
 import { fetchLiveMarketCoins, buildPriceMap, getLastTickerFetchTime } from '../services/binanceService';
 import {
   loadLocalTrades,
@@ -23,7 +24,7 @@ import { scanLiveMarketEntries, deploySignalToAutomatedFeed } from '../services/
 import { calculateBankrollState } from '../services/bankrollService';
 import { catchUpOpenTrades } from '../services/catchUpService';
 import { computePacing, selectAutoPilotCandidate, manualDeployBlockReason, findExcessOpenTrades } from '../services/autopilotEngine';
-import { isCounted } from '../services/metrics';
+import { isCounted, isClosed } from '../services/metrics';
 import { AutomatedTradeRecord } from '../types/automatedFeed';
 
 /**
@@ -119,6 +120,7 @@ let flushTimer: ReturnType<typeof setInterval> | null = null;
 let fullReconcileTimer: ReturnType<typeof setInterval> | null = null;
 let lastCoins: CryptoCoin[] = [];
 let unsubscribe: (() => void) | null = null;
+let configUnsubscribe: (() => void) | null = null;
 let subscribedAt = 0;
 let isTickInFlight = false;
 let ticksCount = 0;
@@ -253,7 +255,7 @@ async function runTick(): Promise<TickResult> {
     const now = Date.now();
     let trades = loadLocalTrades();
     const gap = lastTickAt === null || now - lastTickAt > CATCH_UP_MIN_GAP_MS;
-    if (gap && trades.some((t) => t.status === 'OPEN')) {
+    if (gap && trades.some((t) => !isClosed(t))) {
       const cu = await catchUpOpenTrades(trades, lastTickAt ?? 0, now, { requireCheckpoint: lastTickAt === null });
       for (const t of cu.changed) await updateAutomatedTrade(t, true);
       trades = cu.trades;
@@ -279,7 +281,7 @@ async function runTick(): Promise<TickResult> {
       }
       current = loadLocalTrades();
     }
-    const open = current.filter((t) => t.status === 'OPEN');
+    const open = current.filter((t) => !isClosed(t));
     openPositionsCount = open.length;
 
     // 5. Checkpoint. Only milestones are written as they happen; this saves
@@ -442,6 +444,13 @@ export function startTradingWorker(intervalMs = 30_000): void {
   if (isWorkerRunning) return;
   if (process.env.TRADING_WORKER === 'off') {
     disabledReason = 'Disabled by TRADING_WORKER=off';
+  } else if (process.env.TRADING_WORKER !== 'on' && process.env.NODE_ENV !== 'production') {
+    // `npm run dev` runs this same server. Without this, every local run and
+    // every AI Studio preview would be a second bot trading into the shared
+    // database - the cause of duplicate positions and more than 10 open.
+    // Only the deployed server (NODE_ENV=production) trades, or a run that
+    // asks for it with TRADING_WORKER=on.
+    disabledReason = 'Development run (NODE_ENV is not production): set TRADING_WORKER=on to trade from here';
   } else if (!FIRESTORE_WRITES_ENABLED) {
     disabledReason = 'Read-only copy (VITE_FIRESTORE_WRITES=off): trades would exist only in server memory';
   }
@@ -455,6 +464,32 @@ export function startTradingWorker(intervalMs = 30_000): void {
     const saved = localStorage.getItem(AUTOPILOT_KEY);
     if (saved === 'true' || saved === 'false') isAutoPilot = saved === 'true';
   } catch {}
+
+  // Sync auto-pilot setting with Firestore config so all browsers and servers stay identical
+  if (FIRESTORE_WRITES_ENABLED) {
+    try {
+      const configRef = doc(db, 'crypto_automated_config', 'autopilot');
+      configUnsubscribe = onSnapshot(configRef, (snap) => {
+        // Defensive: only a document snapshot has exists()/data().
+        const data = typeof snap?.exists === 'function' && snap.exists() && typeof snap.data === 'function'
+          ? snap.data()
+          : null;
+        if (typeof data?.enabled === 'boolean' && data.enabled !== isAutoPilot) {
+          isAutoPilot = data.enabled;
+          try {
+            localStorage.setItem(AUTOPILOT_KEY, String(data.enabled));
+            saveStateNow();
+          } catch {}
+          logEvent(`Auto-pilot synced from Firestore: ${data.enabled ? 'on' : 'off'}`);
+        }
+      }, (err) => {
+        console.warn('[TradingWorker] Firestore autopilot config listener:', err?.message || err);
+      });
+    } catch (err) {
+      console.warn('[TradingWorker] Setup Firestore config listener error:', err);
+    }
+  }
+
   subscribe();
   logEvent(`Started: tick every ${intervalMs / 1000}s, Firestore sync every ${FLUSH_EVERY_MS / 60_000} min, ` +
     `auto-pilot ${isAutoPilot ? 'on' : 'off'}, state file ${STATE_FILE}`);
@@ -477,6 +512,8 @@ export function stopTradingWorker(): void {
   intervalTimer = flushTimer = fullReconcileTimer = null;
   unsubscribe?.();
   unsubscribe = null;
+  configUnsubscribe?.();
+  configUnsubscribe = null;
   isWorkerRunning = false;
   saveStateNow();
   logEvent('Stopped');
@@ -495,8 +532,26 @@ export async function shutdownTradingWorker(timeoutMs = 8000): Promise<void> {
 
 export function setWorkerAutoPilot(enabled: boolean): void {
   isAutoPilot = enabled;
-  try { localStorage.setItem(AUTOPILOT_KEY, String(enabled)); } catch {}
+  try {
+    localStorage.setItem(AUTOPILOT_KEY, String(enabled));
+    saveStateNow();
+  } catch {}
   logEvent(`Auto-pilot ${enabled ? 'on' : 'off'}`);
+
+  if (FIRESTORE_WRITES_ENABLED) {
+    try {
+      const configRef = doc(db, 'crypto_automated_config', 'autopilot');
+      setDoc(configRef, {
+        enabled,
+        updatedAt: Date.now(),
+        updatedBy: 'server',
+      }, { merge: true }).catch((err) => {
+        console.warn('[TradingWorker] Failed to write autopilot config to Firestore:', err);
+      });
+    } catch (err) {
+      console.warn('[TradingWorker] Failed to setup Firestore autopilot setDoc:', err);
+    }
+  }
 }
 
 export function getInstanceId(): string {

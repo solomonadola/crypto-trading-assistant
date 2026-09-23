@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
-import { netPnlUSD, outcome, netReturnPct, safeRatio, formatRatio, isCounted } from '../services/metrics';
+import { netPnlUSD, outcome, netReturnPct, safeRatio, formatRatio, isCounted, isClosed } from '../services/metrics';
 import { 
   History, 
   Search, 
@@ -24,10 +24,12 @@ import {
   Target,
   Sparkles,
   Layers,
-  HelpCircle
+  HelpCircle,
+  Database,
+  X
 } from 'lucide-react';
 import { AutomatedTradeRecord } from '../types/automatedFeed';
-import { loadCompletedTrades, subscribeToAutomatedTrades } from '../services/automatedFeedService';
+import { loadCompletedTrades, subscribeToAutomatedTrades, forceResyncTrades } from '../services/automatedFeedService';
 import { exportTradesToCSV, exportTradesToJSON } from '../services/bankrollService';
 import { formatCashUSD } from '../services/orderFlowService';
 
@@ -161,6 +163,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
   const [reasonFilter, setReasonFilter] = useState<string>('ALL');
   const [sortOption, setSortOption] = useState<SortOption>('NEWEST');
   const [expandedTradeId, setExpandedTradeId] = useState<string | null>(null);
+  const [syncBanner, setSyncBanner] = useState<{ type: 'success' | 'info' | 'error'; text: string } | null>(null);
 
   // Fetch completed trades from the trade records service
   const fetchHistoricalData = useCallback(async (isUserRefresh: boolean = false) => {
@@ -178,13 +181,63 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
     }
   }, []);
 
+  // Force re-synchronize from Firebase Firestore or trading server
+  const handleForceSync = useCallback(async (directFirestore: boolean = false) => {
+    setIsRefreshing(true);
+    try {
+      const res = await forceResyncTrades(directFirestore);
+      const closed = await loadCompletedTrades(true);
+      setCompletedTrades(closed.filter(isCounted));
+      if (res.success) {
+        const sourceName = res.source === 'firestore' ? 'Firebase Firestore' : '24/7 Cloud Trading Server';
+        setSyncBanner({
+          type: 'success',
+          text: `Successfully synced ${res.closedCount} completed trades (${res.count} total records) directly from ${sourceName}!`,
+        });
+      } else {
+        setSyncBanner({
+          type: 'error',
+          text: `Sync error: ${res.error || 'Failed to sync trades'}. Fallback data active.`,
+        });
+      }
+    } catch (err: any) {
+      setSyncBanner({
+        type: 'error',
+        text: `Sync failed: ${err?.message || String(err)}`,
+      });
+    } finally {
+      setIsRefreshing(false);
+      setTimeout(() => {
+        setSyncBanner((curr) => curr?.type === 'success' ? null : curr);
+      }, 7000);
+    }
+  }, []);
+
+  // Hard reset local browser cache (especially for Edge or stale iframes) and pull fresh from Firebase
+  const handleClearCacheAndSync = useCallback(async () => {
+    try {
+      const keysToClear = [
+        'crypto_automated_trades_local_fallback',
+        'crypto_automated_trades_pending_writes',
+        'crypto_automated_trades_sync_cursor',
+        'crypto_automated_trades_full_sync_at',
+        'crypto_automated_trades_sync_version',
+        'firebase_quota_blocked_until',
+      ];
+      for (const k of keysToClear) {
+        try { localStorage.removeItem(k); } catch {}
+      }
+    } catch {}
+    await handleForceSync(true);
+  }, [handleForceSync]);
+
   // Initial load on mount
   useEffect(() => {
     fetchHistoricalData(false);
 
     // Also subscribe to real-time updates from trade records service
     const unsubscribe = subscribeToAutomatedTrades((allTrades) => {
-      const closed = allTrades.filter((t) => t.status !== 'OPEN' && isCounted(t));
+      const closed = allTrades.filter((t) => isClosed(t) && isCounted(t));
       setCompletedTrades(closed);
     });
 
@@ -337,11 +390,22 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
 
           <div className="flex items-center gap-2">
             <button
+              id="history-force-firebase-sync-btn"
+              onClick={() => handleForceSync(true)}
+              disabled={isRefreshing}
+              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 transition-colors disabled:opacity-50"
+              title="Bypass all browser caches and pull latest records directly from Firebase Firestore"
+            >
+              <Database className="w-3.5 h-3.5 text-amber-400" />
+              <span>Force Firebase Sync</span>
+            </button>
+
+            <button
               id="history-refresh-btn"
-              onClick={() => fetchHistoricalData(true)}
+              onClick={() => handleForceSync(false)}
               disabled={isRefreshing}
               className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-lg bg-stone-800 hover:bg-stone-700 text-stone-200 border border-stone-700 transition-colors disabled:opacity-50"
-              title="Re-query latest completed trades from Firestore / LocalStorage trade record service"
+              title="Re-query latest completed trades from Cloud Server / Firestore"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin text-amber-400' : 'text-stone-400'}`} />
               <span>{isRefreshing ? 'Syncing...' : 'Refresh Records'}</span>
@@ -370,6 +434,37 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
             </button>
           </div>
         </div>
+
+        {/* Sync Status Banner */}
+        {syncBanner && (
+          <div
+            className={`mt-4 p-3 rounded-xl border text-xs font-medium flex items-center justify-between gap-2 animate-fadeIn ${
+              syncBanner.type === 'success'
+                ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+                : syncBanner.type === 'error'
+                ? 'bg-rose-500/10 border-rose-500/30 text-rose-300'
+                : 'bg-amber-500/10 border-amber-500/30 text-amber-300'
+            }`}
+          >
+            <div className="flex items-center gap-2">
+              {syncBanner.type === 'success' ? (
+                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+              ) : syncBanner.type === 'error' ? (
+                <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+              ) : (
+                <Database className="w-4 h-4 text-amber-400 shrink-0" />
+              )}
+              <span>{syncBanner.text}</span>
+            </div>
+            <button
+              onClick={() => setSyncBanner(null)}
+              className="text-stone-400 hover:text-stone-200 p-0.5"
+              aria-label="Dismiss banner"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
 
         {/* Aggregate KPI Summary Grid */}
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mt-6 pt-5 border-t border-stone-800/80">
@@ -563,23 +658,45 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
           </div>
 
           {completedTrades.length === 0 ? (
-            <div className="flex items-center justify-center gap-3 pt-2">
-              {onSwitchToScanner && (
+            <div className="space-y-3 pt-2">
+              <div className="flex flex-wrap items-center justify-center gap-3">
                 <button
-                  onClick={onSwitchToScanner}
-                  className="px-4 py-2 text-xs font-bold rounded-lg bg-amber-500 hover:bg-amber-400 text-stone-950 transition-colors"
+                  id="history-empty-force-firebase-btn"
+                  onClick={() => handleForceSync(true)}
+                  disabled={isRefreshing}
+                  className="px-4 py-2.5 text-xs font-bold rounded-lg bg-amber-500 hover:bg-amber-400 text-stone-950 transition-colors inline-flex items-center gap-2 shadow-sm disabled:opacity-50"
+                  title="Query Firebase Firestore database directly and bypass local cache"
                 >
-                  Go to Market Scanner
+                  <Database className="w-4 h-4" />
+                  <span>{isRefreshing ? 'Syncing Firebase...' : 'Force Sync from Firebase'}</span>
                 </button>
-              )}
-              {onSwitchToBankroll && (
+                {onSwitchToScanner && (
+                  <button
+                    onClick={onSwitchToScanner}
+                    className="px-4 py-2.5 text-xs font-semibold rounded-lg bg-stone-800 hover:bg-stone-700 text-stone-200 border border-stone-700 transition-colors"
+                  >
+                    Go to Market Scanner
+                  </button>
+                )}
+                {onSwitchToBankroll && (
+                  <button
+                    onClick={onSwitchToBankroll}
+                    className="px-4 py-2.5 text-xs font-semibold rounded-lg bg-stone-800 hover:bg-stone-700 text-stone-200 border border-stone-700 transition-colors"
+                  >
+                    View Active Trades
+                  </button>
+                )}
+              </div>
+              <div>
                 <button
-                  onClick={onSwitchToBankroll}
-                  className="px-4 py-2 text-xs font-semibold rounded-lg bg-stone-800 hover:bg-stone-700 text-stone-200 border border-stone-700 transition-colors"
+                  onClick={handleClearCacheAndSync}
+                  disabled={isRefreshing}
+                  className="text-[11px] text-amber-400/80 hover:text-amber-300 underline transition-colors"
+                  title="Wipes local storage keys and pulls fresh copy directly from Firebase Firestore"
                 >
-                  View Active Trades
+                  Edge or Browser stuck? Clear local cache &amp; hard resync
                 </button>
-              )}
+              </div>
             </div>
           ) : (
             <button

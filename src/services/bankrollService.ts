@@ -245,8 +245,12 @@ export function calculateBankrollState(
   const baseTranche = config.trancheSizeUSD || 10.00;
   const calculatedCompoundedTranche = +(totalPortfolioValueUSD / totalSlots).toFixed(2);
   const effectiveTrancheSize = isCompounding
-    ? +Math.max(5.00, calculatedCompoundedTranche).toFixed(2)
+    ? +Math.max(1.00, calculatedCompoundedTranche).toFixed(2)
     : baseTranche;
+
+  // Minimum required balance to enter a trade: 7% of total portfolio value
+  // Allows taking trades even if remaining balance is below the standard 10% slot, as long as it's at least 7%.
+  const minRequiredCash = Math.max(1.00, +(totalPortfolioValueUSD * 0.07).toFixed(2));
 
   // 6. Net Profit and Percentage (Factoring in all trading fees)
   const netProfitUSD = +(totalPortfolioValueUSD - initialBudget).toFixed(2);
@@ -254,8 +258,15 @@ export function calculateBankrollState(
 
   // 7. Available Tranche Slots (strictly capped by max 10 slots and available cash)
   const remainingSlots = Math.max(0, totalSlots - activeTradesCount);
-  const cashSlots = Math.floor(liquidCashUSD / effectiveTrancheSize);
+  const fullCashSlots = Math.floor(liquidCashUSD / effectiveTrancheSize);
+  const remainderCash = +(liquidCashUSD - fullCashSlots * effectiveTrancheSize).toFixed(2);
+  const cashSlots = fullCashSlots + (remainderCash >= minRequiredCash ? 1 : 0);
   const availableSlots = Math.max(0, Math.min(remainingSlots, cashSlots));
+
+  // Next tranche size: if remaining cash is less than full 10% tranche but >= 7% minimum, deploy the remaining balance
+  const nextTrancheSize = (liquidCashUSD < effectiveTrancheSize && liquidCashUSD >= minRequiredCash)
+    ? +liquidCashUSD.toFixed(2)
+    : effectiveTrancheSize;
 
   // 8. Health State Classification
   let healthState: 'THRIVING' | 'HEALTHY' | 'GUARDED' | 'DRAWDOWN' = 'HEALTHY';
@@ -269,13 +280,13 @@ export function calculateBankrollState(
     healthState = 'DRAWDOWN';
   }
 
-  // 9. Can Open New Trade Gate - STRICT LIMITS:
+  // 9. Can Open New Trade Gate - FLEXIBLE DOWN TO 7%:
   // Must NOT exceed MAX_CONCURRENT_TRADES (10)
-  // Must NOT exceed available liquid cash (liquidCashUSD >= effectiveTrancheSize)
-  // Must NOT exceed total portfolio balance (deployedCapitalUSD + effectiveTrancheSize <= totalPortfolioValueUSD)
+  // Must NOT be below 7% of total portfolio value (liquidCashUSD >= minRequiredCash)
+  // Must NOT exceed total portfolio balance (deployedCapitalUSD + nextTrancheSize <= totalPortfolioValueUSD)
   const hasSlotAvailable = activeTradesCount < totalSlots && availableSlots > 0;
-  const hasSufficientCash = liquidCashUSD >= effectiveTrancheSize;
-  const withinBalanceLimit = (deployedCapitalUSD + effectiveTrancheSize) <= (totalPortfolioValueUSD + 0.05);
+  const hasSufficientCash = liquidCashUSD >= minRequiredCash;
+  const withinBalanceLimit = (deployedCapitalUSD + nextTrancheSize) <= (totalPortfolioValueUSD + 0.05);
 
   const canOpenNewTrade = hasSlotAvailable && hasSufficientCash && withinBalanceLimit;
 
@@ -284,7 +295,7 @@ export function calculateBankrollState(
     if (activeTradesCount >= totalSlots) {
       blockReason = `Maximum 10 concurrent active trades reached (${activeTradesCount}/10 slots filled). Waiting for a position to exit.`;
     } else if (!hasSufficientCash) {
-      blockReason = `Available cash ($${liquidCashUSD.toFixed(2)}) is below required compounding tranche ($${effectiveTrancheSize.toFixed(2)} = Capital / 10).`;
+      blockReason = `Remaining balance ($${liquidCashUSD.toFixed(2)}) is below the 7% minimum ($${minRequiredCash.toFixed(2)} = 7% of $${totalPortfolioValueUSD.toFixed(2)}).`;
     } else if (!withinBalanceLimit) {
       blockReason = `Trade would exceed total portfolio balance ($${totalPortfolioValueUSD.toFixed(2)}). Risk guard active.`;
     } else {
@@ -319,7 +330,7 @@ export function calculateBankrollState(
 
   return {
     initialBudgetUSD: initialBudget,
-    trancheSizeUSD: effectiveTrancheSize,
+    trancheSizeUSD: availableSlots > 0 ? nextTrancheSize : effectiveTrancheSize,
     isCompounding,
     totalSlots,
     activeTradesCount,

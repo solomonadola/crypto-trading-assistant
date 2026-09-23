@@ -17,6 +17,7 @@ import {
 import { isFirebaseInitialized, testFirestoreConnection } from '../lib/firebase';
 import firebaseConfig from '../../firebase-applet-config.json';
 import { AutomatedTradeRecord } from '../types/automatedFeed';
+import { forceResyncTrades } from '../services/automatedFeedService';
 
 interface FirebaseStatusModalProps {
   isOpen: boolean;
@@ -36,6 +37,8 @@ export const FirebaseStatusModal: React.FC<FirebaseStatusModalProps> = ({
     error?: string;
   } | null>(null);
   const [copiedRules, setCopiedRules] = useState(false);
+  const [isForceSyncing, setIsForceSyncing] = useState(false);
+  const [forceSyncResult, setForceSyncResult] = useState<{ success: boolean; message: string } | null>(null);
 
   useEffect(() => {
     if (isOpen) {
@@ -52,6 +55,32 @@ export const FirebaseStatusModal: React.FC<FirebaseStatusModalProps> = ({
       setConnectionResult({ success: false, error: e?.message || 'Connection test failed' });
     } finally {
       setTesting(false);
+    }
+  };
+
+  const handleForceResync = async () => {
+    setIsForceSyncing(true);
+    setForceSyncResult(null);
+    try {
+      const res = await forceResyncTrades(true);
+      if (res.success) {
+        setForceSyncResult({
+          success: true,
+          message: `Successfully reloaded ${res.count} records (${res.closedCount} completed) directly from Firestore!`
+        });
+      } else {
+        setForceSyncResult({
+          success: false,
+          message: res.error || 'Failed to force sync from Firestore.'
+        });
+      }
+    } catch (err: any) {
+      setForceSyncResult({
+        success: false,
+        message: err?.message || 'Force sync error'
+      });
+    } finally {
+      setIsForceSyncing(false);
     }
   };
 
@@ -227,6 +256,44 @@ service cloud.firestore {
   }
 }`}
           </pre>
+        </div>
+
+        {/* Force Direct Firestore Resync Section */}
+        <div className="mt-5 p-3.5 rounded-xl bg-stone-950/80 border border-stone-800 space-y-3">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <h4 className="text-xs font-semibold text-stone-200 flex items-center gap-1.5">
+                <Database className="w-4 h-4 text-amber-400" />
+                <span>Force Direct Firestore Resync</span>
+              </h4>
+              <p className="text-[11px] text-stone-400 mt-0.5">
+                Bypasses local storage and browser caches to download the latest collection state directly from Firebase.
+              </p>
+            </div>
+            <button
+              onClick={handleForceResync}
+              disabled={isForceSyncing}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-lg bg-amber-500 hover:bg-amber-400 text-stone-950 transition-colors disabled:opacity-50 shrink-0 self-start sm:self-auto"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isForceSyncing ? 'animate-spin' : ''}`} />
+              <span>{isForceSyncing ? 'Syncing...' : 'Force Sync Now'}</span>
+            </button>
+          </div>
+
+          {forceSyncResult && (
+            <div className={`p-2.5 rounded-lg text-xs font-medium flex items-center gap-2 ${
+              forceSyncResult.success
+                ? 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-300'
+                : 'bg-rose-500/10 border border-rose-500/30 text-rose-300'
+            }`}>
+              {forceSyncResult.success ? (
+                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+              ) : (
+                <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+              )}
+              <span>{forceSyncResult.message}</span>
+            </div>
+          )}
         </div>
 
         {/* Modal Footer */}

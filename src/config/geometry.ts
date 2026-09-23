@@ -103,7 +103,7 @@ export const GEOMETRY_CONFIG: GeometryConfig = {
   minStopPct: 1.5,
   maxStopPct: 15.0,
   breakevenFloorRMultiple: 0.1,
-  useRiskBasedSizing: true,
+  useRiskBasedSizing: false,
   riskPerTradePct: 0.4,
   maxGapHarvestMultiple: 3.0,
 };

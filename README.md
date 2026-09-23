@@ -279,10 +279,6 @@ possible:
   `updatedAt`). A reload within those 6 hours reads nothing up front.
 - Anything that edits trades outside the app must set `updatedAt`, or copies
   only see the change at their next full read.
-- **Once a minute each page counts the trades in Firestore** (1 read per
-  1,000 trades) and re-reads everything if the count differs from what it
-  holds. The changes-only listener cannot see deletions; this catches them,
-  and anything else missed, within a minute.
 
 Expected use at about 70 trades a day, with the 24/7 server running (browsers
 then use no Firestore at all; the server is the only reader and writer):

@@ -58,7 +58,7 @@ const BUNDLE = '.server-e2e.mjs';
 await esbuild.build({
   entryPoints: ['server.ts'], outfile: BUNDLE,
   bundle: true, format: 'esm', platform: 'node', target: 'node22', logLevel: 'error',
-  external: ['express', 'dotenv'],
+  external: ['express', 'dotenv', 'vite'],   // server.ts imports vite lazily for dev mode
   plugins: [{
     name: 'fake-firebase',
     setup(b) {
@@ -83,7 +83,9 @@ const readDb = () => (existsSync(DB) ? JSON.parse(readFileSync(DB, 'utf8')) : {}
 
 function startServer() {
   const child = spawn(process.execPath, [BUNDLE], {
-    env: { ...process.env, PORT: String(PORT), FAKE_DB_FILE: DB, WORKER_STATE_FILE: STATE, WORKER_AUTOPILOT: 'off' },
+    // TRADING_WORKER=on: the worker only trades from a deployed server
+    // (NODE_ENV=production) unless a run asks for it, as this test does.
+    env: { ...process.env, PORT: String(PORT), FAKE_DB_FILE: DB, WORKER_STATE_FILE: STATE, WORKER_AUTOPILOT: 'off', TRADING_WORKER: 'on' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let log = '';
