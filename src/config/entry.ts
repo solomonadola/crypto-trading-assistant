@@ -57,3 +57,15 @@ export const ENTRY_CONFIG = {
    */
   requireReclaim: false,
 };
+
+/**
+ * Whether the level gates are in force at all.
+ *
+ * It matters because a coin whose candles could not be fetched has nothing to
+ * measure, and an unmeasured gate must not be read as a pass: that is how the
+ * filter quietly stopped applying to 74 of 80 coins (STUDY_A_RESULTS.md
+ * addendum 5). With the gates on, "could not measure" means "do not trade".
+ * With them off - ENTRY_GATES=off, or useRealCandles off, where nothing can
+ * ever be measured - entries go through as they did before.
+ */
+export const LEVEL_GATES_ACTIVE = GATES_ON && ENTRY_CONFIG.useRealCandles;

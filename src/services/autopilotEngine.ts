@@ -9,6 +9,7 @@ import {
   COIN_REENTRY_COOLDOWN_MS,
 } from '../types/entryScanner';
 import { AUTOPILOT_CONFIG } from '../config/autopilot';
+import { LEVEL_GATES_ACTIVE } from '../config/entry';
 import {
   AutoPilotPacingInfo,
   evaluateBtcMacroRegime,
@@ -23,6 +24,28 @@ import {
  * Moved verbatim from App.tsx; only the snapshot/deploy-in-flight guards stay
  * with each caller, because they belong to the caller's own loop.
  */
+
+/**
+ * Why the level gates refuse this signal, or null if they allow it.
+ *
+ * Two refusals, not one. The gates were measured and failed - no entry under
+ * resistance, in a 4h downtrend, or away from a support that has held, worth
+ * about 54 bp a trade out of sample. Or they could not be measured at all,
+ * because this coin's candles did not arrive; the scanner then marks the gate
+ * `measured: false`, and with the gates on that is a refusal too. Reading an
+ * unmeasured gate as a pass is what let ungated entries through whenever
+ * Binance dropped a candle request, and ungated entries measure about -30 bp.
+ *
+ * Shared so the auto-pilot and a manual deploy cannot drift apart.
+ */
+export function levelGateBlockReason(signal: Pick<EntrySignalResult, 'levelGate'>): string | null {
+  const gate = signal.levelGate;
+  if (gate && gate.measured && !gate.passed) return `Not at a level: ${gate.reason}`;
+  if (LEVEL_GATES_ACTIVE && (!gate || !gate.measured)) {
+    return 'The levels for this coin could not be measured (no candle data), so the entry is not taken.';
+  }
+  return null;
+}
 
 /** Regime and pacing state: why auto-pilot may or may not deploy right now. */
 export function computePacing(
@@ -97,6 +120,11 @@ export function selectAutoPilotCandidate(i: AutoPilotInputs): AutoPilotDecision 
   const openMajorCount = openTrades.filter((t) => MAJOR_COINS.has(t.symbol.toUpperCase())).length;
   const openMemeCount = openTrades.filter((t) => MEME_COINS.has(t.symbol.toUpperCase())).length;
 
+  // Counted so a tick that deployed nothing can say why: "no qualifying
+  // signal" and "no candle data for any coin" look identical in a log and
+  // mean very different things.
+  let unmeasured = 0;
+
   const eligibleCandidates = signals
     .filter((s) => !openTradeSymbols.has(s.symbol.toUpperCase()))
     .filter((s) => !cooldownSymbols.has(s.symbol.toUpperCase()))
@@ -116,9 +144,13 @@ export function selectAutoPilotCandidate(i: AutoPilotInputs): AutoPilotDecision 
       if (!AUTOPILOT_CONFIG.allowShorts && s.direction === 'SHORT') return false;
 
       // Real-level gates (config/entry.ts): no entry under resistance, in a 4h
-      // downtrend, or far from a support that has held. Measured to be worth
-      // about 54 bp a trade out of sample; see the note in config/entry.ts.
-      if (s.levelGate && s.levelGate.measured && !s.levelGate.passed) return false;
+      // downtrend, or far from a support that has held - and no entry in a coin
+      // whose levels could not be measured. Worth about 54 bp a trade out of
+      // sample; see the note in config/entry.ts.
+      if (levelGateBlockReason(s)) {
+        if (!s.levelGate || !s.levelGate.measured) unmeasured++;
+        return false;
+      }
 
       // Multi-timeframe confluence guard: reject disqualified or weak C-grade setups.
       const confluence = s.timeframeConfluence?.confluenceRating;
@@ -158,9 +190,13 @@ export function selectAutoPilotCandidate(i: AutoPilotInputs): AutoPilotDecision 
       return b.score - a.score;
     });
 
-  return eligibleCandidates[0]
-    ? { signal: eligibleCandidates[0] }
-    : { signal: null, reason: 'No qualifying signal' };
+  if (eligibleCandidates[0]) return { signal: eligibleCandidates[0] };
+  return {
+    signal: null,
+    reason: unmeasured > 0
+      ? `No qualifying signal (${unmeasured} of ${signals.length} coins had no candle data, so their levels could not be checked)`
+      : 'No qualifying signal',
+  };
 }
 
 /**
@@ -188,9 +224,8 @@ export function manualDeployBlockReason(
   if (MEME_COINS.has(sym) && open.filter((t) => MEME_COINS.has(t.symbol.toUpperCase())).length >= MAX_MEME_COIN_SLOTS) {
     return `Meme coins are capped at ${MAX_MEME_COIN_SLOTS} open positions.`;
   }
-  if (signal.levelGate && signal.levelGate.measured && !signal.levelGate.passed) {
-    return `Not at a level: ${signal.levelGate.reason}`;
-  }
+  const levelBlock = levelGateBlockReason(signal);
+  if (levelBlock) return levelBlock;
   if (!bankroll.canOpenNewTrade) return bankroll.blockReason || 'Bankroll slots are full.';
   const minRequiredCash = Math.max(1.00, +(bankroll.totalPortfolioValueUSD * 0.07).toFixed(2));
   if (bankroll.liquidCashUSD < minRequiredCash) {

@@ -246,12 +246,14 @@ try {
       tried.push(r);
       if (r.status === 200) break;
     }
-    const refused = tried.filter((r) => r.status === 400 && /Not at a level/.test(r.body?.error || ''));
+    const refused = tried.filter((r) => r.status === 400 &&
+      /Not at a level|could not be measured/.test(r.body?.error || ''));
     check('refusals explain the level test', refused.length > 0 || tried.some((r) => r.status === 200),
       tried.map((r) => r.body?.error).join(' | ').slice(0, 120));
     if (refused.length) {
-      check('the reason names support or resistance',
-        /support|Resistance|downtrend/.test(refused[0].body.error), refused[0].body.error.slice(0, 80));
+      check('the reason names support, resistance or missing data',
+        /support|Resistance|downtrend|could not be measured/.test(refused[0].body.error),
+        refused[0].body.error.slice(0, 80));
     }
   }
 } finally {
