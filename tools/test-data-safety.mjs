@@ -83,7 +83,7 @@ console.log('\n2. Writes enabled (default): a deploy is written to Firestore');
   globalThis.__fsCalls = []; store.clear();
   const m = await load(false);
   const ok = await m.executeSimulatedTrade(trade('w1', 'SOL', 1));
-  check('deploy accepted', ok === true);
+  check('deploy accepted', ok.ok === true, ok.reason);
   check('setDoc called once', globalThis.__fsCalls.filter((c) => c.startsWith('setDoc')).length === 1, JSON.stringify(globalThis.__fsCalls));
   await m.updateAutomatedTrade({ ...trade('w1', 'SOL', 1), status: 'STOPPED' }, true);
   check('close written with updateDoc', globalThis.__fsCalls.some((c) => c === 'updateDoc:w1'));
@@ -96,7 +96,7 @@ console.log('\n3. VITE_FIRESTORE_WRITES=off: nothing is written, local storage s
   const ok = await m.executeSimulatedTrade(trade('r1', 'ETH', 2));
   await m.updateAutomatedTrade({ ...trade('r1', 'ETH', 2), status: 'STOPPED' }, true);
   await m.resetAutomatedTrades();
-  check('deploy still works locally', ok === true);
+  check('deploy still works locally', ok.ok === true, ok.reason);
   check('zero Firestore writes (deploy, close, reset)', globalThis.__fsCalls.length === 0, JSON.stringify(globalThis.__fsCalls));
 }
 {
@@ -134,6 +134,39 @@ console.log('\n4. Data health check flags impossible records, and only those');
   const r = checkDataHealth([tao, { ...tao, id: 'tao2', excludedFromStats: true }, forced, normal]);
   check('excluded records not counted as outstanding', r.criticalCounted === 1 && r.excludedCount === 1,
         `critical counted ${r.criticalCounted}, excluded ${r.excludedCount}`);
+}
+
+console.log('\n5. Excluding a record from statistics never frees its slot');
+{
+  // The bug: the screen counted open positions with the excluded ones removed
+  // and the guard that writes the trade counted all of them, so the app showed
+  // "6 active" and then refused a deploy with "all 10 slots occupied".
+  const out = await esbuild.build({
+    stdin: {
+      contents: "export { visibleTrades, isCounted } from './src/services/metrics';" +
+                "export { calculateBankrollState } from './src/services/bankrollService';",
+      resolveDir: process.cwd(), loader: 'ts',
+    },
+    bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'error',
+  });
+  const { visibleTrades, calculateBankrollState } = await import('data:text/javascript;base64,' + Buffer.from(out.outputFiles[0].text).toString('base64'));
+
+  const open = ['AAA','BBB','CCC','DDD','EEE','FFF','GGG','HHH','III','JJJ'].map((sym, i) => trade(`o${i}`, sym, i));
+  for (const t of open.slice(0, 4)) t.excludedFromStats = true;   // four marked bad in Data Health
+  const closedBad = { ...trade('cb', 'ZZZ', 40), status: 'STOPPED', excludedFromStats: true, pnlUSD: 99 };
+  const all = [...open, closedBad];
+
+  const shown = visibleTrades(all);
+  check('every open position is shown', shown.filter((t) => t.status === 'OPEN').length === 10,
+        `${shown.filter((t) => t.status === 'OPEN').length}/10`);
+  check('an excluded closed record stays out', !shown.some((t) => t.id === 'cb'));
+
+  const b = calculateBankrollState(shown);
+  check('the slot count matches what is shown', b.activeTradesCount === 10, String(b.activeTradesCount));
+  check('a new trade is refused', b.canOpenNewTrade === false);
+  check('the reason names the real number', /10\/10/.test(b.blockReason || ''), b.blockReason);
+  check('the excluded closed record is out of the P&L', Math.abs(b.realizedProfitUSD) < 90,
+        String(b.realizedProfitUSD));
 }
 
 console.log(`\n${fails === 0 ? 'ALL DATA-SAFETY CHECKS PASS' : fails + ' CHECK(S) FAILED'}`);

@@ -62,6 +62,22 @@ export function isCounted(t: AutomatedTradeRecord): boolean {
   return !t.excludedFromStats;
 }
 
+/**
+ * The list every view and every slot check works from: every open position,
+ * plus the closed records that count.
+ *
+ * Excluding a trade from statistics does not close it. `excludedFromStats`
+ * means "do not trust this record's numbers"; the position is still open, its
+ * capital is still deployed and it still holds one of the ten slots. Dropping
+ * it from the list shown is what made the app say "6 active" and then refuse a
+ * deploy with "all 10 slots occupied": the screen and the pre-checks used the
+ * counted list, while the guard that actually writes the trade counted every
+ * open position.
+ */
+export function visibleTrades(trades: AutomatedTradeRecord[]): AutomatedTradeRecord[] {
+  return trades.filter((t) => t.status === 'OPEN' || isCounted(t));
+}
+
 export function isClosed(t: AutomatedTradeRecord): boolean {
   if (!t) return false;
   if (t.status && t.status !== 'OPEN') return true;

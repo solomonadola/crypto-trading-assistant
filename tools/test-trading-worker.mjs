@@ -285,11 +285,28 @@ console.log('\n7. Never more than 10 open: the database is checked, not just thi
   globalThis.__fsDocs = ten;
   localStorage.setItem('crypto_automated_trades_local_fallback', JSON.stringify(ten.slice(0, 2)));
   const ok = await w.executeSimulatedTrade(trade('new', 'NEWX', { openedAtTimestamp: NOW }));
-  check('11th position refused', ok === false);
+  check('11th position refused', ok.ok === false);
+  // The refusal must say the database holds them, not "all 10 slots occupied":
+  // this copy can see 2. A wrong reason sends the user hunting for positions
+  // that are not on their screen.
+  check('the refusal names the database', /database already holds 10/.test(ok.reason || ''), ok.reason);
   check('nothing written', !writes().some((c) => c.id === 'new'));
   globalThis.__fsDocs = ten.slice(0, 3);
   const dup = await w.executeSimulatedTrade(trade('dup', 'CX', { openedAtTimestamp: NOW }));
-  check('coin already open in the database refused', dup === false);
+  check('coin already open in the database refused', dup.ok === false);
+  check('the duplicate refusal names the coin', /CX is already open/.test(dup.reason || ''), dup.reason);
+
+  // A document left with status OPEN but an exit reason and a close price is a
+  // closed trade: every view in the app reads it that way (fromDoc). Counted
+  // raw here, such records block deploys over positions nobody can see.
+  reset();
+  const halfClosed = ten.map((t, i) => i < 2
+    ? { ...t, exitReason: 'CLOSED_MANUAL', exitPrice: 100, closedAtTimestamp: NOW - M }
+    : t);
+  globalThis.__fsDocs = halfClosed;
+  localStorage.setItem('crypto_automated_trades_local_fallback', JSON.stringify(halfClosed.slice(0, 2)));
+  const eight = await w.executeSimulatedTrade(trade('new2', 'NEW2X', { openedAtTimestamp: NOW }));
+  check('half-closed records do not hold a slot', eight.ok === true, eight.reason);
 }
 
 console.log('\n8. A failed save is queued and retried, not left in one browser');
@@ -300,7 +317,7 @@ console.log('\n8. A failed save is queued and retried, not left in one browser')
   await settle();
   globalThis.__fsWriteFail = 'unavailable';
   const ok = await w.executeSimulatedTrade(trade('q1', 'QQQ', { openedAtTimestamp: NOW - 3600_000 }));
-  check('trade opened locally', ok === true);
+  check('trade opened locally', ok.ok === true);
   check('queued for retry', w.getPendingWriteCount() === 1);
   deliver([]);   // database still without it: kept because it is queued
   await settle();
@@ -432,6 +449,13 @@ console.log('\n13. Server is the source of truth: no Firebase reads while it run
   let refused = null;
   try { await w.closeTradeById('a'); } catch (e) { refused = e.message; }
   check('closing it again is refused', /already closed/.test(refused || ''), refused);
+  // An open position cannot be excluded: exclusion hides a record from the
+  // statistics, and a hidden position would still hold its slot - which is
+  // what made the app show "6 active" and then refuse a deploy at 10.
+  let openExcl = null;
+  try { await w.setTradeExcluded('b', true); } catch (e) { openExcl = e.message; }
+  check('an open position cannot be excluded', /still open/.test(openExcl || ''), openExcl);
+  await w.closeTradeById('b', 'manual');
   await w.setTradeExcluded('b', true);
   check('exclusion recorded', w.loadLocalTrades().find((t) => t.id === 'b')?.excludedFromStats === true);
   check('changes wait for the batch', writes().length === 0, JSON.stringify(writes().map((c) => c.id)));
@@ -450,17 +474,20 @@ console.log('\n13. Server is the source of truth: no Firebase reads while it run
   reset();
   prices = { ETH: 100 };
   candles = { ETH: [[NOW - 5 * M, 100, 100.5, 99.5, 100]] };
-  globalThis.__fsDocs = [trade('b', 'ETH', { lastEvaluatedAt: NOW - 10 * M })];
+  globalThis.__fsDocs = [
+    trade('b', 'ETH', { lastEvaluatedAt: NOW - 10 * M }),
+    trade('c', 'ADA', { status: 'COMPLETED', exitReason: 'CLOSED_MANUAL', exitPrice: 100, closedAtTimestamp: NOW - M }),
+  ];
   const w = await load(false);
   w.startTradingWorker(1e9);
   await settle();
   globalThis.__klineDelay = 80;
   const tick = w.executeTradingTick();
   await new Promise((r) => setTimeout(r, 20));
-  const excl = w.setTradeExcluded('b', true);
+  const excl = w.setTradeExcluded('c', true);
   await Promise.all([tick, excl]);
   globalThis.__klineDelay = 0;
-  check('action during a tick survives it', w.loadLocalTrades().find((t) => t.id === 'b')?.excludedFromStats === true);
+  check('action during a tick survives it', w.loadLocalTrades().find((t) => t.id === 'c')?.excludedFromStats === true);
 
   // Manual deploy uses the server's own scan and the shared limits.
   const full = Array.from({ length: 10 }, (_, i) => trade('o' + i, 'O' + i));

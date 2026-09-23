@@ -887,13 +887,33 @@ async function fetchOpenTradesFromServer(): Promise<AutomatedTradeRecord[] | nul
       new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timed out')), FIRESTORE_READ_TIMEOUT_MS)),
     ]);
     countRead('open-check', snap.size ?? snap.docs?.length ?? 1);
+    // fromDoc, like everywhere else: a document left with status OPEN but an
+    // exit reason and a close price is a closed trade. Read raw, those count
+    // as open positions here and nowhere else, so the guard refuses a deploy
+    // over positions no view in the app shows.
     const open: AutomatedTradeRecord[] = [];
-    snap.forEach((d) => open.push(d.data() as AutomatedTradeRecord));
-    return open;
+    snap.forEach((d) => open.push(fromDoc(d.data())));
+    return open.filter((t) => t.status === 'OPEN');
   } catch (err) {
     console.warn('[Bankroll Guard] Could not check open positions in the database; using this copy:', err);
     return null;
   }
+}
+
+/** Why a trade was not opened. `ok` false always carries a reason. */
+export interface ExecuteResult {
+  ok: boolean;
+  reason?: string;
+}
+
+function symbolList(trades: AutomatedTradeRecord[]): string {
+  const names = trades.map((t) => t.symbol.toUpperCase());
+  return names.length > 6 ? `${names.slice(0, 6).join(', ')} +${names.length - 6} more` : names.join(', ');
+}
+
+function blocked(trade: AutomatedTradeRecord, reason: string): ExecuteResult {
+  console.warn(`[Bankroll Guard] ${trade.symbol} not opened: ${reason}.`);
+  return { ok: false, reason: `${trade.symbol} was not opened: ${reason}.` };
 }
 
 /**
@@ -902,23 +922,26 @@ async function fetchOpenTradesFromServer(): Promise<AutomatedTradeRecord[] | nul
  * 1. Strictly enforces MAX_CONCURRENT_TRADES (10 active trades max).
  * 2. Strictly enforces balance and liquid cash limit (cannot trade more than available balance).
  * 3. Rejects duplicate open trade on the same coin symbol.
- * Returns true if executed successfully, false if blocked by limits.
+ *
+ * Every refusal says which guard refused. This used to return a bare false and
+ * write the reason to the console, so the caller announced "all 10 bankroll
+ * slots are currently occupied" whatever had actually happened - a duplicate
+ * coin, the major-coin cap, the cash floor. The message was wrong often enough
+ * to send someone looking for ten positions that were not there.
  */
-export async function executeSimulatedTrade(trade: AutomatedTradeRecord): Promise<boolean> {
+export async function executeSimulatedTrade(trade: AutomatedTradeRecord): Promise<ExecuteResult> {
   const currentTrades = await fetchAutomatedTrades(false);
   const sanitizedCurrent = sanitizeActiveTrades(currentTrades);
   const openTrades = sanitizedCurrent.filter((t) => t.status === 'OPEN');
 
   // GUARD 1: Max 10 concurrent active trades limit
   if (openTrades.length >= MAX_CONCURRENT_TRADES) {
-    console.warn(`[Bankroll Guard] Blocked execution for ${trade.symbol}: 10/10 slots currently full.`);
-    return false;
+    return blocked(trade, `all ${MAX_CONCURRENT_TRADES} slots are occupied (${openTrades.length} positions open: ${symbolList(openTrades)})`);
   }
 
   // GUARD 2: Prevent duplicate open position on the same asset
   if (openTrades.some((t) => t.symbol.toUpperCase() === trade.symbol.toUpperCase())) {
-    console.warn(`[Bankroll Guard] Blocked execution for ${trade.symbol}: Position already open.`);
-    return false;
+    return blocked(trade, `a position in ${trade.symbol} is already open (one position per coin)`);
   }
 
   // GUARD 3: Cap major coins (BTC, ETH, BNB, SOL) to max 3 slots (reserve at least 7 slots for alts)
@@ -926,8 +949,7 @@ export async function executeSimulatedTrade(trade: AutomatedTradeRecord): Promis
   if (MAJOR_COINS.has(sym)) {
     const majorCount = openTrades.filter((t) => MAJOR_COINS.has(t.symbol.toUpperCase())).length;
     if (majorCount >= MAX_MAJOR_COIN_SLOTS) {
-      console.warn(`[Bankroll Guard] Blocked execution for ${trade.symbol}: Major coins capped at ${MAX_MAJOR_COIN_SLOTS}/10 slots to preserve capital for high-beta altcoins.`);
-      return false;
+      return blocked(trade, `major coins are capped at ${MAX_MAJOR_COIN_SLOTS} open positions and ${majorCount} are open`);
     }
   }
 
@@ -938,16 +960,13 @@ export async function executeSimulatedTrade(trade: AutomatedTradeRecord): Promis
   const remoteOpen = await fetchOpenTradesFromServer();
   if (remoteOpen) {
     if (remoteOpen.length >= MAX_CONCURRENT_TRADES) {
-      console.warn(`[Bankroll Guard] Blocked ${trade.symbol}: database already has ${remoteOpen.length} open positions.`);
-      return false;
+      return blocked(trade, `the database already holds ${remoteOpen.length} open positions (${symbolList(remoteOpen)}), though this copy shows ${openTrades.length}`);
     }
     if (remoteOpen.some((t) => t.symbol.toUpperCase() === trade.symbol.toUpperCase())) {
-      console.warn(`[Bankroll Guard] Blocked ${trade.symbol}: already open in the database.`);
-      return false;
+      return blocked(trade, `${trade.symbol} is already open in the database, though not in this copy's list`);
     }
     if (MAJOR_COINS.has(sym) && remoteOpen.filter((t) => MAJOR_COINS.has(t.symbol.toUpperCase())).length >= MAX_MAJOR_COIN_SLOTS) {
-      console.warn(`[Bankroll Guard] Blocked ${trade.symbol}: major-coin slots full in the database.`);
-      return false;
+      return blocked(trade, `the database already holds ${MAX_MAJOR_COIN_SLOTS} major-coin positions`);
     }
   }
 
@@ -956,8 +975,7 @@ export async function executeSimulatedTrade(trade: AutomatedTradeRecord): Promis
   const minRequiredCash = Math.max(1.00, +(bankroll.totalPortfolioValueUSD * 0.07).toFixed(2));
 
   if (bankroll.liquidCashUSD < minRequiredCash) {
-    console.warn(`[Bankroll Guard] Blocked execution for ${trade.symbol}: Remaining balance ($${bankroll.liquidCashUSD.toFixed(2)}) is below 7% minimum ($${minRequiredCash.toFixed(2)}).`);
-    return false;
+    return blocked(trade, `the remaining balance ($${bankroll.liquidCashUSD.toFixed(2)}) is below the 7% minimum ($${minRequiredCash.toFixed(2)})`);
   }
 
   let tradeSize = trade.positionSizeUSD || bankroll.trancheSizeUSD || 10.00;
@@ -970,13 +988,11 @@ export async function executeSimulatedTrade(trade: AutomatedTradeRecord): Promis
   }
 
   if (bankroll.liquidCashUSD < tradeSize) {
-    console.warn(`[Bankroll Guard] Blocked execution for ${trade.symbol}: Insufficient liquid cash ($${bankroll.liquidCashUSD.toFixed(2)} available, $${tradeSize.toFixed(2)} required).`);
-    return false;
+    return blocked(trade, `there is $${bankroll.liquidCashUSD.toFixed(2)} of cash and the position needs $${tradeSize.toFixed(2)}`);
   }
 
   if (bankroll.deployedCapitalUSD + tradeSize > bankroll.totalPortfolioValueUSD + 0.05) {
-    console.warn(`[Bankroll Guard] Blocked execution for ${trade.symbol}: Deployed capital would exceed total portfolio balance ($${bankroll.totalPortfolioValueUSD.toFixed(2)}).`);
-    return false;
+    return blocked(trade, `deployed capital ($${bankroll.deployedCapitalUSD.toFixed(2)}) plus $${tradeSize.toFixed(2)} would exceed the account balance ($${bankroll.totalPortfolioValueUSD.toFixed(2)})`);
   }
 
   trade = { ...trade, rev: 1 };
@@ -1007,7 +1023,7 @@ export async function executeSimulatedTrade(trade: AutomatedTradeRecord): Promis
   safeSetLocalStorage(LOCAL_STORAGE_KEY, JSON.stringify(sanitized));
 
   notifySubscribers(sanitized);
-  return true;
+  return { ok: true };
 }
 
 /**

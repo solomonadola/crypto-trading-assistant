@@ -24,7 +24,7 @@ import { scanLiveMarketEntries, deploySignalToAutomatedFeed } from '../services/
 import { calculateBankrollState } from '../services/bankrollService';
 import { catchUpOpenTrades } from '../services/catchUpService';
 import { computePacing, selectAutoPilotCandidate, manualDeployBlockReason, findExcessOpenTrades } from '../services/autopilotEngine';
-import { isCounted, isClosed } from '../services/metrics';
+import { visibleTrades, isClosed } from '../services/metrics';
 import { getUsage, usageSummary, Usage } from '../services/firestoreMeter';
 import { AutomatedTradeRecord } from '../types/automatedFeed';
 
@@ -299,13 +299,15 @@ async function runTick(): Promise<TickResult> {
     // 6. Auto-pilot: the browser's decision, from the shared engine.
     let deployedSymbol: string | null = null;
     if (isAutoPilot) {
-      const counted = current.filter(isCounted);
-      const bankroll = calculateBankrollState(counted);
+      // Every open position plus the trusted closed records: an open trade
+      // excluded from statistics still holds its slot (services/metrics.ts).
+      const book = visibleTrades(current);
+      const bankroll = calculateBankrollState(book);
       const decision = selectAutoPilotCandidate({
         signals: scanLiveMarketEntries(coins, 'FUTURES_1_2D'),
-        trades: counted,
+        trades: book,
         bankroll,
-        pacingInfo: computePacing(coins, counted, true, bankroll.totalSlots),
+        pacingInfo: computePacing(coins, book, true, bankroll.totalSlots),
         now,
         lastDeployAt,
       });
@@ -409,10 +411,18 @@ export function closeTradeById(id: string, reason: 'manual' | 'time_decay' = 'ma
   });
 }
 
-/** Excludes a trade from statistics, or counts it again. */
+/**
+ * Excludes a trade from statistics, or counts it again. Only a closed record
+ * can be excluded, as in the Data Health panel: an open position holds its
+ * slot and its capital whatever is said about its numbers, so excluding it
+ * would only hide it from the screen while it still blocked new entries.
+ */
 export function setTradeExcluded(id: string, excluded: boolean) {
   return exclusive(async () => {
     const trade = findTrade(id);
+    if (excluded && trade.status === 'OPEN') {
+      throw new ActionError(`${trade.symbol} is still open. Close it first, then exclude the record.`);
+    }
     const updated = {
       ...trade,
       excludedFromStats: excluded,
@@ -431,9 +441,9 @@ export function deploySymbol(symbol: string) {
     if (!lastCoins.length) throw new ActionError('No prices yet; try again in 30 seconds');
     const signal = scanLiveMarketEntries(lastCoins, 'FUTURES_1_2D').find((s) => s.symbol.toUpperCase() === symbol.toUpperCase());
     if (!signal) throw new ActionError(`No current signal for ${symbol}`);
-    const counted = loadLocalTrades().filter(isCounted);
-    const bankroll = calculateBankrollState(counted);
-    const blocked = manualDeployBlockReason(signal, counted, bankroll);
+    const book = visibleTrades(loadLocalTrades());
+    const bankroll = calculateBankrollState(book);
+    const blocked = manualDeployBlockReason(signal, book, bankroll);
     if (blocked) throw new ActionError(blocked);
     const trade = await deploySignalToAutomatedFeed(signal, bankroll.trancheSizeUSD);
     logEvent(`Deployed $${trade.positionSizeUSD.toFixed(2)} into ${signal.symbol} by request`, 'success');

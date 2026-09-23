@@ -1,5 +1,5 @@
 import { AutomatedTradeRecord, BankrollConfig, BankrollState, BankrollSlotInfo, ZombieTradeConfig } from '../types/automatedFeed';
-import { netPnlUSD, safeRatio, closeTime, BREAKEVEN_BAND_USD } from './metrics';
+import { netPnlUSD, safeRatio, closeTime, isCounted, BREAKEVEN_BAND_USD } from './metrics';
 
 export const DEFAULT_ZOMBIE_CONFIG: ZombieTradeConfig = {
   enabled: true,
@@ -167,8 +167,15 @@ export function calculateBankrollState(
   const trancheSize = config.trancheSizeUSD || 10.00;
   const totalSlots = Math.min(MAX_CONCURRENT_TRADES, config.maxSlots || 10);
 
+  // Slots and deployed capital count EVERY open position; the money figures
+  // count only the records that are trusted (isCounted). Excluding a trade in
+  // the Data Health panel says its numbers are wrong, not that its position
+  // closed - the capital is still in it and it still holds a slot. Counting
+  // the two the same way is what let the app show 6 open and then refuse a
+  // deploy because the writer's guard saw 10.
   const openTrades = trades.filter((t) => t.status === 'OPEN');
-  const closedTrades = trades.filter((t) => t.status !== 'OPEN');
+  const closedTrades = trades.filter((t) => t.status !== 'OPEN' && isCounted(t));
+  const trustedOpen = openTrades.filter(isCounted);
   const activeTradesCount = openTrades.length;
   const closedTradesCount = closedTrades.length;
 
@@ -202,7 +209,7 @@ export function calculateBankrollState(
     return rawPnl;
   };
 
-  const partialBankedCashOnOpen = openTrades.reduce((acc, t) => acc + sanitizedRealizedBanked(t), 0);
+  const partialBankedCashOnOpen = trustedOpen.reduce((acc, t) => acc + sanitizedRealizedBanked(t), 0);
   const closedTradesPnL = closedTrades.reduce((acc, t) => acc + sanitizedClosedPnL(t), 0);
   
   // Gross Realized Harvest Gains (before Binance trading fees)
@@ -210,7 +217,7 @@ export function calculateBankrollState(
 
   // Exchange Fees Incurred (Binance 0.10% Spot Maker/Taker round-trip on every trade rotation)
   // Fees are accumulated per fill in cycleEngineService using config/costs.ts.
-  const totalFeesPaidUSD = +trades.reduce((acc, t) => {
+  const totalFeesPaidUSD = +[...trustedOpen, ...closedTrades].reduce((acc, t) => {
     const fee = Number(t.totalFeesUSD);
     return acc + (Number.isFinite(fee) && fee > 0 ? fee : 0);
   }, 0).toFixed(2);
@@ -225,7 +232,7 @@ export function calculateBankrollState(
   // cash for open trades is already counted in partialBankedCashOnOpen above.
   // Summing raw pnlUSD here would count harvested cash twice. The old clamp
   // bounded that error rather than fixing it.
-  const unrealizedPnLUSD = +openTrades.reduce((acc, t) => {
+  const unrealizedPnLUSD = +trustedOpen.reduce((acc, t) => {
     const rawPnl = Number(t.pnlUSD);
     if (!Number.isFinite(rawPnl)) return acc;
     return acc + (rawPnl - sanitizedRealizedBanked(t));
@@ -362,7 +369,8 @@ export function calculateStrategyVerification(
   customConfig?: BankrollConfig
 ): import('../types/automatedFeed').StrategyVerificationReport {
   const bankroll = calculateBankrollState(trades, customConfig);
-  const closedTrades = trades.filter((t) => t.status !== 'OPEN');
+  // Statistics: closed records that are trusted, as in calculateBankrollState.
+  const closedTrades = trades.filter((t) => t.status !== 'OPEN' && isCounted(t));
   const sampleSize = closedTrades.length;
   const targetSampleSize = 300;   // enough for a first directional read; see AUDIT.md section 4
   const sampleProgressPct = Math.min(100, Math.round((sampleSize / targetSampleSize) * 100));

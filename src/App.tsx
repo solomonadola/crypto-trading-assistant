@@ -33,7 +33,7 @@ import { closeTradeAt } from './services/cycleEngineService';
 import { StatusStrip, CatchUpStatus } from './components/StatusStrip';
 import { DataHealthPanel } from './components/DataHealthPanel';
 import { checkDataHealth } from './services/dataHealth';
-import { isCounted } from './services/metrics';
+import { visibleTrades } from './services/metrics';
 import { calculateBankrollState } from './services/bankrollService';
 import { AUTOPILOT_CONFIG } from './config/autopilot';
 import {
@@ -85,8 +85,9 @@ export default function App() {
   const [coins, setCoins] = useState<CryptoCoin[]>([]);
   // Full history, including trades excluded in the Data Health panel.
   const [allTrades, setAllTrades] = useState<AutomatedTradeRecord[]>([]);
-  // What every screen and statistic uses: excluded trades left out.
-  const trades = useMemo(() => allTrades.filter(isCounted), [allTrades]);
+  // What every screen, slot count and statistic uses: every open position,
+  // plus the closed records not excluded in the Data Health panel.
+  const trades = useMemo(() => visibleTrades(allTrades), [allTrades]);
   const dataHealth = useMemo(() => checkDataHealth(allTrades), [allTrades]);
   const [tradingMode, setTradingMode] = useState<ScannerTradingMode>('FUTURES_1_2D');
   const [activeTab, setActiveTab] = useState<ActiveTab>('scanner');

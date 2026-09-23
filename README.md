@@ -244,9 +244,15 @@ hand-computed answers.
 The **Cloud Database** tab checks every trade record and lists any that cannot be
 right (profit far larger than the price move allows, more banked than the exit
 ladder can bank, a more-than-3x price jump) or that were not produced by the
-market. A record can be **excluded from statistics**: it stays in the history
-but no longer counts toward P&L, win rate or any other figure. If any such
-record is still counted, the status strip links to it.
+market. A **closed** record can be **excluded from statistics**: it stays in
+the history but no longer counts toward P&L, win rate or any other figure. If
+any such record is still counted, the status strip links to it.
+
+An open position cannot be excluded, and excluding never frees a slot: the
+position is still open and its capital is still deployed, so it is shown and
+counted like any other. The two used to disagree - the screen dropped excluded
+positions while the guard that opens trades counted them - which showed as
+"6 active" next to a refusal saying all ten slots were full.
 
 ## Storage
 

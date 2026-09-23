@@ -18,7 +18,7 @@ const stubPlugin = {
   setup(b) {
     b.onResolve({ filter: /automatedFeedService$/ }, () => ({ path: 'feed', namespace: 'stub' }));
     b.onLoad({ filter: /.*/, namespace: 'stub' }, () => ({
-      contents: 'export async function fetchAutomatedTrades(){return []} export async function executeSimulatedTrade(){return true}',
+      contents: 'export async function fetchAutomatedTrades(){return []} export async function executeSimulatedTrade(){return {ok:true}}',
       loader: 'ts',
     }));
   },

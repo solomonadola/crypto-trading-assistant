@@ -1803,8 +1803,9 @@ export async function deploySignalToAutomatedFeed(
   };
 
   const executed = await executeSimulatedTrade(tradeRecord);
-  if (!executed) {
-    throw new Error('All 10 bankroll slots are currently occupied. Cannot open more positions.');
+  if (!executed.ok) {
+    // The guard's own reason, not a guess. See executeSimulatedTrade.
+    throw new Error(executed.reason || `${signal.symbol} was not opened: a bankroll guard refused it.`);
   }
   return tradeRecord;
 }
