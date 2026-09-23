@@ -30,7 +30,8 @@ export interface FuturesContext {
   ma7Slope?: 'RISING_SUPPORT' | 'FALLING_CEILING' | 'FLAT';
   overheadResistancePrice: number;
   distToResistancePct?: number;
-  resistanceType: 'DAILY_MA7' | '4H_21_EMA' | '24H_RANGE_HIGH' | 'NONE';
+  /** SWING_LEVEL: a real level from clustered 4h swings (marketAnalysisService). */
+  resistanceType: 'SWING_LEVEL' | 'DAILY_MA7' | '4H_21_EMA' | '24H_RANGE_HIGH' | 'NONE';
   suggestedLeverage: string; // e.g. "3x - 5x"
   liquidationBufferPct: number; // e.g. 18.5%
   isCeilingBlocked: boolean; // true if Long is blocked by overhead resistance

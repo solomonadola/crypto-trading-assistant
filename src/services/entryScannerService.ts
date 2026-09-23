@@ -156,8 +156,12 @@ export function scanLiveMarketEntries(coins: CryptoCoin[], mode: ScannerTradingM
   const rawSignals: EntrySignalResult[] = validCoins.map((coin): EntrySignalResult => {
     const price = coin.current_price;
     const change24h = coin.price_change_percentage_24h || 0;
-    const change7d = coin.price_change_percentage_7d_in_currency || (change24h * 1.5);
-    const change30d = coin.price_change_percentage_30d_in_currency || (change7d * 2.2);
+    // Real candle-derived values when they could be fetched (marketAnalysisService);
+    // otherwise the old estimates from the 24h snapshot, which is all the
+    // ticker gives. Every `a ? ... : ...` below is "measured, or approximated".
+    const a = coin.analysis;
+    const change7d = a ? a.change7dPct : (coin.price_change_percentage_7d_in_currency || (change24h * 1.5));
+    const change30d = a ? a.change30dPct : (coin.price_change_percentage_30d_in_currency || (change7d * 2.2));
     const volume = coin.total_volume || 100000000;
     const mcap = coin.market_cap || 1000000000;
     const isBtc = coin.symbol.toUpperCase() === 'BTC';
@@ -174,7 +178,7 @@ export function scanLiveMarketEntries(coins: CryptoCoin[], mode: ScannerTradingM
     const lowerWickAbsorptionPct = +(((price - low24h) / (low24h || 1)) * 100).toFixed(2);
     const hasAbsorptionWick = lowerWickAbsorptionPct >= 0.35 && rangeLocationPct >= 25;
 
-    const micro = coin.micro || {
+    const micro = a ? a.micro : coin.micro || {
       currentHourGreen: hasAbsorptionWick || (change24h > 0.4),
       hourlyChangePct: +(change24h / 24).toFixed(2),
       consecutiveRedHours: (!hasAbsorptionWick && change24h < -1.5) ? 2 : (!hasAbsorptionWick && change24h < 0) ? 1 : 0,
@@ -184,9 +188,9 @@ export function scanLiveMarketEntries(coins: CryptoCoin[], mode: ScannerTradingM
     const volToMcapRatio = +((volume / (mcap || 1)) * 100).toFixed(2);
     const volumeSurgeRatio = +Math.max(0.65, Math.min(3.5, 1.0 + (volToMcapRatio / 12) + (change24h > 0 ? change24h * 0.03 : -change24h * 0.015))).toFixed(2);
     
-    const ema200_daily = roundPrice(price * (1 - (change30d * 0.004) - (change7d * 0.005) - 0.045));
-    const ema21_4h = roundPrice(price * (1 - (change24h * 0.004) - 0.006));
-    const ema50_4h = roundPrice(price * (1 - (change7d * 0.003) - 0.018));
+    const ema200_daily = roundPrice(a ? a.ema200_daily : price * (1 - (change30d * 0.004) - (change7d * 0.005) - 0.045));
+    const ema21_4h = roundPrice(a ? a.ema21_4h : price * (1 - (change24h * 0.004) - 0.006));
+    const ema50_4h = roundPrice(a ? a.ema50_4h : price * (1 - (change7d * 0.003) - 0.018));
     const distToEma21Pct = +(((price - ema21_4h) / (ema21_4h || 1)) * 100).toFixed(2);
     const distToEma200Pct = +(((price - ema200_daily) / (ema200_daily || 1)) * 100).toFixed(2);
     const emaAlignmentBullish = ema21_4h > ema50_4h && ema50_4h > (ema200_daily * 0.95);
@@ -196,7 +200,7 @@ export function scanLiveMarketEntries(coins: CryptoCoin[], mode: ScannerTradingM
       : (change7d < -1.5 || (change24h < -1.8 && change7d < 0)) ? 'FALLING_CEILING'
       : 'FLAT';
 
-    const dailyMa7 = roundPrice(
+    const dailyMa7 = roundPrice(a ? a.ma7_daily :
       ma7Slope === 'FALLING_CEILING'
         ? price * (1 + Math.min(0.12, Math.max(0.007, Math.abs(change7d) * 0.005)))
         : ma7Slope === 'RISING_SUPPORT'
@@ -204,12 +208,16 @@ export function scanLiveMarketEntries(coins: CryptoCoin[], mode: ScannerTradingM
         : price * (1 - (change7d * 0.002))
     );
     const distToDailyMa7Pct = +(((price - dailyMa7) / (dailyMa7 || 1)) * 100).toFixed(2);
-    const dailyMa25 = roundPrice(price * (1 - (change30d * 0.003) - 0.035));
+    const dailyMa25 = roundPrice(a ? a.ma25_daily : price * (1 - (change30d * 0.003) - 0.035));
     const distToDailyMa25Pct = +(((price - dailyMa25) / (dailyMa25 || 1)) * 100).toFixed(2);
 
     let overheadResistancePrice = high24h;
-    let resistanceType: 'DAILY_MA7' | '4H_21_EMA' | '24H_RANGE_HIGH' | 'NONE' = '24H_RANGE_HIGH';
-    if (dailyMa7 > price && dailyMa7 <= high24h * 1.05) {
+    let resistanceType: 'SWING_LEVEL' | 'DAILY_MA7' | '4H_21_EMA' | '24H_RANGE_HIGH' | 'NONE' = '24H_RANGE_HIGH';
+    if (a?.resistance && a.resistance.price > price) {
+      // A price that several 4h swings were rejected from: a real level.
+      overheadResistancePrice = a.resistance.price;
+      resistanceType = 'SWING_LEVEL';
+    } else if (dailyMa7 > price && dailyMa7 <= high24h * 1.05) {
       overheadResistancePrice = dailyMa7;
       resistanceType = 'DAILY_MA7';
     } else if (ema21_4h > price && ema21_4h <= high24h * 1.03) {
@@ -227,7 +235,7 @@ export function scanLiveMarketEntries(coins: CryptoCoin[], mode: ScannerTradingM
       (price < dailyMa7 && rangeLocationPct >= 70) ||
       (distToResistancePct <= 1.5 && isSellerRejectingAtHigh && price <= high24h);
 
-    const pseudoRsi = +Math.max(18, Math.min(88, 50 + (change24h * 2.2) + (change7d * 0.6))).toFixed(1);
+    const pseudoRsi = a ? a.rsi14_1h : +Math.max(18, Math.min(88, 50 + (change24h * 2.2) + (change7d * 0.6))).toFixed(1);
     const bbWidthPct = +Math.max(1.8, Math.min(14.5, 3.8 + Math.abs(change24h) * 0.65 - (volToMcapRatio * 0.08))).toFixed(2);
     const bollingerMiddle = roundPrice(price * (1 - (change24h * 0.0015)));
     const bollingerUpper = roundPrice(bollingerMiddle + (price * (bbWidthPct / 200)));
@@ -235,9 +243,9 @@ export function scanLiveMarketEntries(coins: CryptoCoin[], mode: ScannerTradingM
 
     const stagnationDecile = Math.max(1, Math.min(10, Math.round(9 - Math.min(8, Math.abs(change24h) * 1.4 + (volumeSurgeRatio * 1.8)))));
 
-    const rawAtrPct = isMegaCap 
+    const rawAtrPct = a ? a.atrPct : (isMegaCap
       ? Math.max(1.8, Math.min(3.2, 2.2 + Math.abs(change24h) * 0.22))
-      : Math.max(3.0, Math.min(9.5, 3.6 + Math.abs(change24h) * 0.42 + (bbWidthPct * 0.1)));
+      : Math.max(3.0, Math.min(9.5, 3.6 + Math.abs(change24h) * 0.42 + (bbWidthPct * 0.1))));
     const atrPct = +rawAtrPct.toFixed(2);
     const atrValue = roundPrice(price * (atrPct / 100));
 

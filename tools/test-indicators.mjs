@@ -79,6 +79,19 @@ check('it was touched 2 times', sup?.touches, 2);
 check('a single wick is not a 2-touch level',
   m.nearestLevel(100, m.levelsFrom([...seq, c(t++, 100, 140, 99, 100)], 1.5, 2), 'RESISTANCE', 2)?.price !== 140, true);
 
+// Swings spread evenly across a wide range must not chain into one level:
+// each is within tolerance of its neighbour but not of the cluster's anchor.
+const ladderBars = [];
+let lt = 0;
+for (let p = 100; p <= 130; p += 1.2) {
+  ladderBars.push(c(lt++, p, p + 0.3, p - 0.3, p));       // up
+  ladderBars.push(c(lt++, p + 0.6, p + 1.0, p + 0.2, p + 0.6));
+  ladderBars.push(c(lt++, p, p + 0.3, p - 0.3, p));       // back down: makes swings
+}
+const spread = m.levelsFrom(ladderBars, 1.5, 1);
+const widest = Math.max(...spread.map((l) => l.touches));
+check('evenly spread swings do not chain into one level', widest < 8, true, 0);
+
 console.log('\n6. Trend and pullback');
 const upCloses = Array.from({ length: 60 }, (_, i) => 100 + i);
 check('rising series is bullish', m.trendFromEmas(upCloses), 'BULLISH');

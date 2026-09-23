@@ -106,14 +106,18 @@ export function levelsFrom(candles: Candle[], tolerance: number, lookback = 2): 
   const price = candles[candles.length - 1].c;
   const pivots = swingPivots(candles, lookback).sort((a, b) => a.price - b.price);
 
-  const clusters: Array<{ prices: number[]; lastTouch: number }> = [];
+  // Measured from the cluster's own anchor, not from the last pivot added:
+  // comparing with the previous pivot lets a dense run of swings chain into one
+  // level spanning the whole range (a live BTC check produced a "50-touch"
+  // support 3.6 ATR wide, which is not a level).
+  const clusters: Array<{ anchor: number; prices: number[]; lastTouch: number }> = [];
   for (const p of pivots) {
     const last = clusters[clusters.length - 1];
-    if (last && Math.abs(p.price - last.prices[last.prices.length - 1]) <= tolerance) {
+    if (last && Math.abs(p.price - last.anchor) <= tolerance) {
       last.prices.push(p.price);
       last.lastTouch = Math.max(last.lastTouch, p.time);
     } else {
-      clusters.push({ prices: [p.price], lastTouch: p.time });
+      clusters.push({ anchor: p.price, prices: [p.price], lastTouch: p.time });
     }
   }
 

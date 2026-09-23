@@ -34,6 +34,8 @@ export interface CryptoCoin {
   technical_summary?: string;
   risks?: string[];
   price_change_percentage_7d?: number;
+  /** Real candle-derived analysis, when it could be fetched (marketAnalysisService). */
+  analysis?: import('./services/marketAnalysisService').CoinAnalysis;
   micro?: {
     currentHourGreen: boolean;
     hourlyChangePct: number;

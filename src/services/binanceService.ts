@@ -1,5 +1,7 @@
 import { CryptoCoin } from '../types';
 import { UNIVERSE_CONFIG, UNIVERSE_EXCLUDED } from '../config/universe';
+import { ENTRY_CONFIG } from '../config/entry';
+import { analyzeSymbols } from './marketAnalysisService';
 
 export interface BinanceFuturesTicker {
   symbol: string;
@@ -308,6 +310,21 @@ export async function fetchLiveMarketCoins(): Promise<CryptoCoin[]> {
       key_risks: ['Market Volatility', 'Systemic Beta Drag', 'Regulatory Scrutiny'],
       tokenomics_summary: `Live supply traded on Binance with $${(totalVolume / 1e6).toFixed(1)}M 24h turnover.`
     });
+  }
+
+  // Real candle-derived analysis for each coin (cached; a refresh usually costs
+  // no requests at all). Coins whose candles cannot be fetched keep the
+  // estimates from the ticker snapshot.
+  if (ENTRY_CONFIG.useRealCandles && coins.length) {
+    try {
+      const analysis = await analyzeSymbols(coins);
+      for (const coin of coins) {
+        const a = analysis.get(coin.symbol.toUpperCase());
+        if (a) coin.analysis = a;
+      }
+    } catch (err) {
+      console.warn('[Analysis] Could not build candle analysis; using ticker estimates:', err);
+    }
   }
 
   return coins;
