@@ -11,6 +11,12 @@
  * only worth switching on if the replay shows they beat the current entries
  * out of sample.
  */
+// ENTRY_GATES=off turns the level gates off for a run (a test, or a session
+// where you want the old behaviour back) without editing this file. Browser
+// builds have no process, hence the guard.
+const env = (typeof process !== 'undefined' && process.env ? process.env : {}) as Record<string, string | undefined>;
+const GATES_ON = env.ENTRY_GATES !== 'off';
+
 export const ENTRY_CONFIG = {
   useRealCandles: true,
 
@@ -31,14 +37,14 @@ export const ENTRY_CONFIG = {
    * -79.3 bp a trade (PF 0.82) to -7.5 bp (PF 0.98), and with the older tighter
    * ladder to +37.2 bp (PF 1.24).
    */
-  requireSupportProximity: true,
+  requireSupportProximity: GATES_ON,
   maxDistanceToSupportAtr: 0.25,
 
   /** Reject when the nearest real resistance is closer than this many ATR. */
-  minHeadroomToResistanceAtr: 0.25,
+  minHeadroomToResistanceAtr: GATES_ON ? 0.25 : 0,
 
   /** Reject when the 4h structure is in a downtrend. */
-  rejectBearishTrend: true,
+  rejectBearishTrend: GATES_ON,
 
   /** How many separate swings a price must have held to count as a level. */
   minLevelTouches: 2,

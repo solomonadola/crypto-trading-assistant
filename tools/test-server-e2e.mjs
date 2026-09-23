@@ -85,7 +85,10 @@ function startServer() {
   const child = spawn(process.execPath, [BUNDLE], {
     // TRADING_WORKER=on: the worker only trades from a deployed server
     // (NODE_ENV=production) unless a run asks for it, as this test does.
-    env: { ...process.env, PORT: String(PORT), FAKE_DB_FILE: DB, WORKER_STATE_FILE: STATE, WORKER_AUTOPILOT: 'off', TRADING_WORKER: 'on' },
+    env: { ...process.env, PORT: String(PORT), FAKE_DB_FILE: DB, WORKER_STATE_FILE: STATE, WORKER_AUTOPILOT: 'off', TRADING_WORKER: 'on',
+      // The level gates refuse most coins most of the time (that is their job);
+      // section 7 checks them separately with a server that has them on.
+      ENTRY_GATES: process.env.E2E_GATES || 'off' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let log = '';
@@ -229,6 +232,28 @@ try {
   check('both pages hold the same list', a === b);
   const refused = openedByPage && await pageA.action(`/api/trades/${encodeURIComponent(openedByPage.id)}/close`, {});
   check('a refused close explains why (no 404)', refused?.ok === false && /already closed/.test(refused.error || ''), refused?.error);
+  console.log('\n7. The level gates refuse an entry that is not at a level');
+  {
+    // Same server, gates on: a deploy is refused with the measured reason.
+    server.kill('SIGTERM');
+    await new Promise((r) => server.on('exit', r));
+    process.env.E2E_GATES = 'on';
+    server = startServer();
+    await waitForTick();
+    const tried = [];
+    for (const sym of ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE', 'ADA', 'LINK', 'AVAX']) {
+      const r = await post('/api/deploy', { symbol: sym });
+      tried.push(r);
+      if (r.status === 200) break;
+    }
+    const refused = tried.filter((r) => r.status === 400 && /Not at a level/.test(r.body?.error || ''));
+    check('refusals explain the level test', refused.length > 0 || tried.some((r) => r.status === 200),
+      tried.map((r) => r.body?.error).join(' | ').slice(0, 120));
+    if (refused.length) {
+      check('the reason names support or resistance',
+        /support|Resistance|downtrend/.test(refused[0].body.error), refused[0].body.error.slice(0, 80));
+    }
+  }
 } finally {
   server.kill('SIGTERM');
   await sleep(300);

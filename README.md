@@ -164,6 +164,12 @@ Auto-pilot checks for entries every 10 seconds and deploys when all of these hol
 - Multi-timeframe grade not C or DISQUALIFIED, at least 2 of 4 timeframes aligned
 - **Long only** — shorts are disabled (`allowShorts: false`); they lost money in
   both test samples
+- **At a real level** (`src/config/entry.ts`, measured in `STUDY_A_RESULTS.md`
+  Addendum 3): price within 0.25 ATR of a support that has held at least twice,
+  at least 0.25 ATR of headroom to the nearest resistance, and the 4h structure
+  not bearish. `ENTRY_GATES=off` disables them for a run.
+- **Unleveraged.** Profit and loss is position size times the price move;
+  nothing multiplies by a leverage factor.
 - **Market-regime gates pass** (`enforceRegimeGates: true`):
   - *Consolidation lock* — no entries when average 24h movement across the
     universe is under 2%, or 2 or fewer coins are moving 3%+
