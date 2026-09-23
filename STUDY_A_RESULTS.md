@@ -412,3 +412,58 @@ node tools/sim-exits.mjs --entries data/entries-levels.json     --dir data/kline
 node tools/sim-exits.mjs --entries data/entries2024-levels.json --dir data/klines2024
 node tools/sim-exits.mjs --entries data/entries2024-levels.json --dir data/klines2024 --cost-bps 25
 ```
+
+---
+
+# Addendum 5 — how tight is the support gate, and was it even running?
+
+**Run date:** 2026-09-23 · `tools/study-levels.mjs`, plus a live scan of the 80-coin universe
+
+The gate refuses an entry more than 0.25 ATR above support. The obvious
+question is whether that is too strict - it turns away a lot of signals. The
+bands either side of it, forward return at 4h net of a 30 bp round trip:
+
+| distance to support | n (OOS) | in-sample 6mo | out-of-sample 24mo | t (OOS) |
+|---|---|---|---|---|
+| at support (≤ 0.25 ATR) | 2,367 | +13.7 bp | **+20.0 bp** | +3.7 |
+| near support (0.25–0.5 ATR) | 2,131 | −31.7 | **−43.5** | −8.3 |
+| mid (0.5–1.5 ATR) | 1,136 | −80.0 | **−107.1** | −13.1 |
+| far (> 1.5 ATR) | 200 | −46.3 | −23.4 | −0.9 |
+| no level found | 135 | −14.2 | −39.4 | −1.6 |
+
+It is not too strict; the band immediately outside it is the worst part of the
+sample. Loosening to 0.5 ATR would add 2,131 entries worth −43.5 bp each, which
+is enough to turn the kept set negative. An entry 1.22 ATR above support - a
+typical refusal - sits in a bucket that loses 107 bp a trade on 1,136
+observations, t −13.1. Both samples agree.
+
+## The gate was running on a twentieth of the universe
+
+A live scan on 2026-09-23 showed the level gate **measured on 6 of 80 coins**.
+The other 74 had no candle analysis, and the scanner treats that as "not
+measured" and lets the entry through - so those coins were traded on the old
+24h-ticker estimates with no level test at all.
+
+The cause was `analyzeSymbols` mapping over the coin list inside `Promise.all`:
+three candle requests per coin, all fired at once, 240 of them for an 80-coin
+universe. Measured against Binance with 50 coins (150 requests):
+
+| how the requests are sent | requests answered | coins fully analysed | time |
+|---|---|---|---|
+| all at once (what it did) | 23 / 150 | 7 / 50 | — |
+| 6 at a time | 149 / 150 | 49 / 50 | 34s (cold) |
+| **8 at a time** | **150 / 150** | **50 / 50** | **10s** |
+
+`analyzeSymbols` now makes one batched pass per interval through
+`fetchCandlesForSymbols`, which honours the limit, and the limit is 8. After
+the change the same live scan analysed **80 of 80** coins and **13 passed the
+gate** - 16%, in line with the ~19% at-support share of the historical set.
+
+So the trade rate was not being held down by a gate that is too strict. It was
+being decided by whichever handful of coins happened to get their candles.
+
+**Also found:** the top 80 by volume contains tokenised equities and ETFs -
+NVDAB, MSTRB, SOXLB, SPCXB, QQQB at their underlyings' prices - and NVDAB and
+SOXLB passed the gate on that first scan. They follow stock-market hours, not
+crypto. Added to `UNIVERSE_EXCLUDED` alongside CRCLB and SNDKB. The
+"[Universe]" log line lists the chosen coins each day; new ones need adding.

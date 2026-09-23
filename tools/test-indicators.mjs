@@ -7,7 +7,8 @@ const require = createRequire(import.meta.url);
 const esbuild = require('./_gen/vendor/node_modules/esbuild');
 
 const out = await esbuild.build({
-  stdin: { contents: "export * from './src/services/indicators'; export * from './src/services/candleService';",
+  stdin: { contents: "export * from './src/services/indicators'; export * from './src/services/candleService';" +
+                     "export { analyzeSymbols } from './src/services/marketAnalysisService';",
            resolveDir: process.cwd(), loader: 'ts' },
   bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'error',
 });
@@ -122,6 +123,30 @@ check('served from cache while fresh', (await m.fetchCandles('ETH', '1h', 10))[0
 globalThis.fetch = async () => { throw new Error('offline'); };
 m.primeCandleCache('SOL', '1h', flat, 0);            // stale on purpose
 check('a failed fetch returns the last good series', (await m.fetchCandles('SOL', '1h', 10)).length, 20);
+
+console.log('\n8. Analysing many coins keeps to the request limit');
+{
+  // analyzeSymbols used to map over the coins inside Promise.all, firing three
+  // requests per coin at once. Binance drops most of a burst that size, every
+  // dropped coin loses its level gates, and the scanner silently falls back to
+  // the 24h-ticker estimates. Measured live on 2026-09-23: 23 of 150 requests
+  // came back at once, 149 of 150 a few at a time.
+  m.clearCandleCache();
+  const bars = Array.from({ length: 300 }, (_, i) => [1_700_000_000_000 + i * 3_600_000, '10', '11', '9', '10.5', '1']);
+  let inFlight = 0, peak = 0, requests = 0;
+  globalThis.fetch = async () => {
+    requests++;
+    peak = Math.max(peak, ++inFlight);
+    await new Promise((r) => setTimeout(r, 5));
+    inFlight--;
+    return { ok: true, json: async () => bars };
+  };
+  const coins = Array.from({ length: 40 }, (_, i) => ({ symbol: `C${i}`, current_price: 10.5 }));
+  const analysed = await m.analyzeSymbols(coins);
+  check('every coin analysed', analysed.size, 40);
+  check('3 requests per coin', requests, 120);
+  check('never more than 8 requests at once', peak <= 8, true);
+}
 
 console.log(`\n${fails === 0 ? 'ALL INDICATOR CHECKS PASS' : fails + ' CHECK(S) FAILED'}`);
 process.exit(fails ? 1 : 0);

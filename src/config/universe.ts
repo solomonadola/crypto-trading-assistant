@@ -30,9 +30,12 @@ export const UNIVERSE_EXCLUDED = new Set([
   'EUR', 'EURI', 'AEUR',
   'WBTC', 'WBETH', 'WETH', 'BETH', 'STETH', 'WSTETH', 'BNSOL',
   'PAXG', 'XAUT',
-  // Apparently tokenised shares: CRCLB and SNDKB (2026-09-22: $91.67 and
-  // $1,764.50, stock-like prices matching Circle and SanDisk). Excluded to be
-  // safe - they would follow stock-market hours and news, not crypto. Check the
-  // "[Universe]" log line for new ones and add them here.
-  'CRCLB', 'SNDKB',
+  // Tokenised shares and ETFs. They trade on Binance as USDT pairs but follow
+  // stock-market hours and news, not crypto, and their prices match their
+  // underlyings: on 2026-09-23 NVDAB was $229.08, MSTRB $169.64, SOXLB
+  // $149.78, SPCXB $154.52, QQQB $748.01, CRCLB $91.67, SNDKB $1,764.50.
+  // Going from the top 40 to the top 80 by volume brought a batch of these in
+  // at once - NVDAB and SOXLB both passed the level gates on the first scan.
+  // Check the "[Universe]" log line for new ones and add them here.
+  'CRCLB', 'SNDKB', 'NVDAB', 'MSTRB', 'SOXLB', 'SPCXB', 'QQQB',
 ]);

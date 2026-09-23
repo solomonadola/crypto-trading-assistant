@@ -39,9 +39,15 @@ const TTL_MS: Record<Interval, number> = {
   '1d': 3_600_000,
 };
 
-const REQUEST_TIMEOUT_MS = 8000;
-/** Binance rate limits are generous, but a burst of 120 requests is not polite. */
-const CONCURRENCY = 6;
+const REQUEST_TIMEOUT_MS = 10_000;
+/**
+ * How many candle requests are in the air at once. Binance answers a few at a
+ * time reliably and drops most of a large burst: measured on 2026-09-23 with
+ * 150 requests, all at once returned 23, eight at a time returned all 150 in
+ * 10s (twelve in 7s, six in 34s on a cold cache). Eight keeps a full 80-coin
+ * refresh - 240 requests - inside one 30-second tick.
+ */
+const CONCURRENCY = 8;
 
 interface CacheEntry {
   at: number;

@@ -5,7 +5,7 @@
  * analyzeFromCandles is pure, so the offline replay can build the same analysis
  * from historical bars and the live app and the study measure the same thing.
  */
-import { Candle, Interval, fetchCandles } from './candleService';
+import { Candle, Interval, fetchCandles, fetchCandlesForSymbols } from './candleService';
 import {
   atr, ema, rsi, levelsFrom, nearestLevel, structureFrom, pullbackState,
   Level, Structure, PullbackState,
@@ -129,16 +129,36 @@ export async function analyzeSymbol(symbol: string, price: number): Promise<Coin
 /**
  * Analysis for a list of coins. Coins whose candles cannot be fetched are left
  * out, and the caller falls back to what it had.
+ *
+ * One batched pass per interval, so candleService's limit applies. This used
+ * to map analyzeSymbol over the list inside Promise.all, which fires three
+ * requests per coin at once - 240 of them for an 80-coin universe. Measured
+ * against Binance on 2026-09-23 with 50 coins: all at once, 23 of 150 requests
+ * came back and 7 coins of 50 could be analysed; the same 150 requests a few
+ * at a time returned 149 and 49 coins. Every coin left without analysis loses
+ * its level gates (the scanner marks them "not measured" and lets the entry
+ * through) and falls back to estimating 7d and 30d change from the 24h ticker,
+ * so the whole point of real candles was being lost on most of the universe.
  */
 export async function analyzeSymbols(coins: Array<{ symbol: string; current_price: number }>): Promise<Map<string, CoinAnalysis>> {
+  const symbols = coins.map((c) => c.symbol);
+  const series = new Map<Interval, Map<string, Candle[]>>();
+  for (const [interval, limit] of NEEDED) {
+    series.set(interval, await fetchCandlesForSymbols(symbols, interval, limit));
+  }
   const out = new Map<string, CoinAnalysis>();
-  await Promise.all(coins.map(async (coin) => {
+  for (const coin of coins) {
+    const sym = coin.symbol.toUpperCase();
+    const h1 = series.get('1h')?.get(sym);
+    const h4 = series.get('4h')?.get(sym);
+    const d1 = series.get('1d')?.get(sym);
+    if (!h1 || !h4 || !d1) continue;
     try {
-      const analysis = await analyzeSymbol(coin.symbol, coin.current_price);
-      if (analysis) out.set(coin.symbol.toUpperCase(), analysis);
+      const analysis = analyzeFromCandles(coin.current_price, h1, h4, d1);
+      if (analysis) out.set(sym, analysis);
     } catch {
       // leave this coin without analysis
     }
-  }));
+  }
   return out;
 }
