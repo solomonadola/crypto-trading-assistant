@@ -79,13 +79,15 @@ export interface GeometryConfig {
   useRiskBasedSizing: boolean;
 
   /**
-   * Dollar risk per trade as a percent of total equity.
+   * Dollar risk per trade as a percent of total equity, used only when
+   * useRiskBasedSizing is on.
    *
-   * 0.8 rather than 0.4: with a median stop of 8.4% (1.5x a 5.6% ATR), 0.4%
-   * risk sized the median trade at under half a slot, so roughly half the
-   * account sat in cash and every result scaled down with it. At 0.8% the
-   * median trade takes about a full slot while risk stays equal across coins;
-   * ten simultaneous stop-outs cost 8% of the account.
+   * It is off: every trade takes the same slot (equity / 10), which keeps the
+   * capital fully deployed. The trade-off is that risk per trade then varies
+   * with the coin - a stop is 1.5x ATR, so on 2026-09-23 a BTC stop was 4.1%
+   * of the slot and a PUMP stop 14.0%, i.e. one trade can lose three times
+   * what another does. Set useRiskBasedSizing back to true to equalise that
+   * (a PUMP position would then be $5.67 of a $10 slot).
    */
   riskPerTradePct: number;
 
@@ -135,7 +137,7 @@ export const GEOMETRY_CONFIG: GeometryConfig = {
   breakevenFloorRMultiple: 0.1,
   trailAfterTier: 3,
   trailAtrMultiple: 1.5,
-  useRiskBasedSizing: true,
+  useRiskBasedSizing: false,
   riskPerTradePct: 0.8,
   maxGapHarvestMultiple: 3.0,
 };

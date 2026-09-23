@@ -521,8 +521,12 @@ export function scanLiveMarketEntries(coins: CryptoCoin[], mode: ScannerTradingM
 
     const momentumState: 'ACCELERATING' | 'HEALTHY_PULLBACK' | 'CONSOLIDATING' | 'EXHAUSTED' = 
       pseudoRsi > 65 ? 'ACCELERATING' : pseudoRsi < 42 ? 'HEALTHY_PULLBACK' : bbWidthPct < 4.5 ? 'CONSOLIDATING' : 'HEALTHY_PULLBACK';
-    const volatilityRating = mode === 'FUTURES_1_2D' 
-      ? `${atrPct}% ATR • 3x-5x Futures Leverage`
+    // No leverage anywhere in this app: profit and loss is position size times
+    // the price move (cycleEngineService), with nothing multiplied by a
+    // leverage factor. The old "3x-5x Futures Leverage" label promised
+    // something the simulation never did.
+    const volatilityRating = mode === 'FUTURES_1_2D'
+      ? `${atrPct}% ATR • 1-2D hold • unleveraged`
       : `${atrPct}% ATR • 1-2W Spot Accumulation`;
 
     const isBleedingKnife = direction === 'LONG' && (micro.consecutiveRedHours >= 2 || (!micro.currentHourGreen && micro.hourlyChangePct < -0.25 && !hasAbsorptionWick));
@@ -1252,7 +1256,8 @@ export function scanLiveMarketEntries(coins: CryptoCoin[], mode: ScannerTradingM
         overheadResistancePrice,
         distToResistancePct,
         resistanceType,
-        suggestedLeverage: mode === 'FUTURES_1_2D' ? '3x - 5x' : '1x Spot',
+        // 1x: the engine never applies leverage (see volatilityRating above).
+        suggestedLeverage: '1x (unleveraged)',
         liquidationBufferPct: Math.round(stopLossPct * 2.5 * 10) / 10,
         isCeilingBlocked,
         rejectionZoneName: resistanceType === 'DAILY_MA7' ? 'Binance Daily MA(7) Yellow Line' : '24h High Resistance Wall',
