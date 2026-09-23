@@ -78,7 +78,15 @@ export interface GeometryConfig {
    */
   useRiskBasedSizing: boolean;
 
-  /** Dollar risk per trade as a percent of total equity. */
+  /**
+   * Dollar risk per trade as a percent of total equity.
+   *
+   * 0.8 rather than 0.4: with a median stop of 8.4% (1.5x a 5.6% ATR), 0.4%
+   * risk sized the median trade at under half a slot, so roughly half the
+   * account sat in cash and every result scaled down with it. At 0.8% the
+   * median trade takes about a full slot while risk stays equal across coins;
+   * ten simultaneous stop-outs cost 8% of the account.
+   */
   riskPerTradePct: number;
 
   /**
@@ -128,7 +136,7 @@ export const GEOMETRY_CONFIG: GeometryConfig = {
   trailAfterTier: 3,
   trailAtrMultiple: 1.5,
   useRiskBasedSizing: true,
-  riskPerTradePct: 0.4,
+  riskPerTradePct: 0.8,
   maxGapHarvestMultiple: 3.0,
 };
 

@@ -357,6 +357,7 @@ node tools/test-data-safety.mjs              # no forced closes; read-only switc
 node tools/test-network.mjs                  # a stalled Binance response cannot hang the refresh
 node tools/test-trading-worker.mjs           # 24/7 worker: no blind trading, restart replay, Firestore merge
 node tools/test-universe.mjs                 # volume-ranked coin list
+node tools/test-indicators.mjs               # EMA/RSI/ATR, swing levels, pullbacks, candle cache
 npm run build && node tools/test-server-e2e.mjs  # the real server over HTTP: open/close from the web, saves, restart
 node tools/diagnose-trades.mjs trades.json   # find corrupt records in an exported feed
 ```
