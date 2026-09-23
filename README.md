@@ -85,6 +85,11 @@ decision code as the browser (`src/services/autopilotEngine.ts`).
 - **It never trades blind.** Without a list (a first start while Firestore
   is unavailable) it waits; it also skips checks when prices are more than
   two minutes old.
+- **Starting it:** the worker only runs when `NODE_ENV=production` (a deployed
+  server) or `TRADING_WORKER=on`, so `bun run dev` and preview builds never
+  become a second bot trading the same account. If a deployment does not set
+  `NODE_ENV`, `/api/status` reports `workerRunning: false` with the reason -
+  set `TRADING_WORKER=on` there.
 - **Settings:** `TRADING_WORKER=off` serves the app without the worker;
   `WORKER_AUTOPILOT=off` makes auto-pilot start off (the switch in the app
   changes it, and the choice survives restarts); `WORKER_FLUSH_MINUTES`;

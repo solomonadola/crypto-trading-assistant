@@ -205,9 +205,23 @@ export function currentUniverse(tickers: Map<string, BinanceFuturesTicker>, now:
       if (saved && Array.isArray(saved.symbols) && typeof saved.at === 'number') universe = saved;
     } catch {}
   }
-  const stale = !universe || !universe.symbols.length || now - universe.at > UNIVERSE_CONFIG.refreshHours * 3_600_000;
+  // The saved list is kept for refreshHours so coins do not drop in and out
+  // between scans - but it must not outlive a change to the configuration
+  // itself. A list saved when `size` was 40, or before a coin was added to
+  // UNIVERSE_EXCLUDED, is stale the moment the new build starts, not a day
+  // later: without this the first day after a deploy still scans the old 40
+  // and can still open a position in a coin that was just excluded. A
+  // reshuffle in volume ranking is NOT a reason to re-choose - that is what
+  // keeping the list is for.
+  const fresh = tickers.size > 0 ? selectUniverse(tickers) : [];
+  const configChanged = !!universe && fresh.length > 0 && (
+    fresh.length !== universe.symbols.length ||
+    universe.symbols.some((s) => UNIVERSE_EXCLUDED.has(s))
+  );
+  const stale = !universe || !universe.symbols.length || configChanged ||
+    now - universe.at > UNIVERSE_CONFIG.refreshHours * 3_600_000;
   if (stale && tickers.size > 0) {
-    const symbols = selectUniverse(tickers);
+    const symbols = fresh;
     if (symbols.length) {
       const before = new Set(universe?.symbols || []);
       const added = symbols.filter((x) => !before.has(x));

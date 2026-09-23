@@ -46,7 +46,26 @@ changed.set('TINYUSDT', tk('TINYUSDT', 1.5, 99999)[1]);    // suddenly the most 
 check('an hour later: unchanged', m.currentUniverse(changed, t0 + 3600_000).join() === first.join());
 check('a day later: re-chosen', m.currentUniverse(changed, t0 + 25 * 3600_000)[0] === 'TINY');
 
-console.log('\n3. Coins without known details still get prices and a name');
+console.log('\n3. A configuration change takes effect now, not a day later');
+{
+  // A list saved before `size` was raised, or before a coin was excluded, must
+  // not survive the deploy that changed it: the first day would otherwise
+  // still scan the old list and could still open a position in a coin that
+  // was just excluded.
+  const day = t0 + 26 * 3600_000;
+  store.set('cryptostudy_universe', JSON.stringify({ symbols: ['BTC', 'CRCLB'], at: day }));
+  const afterExclusion = m.currentUniverse(tickers, day + 60_000);
+  check('a saved list holding an excluded coin is re-chosen at once',
+        !afterExclusion.includes('CRCLB') && afterExclusion.length > 2, afterExclusion.join(','));
+  const kept = m.currentUniverse(tickers, day + 120_000);
+  check('and the new list is then kept', kept.join() === afterExclusion.join());
+  store.set('cryptostudy_universe', JSON.stringify({ symbols: ['BTC', 'ETH'], at: day }));
+  const afterResize = m.currentUniverse(tickers, day + 180_000);
+  check('a list shorter than the configured size is re-chosen at once',
+        afterResize.length > 2, afterResize.join(','));
+}
+
+console.log('\n4. Coins without known details still get prices and a name');
 globalThis.fetch = async () => ({ ok: true, json: async () => rows.map(([, t]) => t) });
 const coins = await m.fetchLiveMarketCoins();
 const tiny = coins.find((c) => c.symbol === 'tiny');
