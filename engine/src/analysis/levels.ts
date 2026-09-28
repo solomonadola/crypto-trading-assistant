@@ -11,7 +11,7 @@
 // pullback, short likewise, otherwise no plan. Entry is the strongest support
 // cluster (long) within reach below the price, the stop beyond it, and the
 // targets the next resistance clusters above.
-import type { Direction, KeyLevel, TradeIdea, TradeIdeaTarget } from '../../../shared/types';
+import type { ChecklistItem, Direction, KeyLevel, TradeIdea, TradeIdeaTarget, WatchLevel } from '../../../shared/types';
 import { fibLevel } from './indicators';
 import { impulseLeg, flippedLevels } from '../strategy/pullback';
 import { lastOf, sign, type Context } from '../strategy/context';
@@ -111,7 +111,21 @@ export function clusterLevels(raw: RawLevel[], price: number, tol: number): (Key
   });
 }
 
-export function tradeIdea(ctx: Context, armedDirections: Direction[]): TradeIdea {
+export interface IdeaInputs {
+  /** Directions the engine has armed a setup for on this coin. */
+  armed: Direction[];
+  /** Why new trades may not open now (session rules), or null if they may. */
+  entryBlock: string | null;
+}
+
+export function tradeIdea(ctx: Context, inputs: IdeaInputs): TradeIdea {
+  const idea = planIdea(ctx, inputs.armed);
+  return { ...idea, checklist: checklist(ctx, idea, inputs.entryBlock), watch: watchLevels(idea) };
+}
+
+type Planned = Omit<TradeIdea, 'checklist' | 'watch'>;
+
+function planIdea(ctx: Context, armedDirections: Direction[]): Planned {
   const cfg = ctx.config;
   const price = ctx.price;
   const atr = lastOf(ctx.atr1h);
@@ -126,10 +140,11 @@ export function tradeIdea(ctx: Context, armedDirections: Direction[]): TradeIdea
     ? `No clear trend: long side ${a.long.state}, short side ${a.short.state}`
     : `${bias === 'long' ? 'Long' : 'Short'} side is ${a[bias].state}${a[bias].emaAligned ? ', 4h close on the right side of EMA50' : ', but the 4h close is on the wrong side of EMA50'}`;
 
-  const base: TradeIdea = {
+  const checklistFor: Direction = bias !== 'none' ? bias : a.structure['4h']?.trend === 'down' ? 'short' : 'long';
+  const base: Planned = {
     symbol: ctx.symbol, asOf: ctx.t, price, atr1h: atr, bias, biasReason,
     trend: { '4h': a.structure['4h']?.trend ?? null, '1h': a.structure['1h']?.trend ?? null, '15m': a.structure['15m']?.trend ?? null },
-    longState: a.long.state, shortState: a.short.state,
+    longState: a.long.state, shortState: a.short.state, checklistFor,
     levels: levels.map(({ band: _band, ...l }) => l).sort((x, y) => y.price - x.price),
     plan: null,
   };
@@ -185,3 +200,66 @@ export function tradeIdea(ctx: Context, armedDirections: Direction[]): TradeIdea
     plan: { direction: bias, status, entryLow, entryHigh, entry, stop, riskPct, targets, meetsRules, note: noteParts.join(' ') },
   };
 }
+
+/** The engine's conditions for a trade in the checklist's direction, each met, not met, or still pending. */
+function checklist(ctx: Context, idea: Planned, entryBlock: string | null): ChecklistItem[] {
+  const cfg = ctx.config;
+  const dir = idea.checklistFor;
+  const want = dir === 'long' ? 'up' : 'down';
+  const s = sign(dir);
+  const a = ctx.analysis;
+  const meter = a.trendMeter;
+  const plan = idea.plan && idea.plan.direction === dir && idea.plan.entry !== null ? idea.plan : null;
+  const st = (tf: '1h' | '15m') => meter?.[tf]?.supertrend;
+  const items: ChecklistItem[] = [
+    { label: `4h trend ${want}`, ok: a.structure['4h']?.trend === want, detail: `4h structure: ${a.structure['4h']?.trend ?? 'unknown'}${a.structure['4h']?.broken ? ` (${a.structure['4h']?.broken} trend broken)` : ''}` },
+    { label: `1h trend ${want} too`, ok: a.structure['1h']?.trend === want, detail: `1h structure: ${a.structure['1h']?.trend ?? 'unknown'}` },
+    { label: 'SuperTrend agrees on 1h and 15m', ok: st('1h') === s && st('15m') === s, detail: `1h ${st('1h') === 1 ? 'up' : st('1h') === -1 ? 'down' : '–'}, 15m ${st('15m') === 1 ? 'up' : st('15m') === -1 ? 'down' : '–'}` },
+    { label: `Trend strong enough (1h ADX ≥ ${cfg.filters.chop.adx_min_1h})`, ok: a.adx1h === null ? null : a.adx1h >= cfg.filters.chop.adx_min_1h, detail: a.adx1h === null ? 'not enough data' : `ADX ${a.adx1h.toFixed(1)}` },
+    { label: `4h close ${dir === 'long' ? 'above' : 'below'} EMA50`, ok: a[dir].emaAligned, detail: `4h close ${fmt(a.ema4h.close)}, EMA50 ${fmt(a.ema4h.fast)}` },
+    { label: 'Entries open now (session)', ok: entryBlock === null, detail: entryBlock === null ? 'inside a session entry window' : entryBlock.replace(/_/g, ' ') },
+    { label: 'Price in the entry area', ok: plan ? plan.status === 'in_zone' || plan.status === 'armed' : null, detail: plan ? `area ${fmt(plan.entryLow)} – ${fmt(plan.entryHigh)}, price ${fmt(ctx.price)}` : 'no plan in this direction yet' },
+    { label: '15m close back in the trend direction', ok: null, detail: plan?.status === 'armed' ? 'the engine has armed the setup and is waiting for this close' : 'wait for it inside the entry area; the engine checks every 15m close' },
+    { label: `Stop within ${cfg.exits.max_stop_pct}%`, ok: plan ? plan.riskPct! <= cfg.exits.max_stop_pct : null, detail: plan ? `stop ${fmt(plan.stop)}, ${plan.riskPct!.toFixed(2)}% away` : '–' },
+    { label: `First target at least ${cfg.exits.min_rr}R`, ok: plan ? plan.targets[0].r >= cfg.exits.min_rr : null, detail: plan ? `${plan.targets[0].label} ${fmt(plan.targets[0].price)} = ${plan.targets[0].r.toFixed(2)}R` : '–' },
+    {
+      label: 'Funding not against the trade',
+      ok: ctx.funding === null ? null : s * ctx.funding * 100 <= cfg.filters.funding.max_against_pct_8h,
+      detail: ctx.funding === null ? 'funding rate unknown' : `${(ctx.funding * 100).toFixed(4)}% per 8h (${ctx.funding > 0 ? 'longs pay' : ctx.funding < 0 ? 'shorts pay' : 'neutral'})`,
+    },
+    {
+      label: 'BTC not moving against it (1h)',
+      ok: ctx.btcChange1hPct === null ? null : dir === 'long' ? ctx.btcChange1hPct >= cfg.filters.btc.block_longs_if_btc_1h_below_pct : ctx.btcChange1hPct <= cfg.filters.btc.block_shorts_if_btc_1h_above_pct,
+      detail: ctx.btcChange1hPct === null ? 'BTC change unknown' : `BTC ${ctx.btcChange1hPct >= 0 ? '+' : ''}${ctx.btcChange1hPct.toFixed(2)}% in the last hour`,
+    },
+  ];
+  return items;
+}
+
+/** What to wait for: with a plan, its entry, invalidation, targets and the breakout level; without, the range to watch. */
+function watchLevels(idea: Planned): WatchLevel[] {
+  const pct = (p: number) => ((p - idea.price) / idea.price) * 100;
+  const out: WatchLevel[] = [];
+  // Range edges and breakout levels are structure, like targets.
+  const structural = idea.levels.filter((l) => l.sources.some(isStructural));
+  const above = structural.filter((l) => l.price > idea.price).sort((x, y) => x.price - y.price);
+  const below = structural.filter((l) => l.price < idea.price).sort((x, y) => y.price - x.price);
+  const plan = idea.plan;
+  if (plan && plan.entry !== null && plan.entryLow !== null && plan.entryHigh !== null && plan.stop !== null) {
+    const long = plan.direction === 'long';
+    const edge = long ? plan.entryHigh : plan.entryLow;
+    out.push({ kind: 'entry', label: long ? 'Buy area' : 'Sell area', price: edge, distancePct: pct(edge), why: `${fmt(plan.entryLow)} – ${fmt(plan.entryHigh)}: ${plan.status === 'in_zone' || plan.status === 'armed' ? 'price is there now; wait for the 15m confirmation close' : `wait for price to ${long ? 'pull back down' : 'rally up'} into it`}` });
+    out.push({ kind: 'invalidation', label: 'Idea is wrong beyond', price: plan.stop, distancePct: pct(plan.stop), why: `a move ${long ? 'below' : 'above'} this breaks the setup; the stop goes here` });
+    for (const t of plan.targets) out.push({ kind: 'target', label: `Take profit ${t.label}`, price: t.price, distancePct: pct(t.price), why: `${t.r.toFixed(2)}R · ${t.sources.slice(0, 2).join(', ')}` });
+    const breakout = long ? above[0] : below[0];
+    if (breakout && !plan.targets.some((t) => Math.abs(t.price - breakout.price) < 1e-12)) {
+      out.push({ kind: 'breakout', label: long ? 'Breakout above' : 'Breakdown below', price: breakout.price, distancePct: breakout.distancePct, why: `${breakout.sources.slice(0, 2).join(', ')}: a 15m close ${long ? 'above' : 'below'} it continues the trend without a pullback` });
+    }
+  } else {
+    if (above[0]) out.push({ kind: 'range_top', label: 'Range top', price: above[0].price, distancePct: above[0].distancePct, why: `${above[0].sources.slice(0, 2).join(', ')} (strength ${above[0].strength}): a 15m close above it could start an up move` });
+    if (below[0]) out.push({ kind: 'range_bottom', label: 'Range bottom', price: below[0].price, distancePct: below[0].distancePct, why: `${below[0].sources.slice(0, 2).join(', ')} (strength ${below[0].strength}): a 15m close below it could start a down move` });
+  }
+  return out.sort((x, y) => Math.abs(x.distancePct) - Math.abs(y.distancePct));
+}
+
+const fmt = (x: number | null | undefined) => (x === null || x === undefined || !Number.isFinite(x) ? '–' : Number(x.toPrecision(6)).toString());

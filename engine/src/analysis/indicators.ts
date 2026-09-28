@@ -313,3 +313,24 @@ export function supertrend(high: Series, low: Series, close: Series, period = 10
   }
   return { line, dir };
 }
+
+export interface BollingerBands {
+  middle: Series;
+  upper: Series;
+  lower: Series;
+}
+
+/** Bollinger Bands: SMA(n) +/- k population standard deviations. */
+export function bollingerBands(close: Series, n = 20, k = 2): BollingerBands {
+  const middle = sma(close, n);
+  const upper = nans(close.length);
+  const lower = nans(close.length);
+  for (let i = n - 1; i < close.length; i++) {
+    let sq = 0;
+    for (let j = i - n + 1; j <= i; j++) sq += (close[j] - middle[i]) ** 2;
+    const sd = Math.sqrt(sq / n);
+    upper[i] = middle[i] + k * sd;
+    lower[i] = middle[i] - k * sd;
+  }
+  return { middle, upper, lower };
+}

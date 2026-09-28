@@ -219,3 +219,20 @@ describe('engine analysis', () => {
     expect(e.analysedSymbols()).toEqual(['BTCUSDT']);
   });
 });
+
+describe('BTC 1h change in the context', () => {
+  it('is measured to the 15m close even when newer BTC minutes are stored', async () => {
+    const { buildContext } = await import('../src/strategy/context');
+    const e = new Engine({ config, configHash: 't', engineVersion: 't' });
+    const T0 = Date.UTC(2026, 0, 1);
+    const end = T0 + 1000 * TIMEFRAME_MS['4h'];
+    const rising = path(risingWaypoints(12));
+    e.seedHistory([...candles('SOLUSDT', '4h', rising, end - rising.length * TIMEFRAME_MS['4h']), ...candles('SOLUSDT', '1h', rising, end - rising.length * TIMEFRAME_MS['1h']), ...candles('SOLUSDT', '15m', rising, end - rising.length * TIMEFRAME_MS['15m'])]);
+    // BTC minutes from 2h before the 15m close to 7 minutes after it; price 100 an hour before, 102 at the close.
+    const btc = Array.from({ length: 128 }, (_, i) => end - 120 * 60_000 + i * 60_000)
+      .map((open) => ({ symbol: 'BTCUSDT', tf: '1m' as const, openTime: open, closeTime: open + 60_000, open: 0, high: 0, low: 0, close: open + 60_000 === end - 3_600_000 ? 100 : open + 60_000 === end ? 102 : 101, volume: 1, quoteVolume: 1, trades: 1 }));
+    e.seedHistory(btc);
+    const book = (e as unknown as { market: Parameters<typeof buildContext>[0] }).market;
+    expect(buildContext(book, 'SOLUSDT', end, config, null)!.btcChange1hPct).toBeCloseTo(2, 9);
+  });
+});

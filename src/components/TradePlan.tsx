@@ -32,6 +32,11 @@ export function TradePlanCard({ idea, compact = false }: { idea: TradeIdea; comp
           {idea.bias === 'none' ? <Badge>no bias</Badge> : <SideBadge side={idea.bias} />}
           {(['4h', '1h', '15m'] as const).map((tf) => <TrendChip key={tf} tf={tf} trend={idea.trend[tf]} />)}
           {compact && <PlanStatus idea={idea} />}
+          {compact && idea.checklist && (() => {
+            const met = idea.checklist.filter((c) => c.ok === true).length;
+            const decided = idea.checklist.filter((c) => c.ok !== null).length;
+            return <Badge tone={met === decided ? 'good' : met >= decided - 2 ? 'warning' : 'muted'} title={`checklist for a ${idea.checklistFor}`}>{met}/{decided} checks</Badge>;
+          })()}
         </div>
         <p className="text-ink-2">{idea.biasReason}.</p>
 

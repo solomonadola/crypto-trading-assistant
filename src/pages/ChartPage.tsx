@@ -1,38 +1,146 @@
-import { useMemo, useState } from 'react';
-import { CandlestickChart, Layers } from 'lucide-react';
-import { usePoll, type AccountSummary, type Analysis, type Candle, type ClosedTradeView, type MarketRow } from '../lib/api';
-import { coin, price } from '../lib/format';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { CandlestickChart, CheckCircle2, CircleDashed, Crosshair, Layers, SlidersHorizontal, XCircle } from 'lucide-react';
+import { usePoll, type AccountSummary, type Analysis, type Candle, type ClosedTradeView, type MarketRow, type SessionInstance } from '../lib/api';
+import { coin, pct, price } from '../lib/format';
 import { Badge, Card, StateBadge, TrendChip } from '../components/ui';
-import { CandleChart, type ChartLayers } from '../components/charts';
+import { CandleChart, DEFAULT_INDICATORS, INDICATORS, type IndicatorId } from '../components/charts';
 import { TradePlanCard } from '../components/TradePlan';
-import type { TradeIdea } from '../../shared/types';
+import type { TradeIdea, WatchLevel } from '../../shared/types';
 
 const TFS = [['15m', 900_000], ['1h', 3_600_000], ['4h', 14_400_000], ['1m', 60_000]] as const;
+const STORE_KEY = 'chart-indicators';
 
-function Toggle({ on, onClick, swatch, children }: { on: boolean; onClick: () => void; swatch: React.ReactNode; children: React.ReactNode }) {
+/** The viewer's indicator choice, remembered in this browser (a convenience: defaults when storage is unavailable). */
+function useIndicators(): [Set<IndicatorId>, (id: IndicatorId) => void, () => void] {
+  const [ids, setIds] = useState<IndicatorId[]>(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(STORE_KEY) ?? 'null');
+      if (Array.isArray(saved)) return saved.filter((x): x is IndicatorId => INDICATORS.some((i) => i.id === x));
+    } catch { /* storage unavailable */ }
+    return DEFAULT_INDICATORS;
+  });
+  useEffect(() => { try { localStorage.setItem(STORE_KEY, JSON.stringify(ids)); } catch { /* storage unavailable */ } }, [ids]);
+  const toggle = (id: IndicatorId) => setIds((cur) => {
+    const next = cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id];
+    // One volume profile at a time.
+    if (id === 'profile24h' && next.includes(id)) return next.filter((x) => x !== 'profile7d');
+    if (id === 'profile7d' && next.includes(id)) return next.filter((x) => x !== 'profile24h');
+    return next;
+  });
+  return [useMemo(() => new Set(ids), [ids]), toggle, () => setIds(DEFAULT_INDICATORS)];
+}
+
+function IndicatorPicker({ show, toggle, reset }: { show: Set<IndicatorId>; toggle: (id: IndicatorId) => void; reset: () => void }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: MouseEvent) => { if (!ref.current?.contains(e.target as Node)) setOpen(false); };
+    document.addEventListener('mousedown', close);
+    return () => document.removeEventListener('mousedown', close);
+  }, [open]);
+  const groups = [...new Set(INDICATORS.map((i) => i.group))];
   return (
-    <button onClick={onClick} className={`flex items-center gap-1.5 rounded-md px-1.5 py-0.5 ring-1 ${on ? 'ring-line text-ink' : 'ring-transparent text-ink-3 line-through'}`} aria-pressed={on}>
-      {swatch}{children}
-    </button>
+    <div ref={ref} className="relative">
+      <button onClick={() => setOpen((o) => !o)} aria-expanded={open}
+        className="flex items-center gap-1.5 rounded-lg border border-line bg-card-2 px-2.5 py-1 text-xs text-ink hover:border-accent">
+        <SlidersHorizontal size={13} />Indicators <span className="rounded bg-accent/20 px-1 text-accent">{show.size}</span>
+      </button>
+      {open && (
+        <div className="absolute right-0 z-30 mt-2 w-72 rounded-xl border border-line bg-card p-3 shadow-2xl shadow-black/50">
+          {groups.map((g) => (
+            <div key={g} className="mb-2">
+              <p className="mb-1 text-[11px] uppercase tracking-wider text-ink-3">{g}</p>
+              <div className="grid grid-cols-2 gap-1">
+                {INDICATORS.filter((i) => i.group === g).map((i) => (
+                  <label key={i.id} className={`flex cursor-pointer items-center gap-2 rounded-md px-2 py-1 text-xs ${show.has(i.id) ? 'bg-accent/15 text-ink' : 'text-ink-2 hover:bg-card-2'}`}>
+                    <input type="checkbox" checked={show.has(i.id)} onChange={() => toggle(i.id)} className="accent-[var(--color-accent)]" />
+                    {i.label}
+                  </label>
+                ))}
+              </div>
+            </div>
+          ))}
+          <button onClick={reset} className="mt-1 text-xs text-accent hover:underline">Back to defaults</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const WATCH_TONE: Record<WatchLevel['kind'], string> = {
+  entry: 'text-accent', invalidation: 'text-critical', target: 'text-good', breakout: 'text-ink', range_top: 'text-supply', range_bottom: 'text-demand',
+};
+
+function WatchCard({ idea }: { idea: TradeIdea }) {
+  return (
+    <Card title="Levels to wait for" icon={<Crosshair size={16} />} right={<span className="text-xs text-ink-3 tabular">now {price(idea.price)}</span>} className="h-full">
+      {!idea.watch.length ? <p className="text-sm text-ink-3">No level within reach yet.</p> : (
+        <ul className="space-y-2">
+          {idea.watch.map((w) => (
+            <li key={`${w.kind}${w.price}`} className="rounded-lg bg-card-2 px-3 py-2">
+              <div className="flex items-baseline justify-between gap-2">
+                <span className={`text-sm font-semibold ${WATCH_TONE[w.kind]}`}>{w.label}</span>
+                <span className="tabular text-sm">{price(w.price)} <span className="text-xs text-ink-3">{pct(w.distancePct, 1, true)}</span></span>
+              </div>
+              <p className="mt-0.5 text-xs text-ink-2">{w.why}</p>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Card>
+  );
+}
+
+function ChecklistCard({ idea }: { idea: TradeIdea }) {
+  const met = idea.checklist.filter((i) => i.ok === true).length;
+  const decided = idea.checklist.filter((i) => i.ok !== null).length;
+  return (
+    <Card
+      title={`Checklist for a ${idea.checklistFor}`}
+      icon={<CheckCircle2 size={16} />}
+      right={<Badge tone={met === decided ? 'good' : met >= decided - 2 ? 'warning' : 'muted'}>{met}/{decided} met</Badge>}
+      className="h-full"
+    >
+      {idea.bias === 'none' && <p className="mb-2 text-xs text-ink-3">No trend yet: checked for a {idea.checklistFor}, the way the 4h leans.</p>}
+      <ul className="space-y-1.5">
+        {idea.checklist.map((c) => (
+          <li key={c.label} className="flex items-start gap-2 text-sm" title={c.detail}>
+            {c.ok === true ? <CheckCircle2 size={15} className="mt-0.5 shrink-0 text-good" aria-label="met" />
+              : c.ok === false ? <XCircle size={15} className="mt-0.5 shrink-0 text-critical" aria-label="not met" />
+              : <CircleDashed size={15} className="mt-0.5 shrink-0 text-warning" aria-label="waiting" />}
+            <span className="min-w-0">
+              <span className={c.ok === false ? 'text-ink-2' : 'text-ink'}>{c.label}</span>
+              <span className="block truncate text-xs text-ink-3">{c.detail}</span>
+            </span>
+          </li>
+        ))}
+      </ul>
+    </Card>
   );
 }
 
 export function ChartPage({ symbol, setSymbol }: { symbol: string; setSymbol: (s: string) => void }) {
   const [tf, setTf] = useState<(typeof TFS)[number][0]>('15m');
+  const [show, toggle, reset] = useIndicators();
   const { data: market } = usePoll<MarketRow[]>('/api/market', 60_000);
-  const { data: candles } = usePoll<Candle[]>(`/api/candles/${symbol}?tf=${tf}&limit=400`, 30_000);
+  const { data: candles } = usePoll<Candle[]>(`/api/candles/${symbol}?tf=${tf}&limit=500`, 30_000);
   const { data: analysis } = usePoll<Analysis>(`/api/analysis/${symbol}`, 30_000);
   const { data: trades } = usePoll<ClosedTradeView[]>('/api/trades?limit=2000', 60_000);
   const { data: acct } = usePoll<AccountSummary>('/api/account', 10_000);
   const { data: idea } = usePoll<TradeIdea>(`/api/ideas/${symbol}`, 30_000);
-  const [layers, setLayers] = useState<ChartLayers>({ zones: true, fvg: true, profile: '24h', supertrend: true, plan: true });
-  const toggle = (k: 'zones' | 'fvg' | 'supertrend' | 'plan') => setLayers((l) => ({ ...l, [k]: !l[k] }));
+  // A stable address (from the loaded candles, rounded to the day): a changing one would refetch on every redraw.
+  const day = 86_400_000;
+  const from = candles?.length ? Math.floor(candles[0].openTime / day) * day : null;
+  const to = candles?.length ? Math.floor(candles[candles.length - 1].openTime / day) * day + 2 * day : null;
+  const { data: sessions } = usePoll<SessionInstance[]>(from && to ? `/api/sessions?from=${from}&to=${to}` : null, 300_000);
 
   const symbols = useMemo(() => [...new Set([symbol, 'BTCUSDT', ...(market ?? []).map((r) => r.symbol)])], [market, symbol]);
   const mine = useMemo(() => (trades ?? []).filter((t) => t.symbol === symbol), [trades, symbol]);
   const open = useMemo(() => (acct?.positions ?? []).filter((p) => p.symbol === symbol), [acct, symbol]);
   const zones = analysis?.zones ?? [];
   const tfMs = TFS.find((x) => x[0] === tf)![1];
+  const lines = INDICATORS.filter((i) => show.has(i.id) && i.group === 'Lines');
 
   return (
     <div className="space-y-5">
@@ -40,7 +148,7 @@ export function ChartPage({ symbol, setSymbol }: { symbol: string; setSymbol: (s
         title={<span className="flex items-center gap-2">{coin(symbol)}<span className="text-ink-3">/USDT perpetual</span></span>}
         icon={<CandlestickChart size={16} />}
         right={
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <select value={symbol} onChange={(e) => setSymbol(e.target.value)} className="rounded-lg border border-line bg-card-2 px-2 py-1 text-xs">
               {symbols.map((s) => <option key={s} value={s}>{coin(s)}</option>)}
             </select>
@@ -49,33 +157,32 @@ export function ChartPage({ symbol, setSymbol }: { symbol: string; setSymbol: (s
                 <button key={name} onClick={() => setTf(name)} className={`px-2.5 py-1 text-xs ${tf === name ? 'bg-accent text-white' : 'bg-card-2 text-ink-2 hover:text-ink'}`}>{name}</button>
               ))}
             </div>
+            <IndicatorPicker show={show} toggle={toggle} reset={reset} />
           </div>
         }
       >
         {candles?.length ? (
           <CandleChart
+            viewKey={`${symbol}|${tf}`}
             candles={candles}
-            overlays={{ zones: tf === '1m' ? [] : zones, fvgs: analysis?.fvgs ?? [], profiles: analysis?.profiles ?? [] }}
-            trades={mine} positions={open} tfMs={tfMs} tf={tf} idea={idea} layers={layers}
+            overlays={{ zones: tf === '1m' ? [] : zones, fvgs: analysis?.fvgs ?? [], profiles: analysis?.profiles ?? [], sessions: sessions ?? [] }}
+            trades={mine} positions={open} tfMs={tfMs} tf={tf} idea={idea} show={show}
           />
-        ) : <div className="grid h-[520px] place-items-center text-sm text-ink-3">Loading candles…</div>}
-        <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-ink-2">
-          <span className="flex items-center gap-1"><span className="h-0.5 w-4 bg-accent" />EMA20</span>
-          <span className="flex items-center gap-1"><span className="h-0.5 w-4 bg-warning" />EMA50</span>
-          <Toggle on={layers.supertrend} onClick={() => toggle('supertrend')} swatch={<span className="h-0.5 w-4 bg-gradient-to-r from-good to-critical" />}>SuperTrend</Toggle>
-          <Toggle on={layers.zones} onClick={() => toggle('zones')} swatch={<span className="h-3 w-4 rounded-sm border border-demand bg-demand/20" />}>supply/demand zones</Toggle>
-          <Toggle on={layers.fvg} onClick={() => toggle('fvg')} swatch={<span className="h-3 w-4 rounded-sm border border-dashed border-demand bg-[repeating-linear-gradient(45deg,transparent_0_3px,var(--color-demand)_3px_4px)] opacity-80" />}>FVG · IFVG ({tf === '1m' ? 'not on 1m' : tf})</Toggle>
-          <Toggle on={layers.plan} onClick={() => toggle('plan')} swatch={<span className="h-0.5 w-4 bg-accent" />}>plan &amp; key levels</Toggle>
-          <label className="flex items-center gap-1.5">
-            volume profile
-            <select value={layers.profile ?? 'off'} onChange={(e) => setLayers((l) => ({ ...l, profile: e.target.value === 'off' ? null : e.target.value }))} className="rounded border border-line bg-card-2 px-1 py-0.5">
-              {(analysis?.profiles ?? []).map((p) => <option key={p.name} value={p.name}>{p.name}</option>)}
-              <option value="off">off</option>
-            </select>
-          </label>
-          <span className="text-ink-3">blue = buy side · orange = sell side · solid box = zone · hatched = FVG (dotted edge = IFVG)</span>
+        ) : <div className="grid h-[640px] place-items-center text-sm text-ink-3">Loading candles…</div>}
+        <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs text-ink-2">
+          {lines.map((l) => <span key={l.id}>{l.label}</span>)}
+          {show.has('sessions') && <span className="flex items-center gap-1"><span className="h-1 w-3 rounded bg-asian" />Asian<span className="ml-1 h-1 w-3 rounded bg-london" />London<span className="ml-1 h-1 w-3 rounded bg-newyork" />New York</span>}
+          {(show.has('zones') || show.has('fvg')) && <span className="text-ink-3">blue = buy side · orange = sell side · solid box = zone · hatched = FVG (dotted edge = IFVG){tf === '1m' ? ' · none on 1m' : ''}</span>}
+          <span className="text-ink-3">drag to scroll, wheel to zoom; the view stays where you leave it</span>
         </div>
       </Card>
+
+      {idea && (
+        <div className="grid gap-5 lg:grid-cols-2">
+          <WatchCard idea={idea} />
+          <ChecklistCard idea={idea} />
+        </div>
+      )}
 
       {idea && <TradePlanCard idea={idea} />}
 

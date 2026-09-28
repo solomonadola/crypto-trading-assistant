@@ -149,9 +149,15 @@ export class Engine {
   tradeIdea(symbol: string): TradeIdea | null {
     const last15 = this.market.recent(symbol, this.cfg.timeframes.trigger, 1)[0];
     if (!last15) return null;
-    const ctx = buildContext(this.market, symbol, last15.closeTime, this.cfg, this.funding.get(symbol) ?? null);
-    if (!ctx) return null;
-    return tradeIdea(ctx, this.armedSetups().filter((a) => a.symbol === symbol).map((a) => a.direction));
+    const at15 = buildContext(this.market, symbol, last15.closeTime, this.cfg, this.funding.get(symbol) ?? null);
+    if (!at15) return null;
+    // Analysis as of the last 15m close; distances and "in the entry area" from the latest minute's price.
+    const live = this.market.recent(symbol, '1m', 1)[0];
+    const ctx = live && live.closeTime > at15.t ? { ...at15, price: live.close } : at15;
+    return tradeIdea(ctx, {
+      armed: this.armedSetups().filter((a) => a.symbol === symbol).map((a) => a.direction),
+      entryBlock: this.sessions.entryBlock(this.clock || last15.closeTime),
+    });
   }
 
   sessionInfo(): SessionInfo {

@@ -69,7 +69,7 @@ describe('trade plan', () => {
   };
 
   it('long: enters from the strongest support below, stop beyond it, targets at resistance with R after costs', () => {
-    const idea = tradeIdea(longCtx(), []);
+    const idea = tradeIdea(longCtx(), { armed: [], entryBlock: null });
     expect(idea.bias).toBe('long');
     const p = idea.plan!;
     expect(p.status).toBe('wait');
@@ -88,15 +88,15 @@ describe('trade plan', () => {
   it('in the entry area when price is inside it; armed when the engine armed that side', () => {
     const c = longCtx();
     c.price = 97;
-    expect(tradeIdea(c, []).plan!.status).toBe('in_zone');
-    expect(tradeIdea(c, ['long']).plan!.status).toBe('armed');
-    expect(tradeIdea(c, ['short']).plan!.status).toBe('in_zone');
+    expect(tradeIdea(c, { armed: [], entryBlock: null }).plan!.status).toBe('in_zone');
+    expect(tradeIdea(c, { armed: ['long'], entryBlock: null }).plan!.status).toBe('armed');
+    expect(tradeIdea(c, { armed: ['short'], entryBlock: null }).plan!.status).toBe('in_zone');
   });
 
   it('short mirrors long', () => {
     const c = ctx({ pivots1h: [pivot('high', 30, 103.8), pivot('low', 40, 96), pivot('low', 50, 92)] }, 'reversed', 'pullback');
     c.analysis.zones = [zone({ type: 'supply', low: 103, high: 104 })];
-    const p = tradeIdea(c, []).plan!;
+    const p = tradeIdea(c, { armed: [], entryBlock: null }).plan!;
     expect(p.direction).toBe('short');
     expect(p.entryLow).toBeCloseTo(102.5, 9);
     expect(p.entryHigh).toBeCloseTo(104.5, 9);
@@ -108,31 +108,71 @@ describe('trade plan', () => {
     // Price 100 inside a demand zone 99-101; resistance from a 1h swing high at 104.
     const c = ctx({ pivots1h: [pivot('low', 40, 92), pivot('high', 50, 104)] }, 'reversed', 'pullback');
     c.analysis.zones = [zone({ type: 'demand', low: 99, high: 101 })];
-    const p = tradeIdea(c, []).plan!;
+    const p = tradeIdea(c, { armed: [], entryBlock: null }).plan!;
     expect(p.entryLow).toBeCloseTo(103.5, 9);
     expect(p.status).toBe('wait');
   });
 
   it('no plan without a trend; no_level when nothing is in reach', () => {
-    expect(tradeIdea(ctx({}, 'none', 'none'), [])).toMatchObject({ bias: 'none', plan: null });
+    expect(tradeIdea(ctx({}, 'none', 'none'), { armed: [], entryBlock: null })).toMatchObject({ bias: 'none', plan: null });
     const far = ctx({ pivots1h: [pivot('low', 30, 80), pivot('high', 40, 104)] });
-    expect(tradeIdea(far, []).plan).toMatchObject({ status: 'no_level', entry: null });
+    expect(tradeIdea(far, { armed: [], entryBlock: null }).plan).toMatchObject({ status: 'no_level', entry: null });
   });
 
   it('fibonacci, EMA and VWAP levels alone are never targets', () => {
     const c = longCtx();
     c.ema1h = { 20: flat(60, 101.5), 50: flat(60, 300) };
-    const targets = tradeIdea(c, []).plan!.targets;
+    const targets = tradeIdea(c, { armed: [], entryBlock: null }).plan!.targets;
     expect(targets.every((t) => t.sources.some((s) => !/^fib |EMA|VWAP/.test(s)))).toBe(true);
   });
 
   it('says when the plan breaks the engine\'s limits', () => {
-    const fits = tradeIdea(longCtx(), []).plan!;
+    const fits = tradeIdea(longCtx(), { armed: [], entryBlock: null }).plan!;
     expect(fits.meetsRules).toBe(true);                     // 1.66% stop, first target 4.7R
     const c = longCtx();
     c.pivots1h = [...c.pivots1h, pivot('high', 55, 98.5)];  // resistance 1.25R above the entry
-    const tight = tradeIdea(c, []).plan!;
+    const tight = tradeIdea(c, { armed: [], entryBlock: null }).plan!;
     expect(tight.meetsRules).toBe(false);
     expect(tight.note).toMatch(/under the 2R minimum/);
+  });
+});
+
+describe('checklist and levels to wait for', () => {
+  const longCtx = () => {
+    const c = ctx({ pivots1h: [pivot('low', 30, 96.2), pivot('high', 40, 104), pivot('high', 50, 108)], vwap15m: flat(60, 104.3), funding: 0.0001, btcChange1hPct: -0.5 });
+    c.analysis.zones = [zone({})];
+    c.analysis.structure = { '4h': { trend: 'up', broken: null, protectedLow: 90, protectedHigh: null, highs: [], lows: [] }, '1h': { trend: 'down', broken: null, protectedLow: null, protectedHigh: 110, highs: [], lows: [] }, '15m': null };
+    c.analysis.adx1h = 24;
+    return c;
+  };
+
+  it('marks each condition met, not met or pending, for the plan direction', () => {
+    const idea = tradeIdea(longCtx(), { armed: [], entryBlock: 'session_ending' });
+    expect(idea.checklistFor).toBe('long');
+    const byLabel = Object.fromEntries(idea.checklist.map((i) => [i.label, i.ok]));
+    expect(byLabel['4h trend up']).toBe(true);
+    expect(byLabel['1h trend up too']).toBe(false);
+    expect(byLabel['Trend strong enough (1h ADX ≥ 20)']).toBe(true);
+    expect(byLabel['Entries open now (session)']).toBe(false);
+    expect(byLabel['Price in the entry area']).toBe(false);
+    expect(byLabel['15m close back in the trend direction']).toBeNull();
+    expect(byLabel['Stop within 2.5%']).toBe(true);
+    expect(byLabel['Funding not against the trade']).toBe(true);
+    expect(byLabel['BTC not moving against it (1h)']).toBe(true);
+  });
+
+  it('with a plan: buy area, invalidation, targets and the breakout level, nearest first', () => {
+    const w = tradeIdea(longCtx(), { armed: [], entryBlock: null }).watch;
+    expect(w.map((x) => x.kind)).toContain('entry');
+    expect(w.map((x) => x.kind)).toContain('invalidation');
+    expect(w.filter((x) => x.kind === 'target').length).toBeGreaterThan(0);
+    for (let i = 1; i < w.length; i++) expect(Math.abs(w[i].distancePct)).toBeGreaterThanOrEqual(Math.abs(w[i - 1].distancePct));
+  });
+
+  it('without a trend: the range top and bottom to watch', () => {
+    const c = ctx({ pivots1h: [pivot('low', 30, 96), pivot('high', 40, 104)] }, 'none', 'none');
+    const w = tradeIdea(c, { armed: [], entryBlock: null }).watch;
+    // Both 4% away: a tie, so compare without order. Retracement levels (fib 0.5/0.618 at 100/99.1) are not range edges.
+    expect(Object.fromEntries(w.map((x) => [x.kind, x.price]))).toEqual({ range_bottom: 96, range_top: 104 });
   });
 });

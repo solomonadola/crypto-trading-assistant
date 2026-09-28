@@ -185,6 +185,22 @@ export interface TradeIdeaTarget {
   r: number;
 }
 
+export interface ChecklistItem {
+  label: string;
+  /** true met, false not met, null not decidable yet (e.g. waiting for a candle). */
+  ok: boolean | null;
+  detail: string;
+}
+
+export interface WatchLevel {
+  kind: 'entry' | 'invalidation' | 'target' | 'breakout' | 'range_top' | 'range_bottom';
+  label: string;
+  price: number;
+  /** From the current price, percent. */
+  distancePct: number;
+  why: string;
+}
+
 /** Advisory: key levels and a suggested plan for one coin. Separate from the engine's own entries. */
 export interface TradeIdea {
   symbol: string;
@@ -197,6 +213,11 @@ export interface TradeIdea {
   longState: string;
   shortState: string;
   levels: KeyLevel[];
+  /** The direction the checklist is for: the bias, or the 4h lean when there is none. */
+  checklistFor: Direction;
+  checklist: ChecklistItem[];
+  /** The prices to wait for, nearest first. */
+  watch: WatchLevel[];
   plan: null | {
     direction: Direction;
     /** armed: the engine waits for confirmation; in_zone: price is in the entry area; wait: not there yet; no_level: nothing to enter from. */

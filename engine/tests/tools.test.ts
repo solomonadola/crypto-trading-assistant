@@ -97,3 +97,14 @@ describe('volume profile', () => {
     expect(volumeProfile('flat', candles([[1, 1, 1, 1], [1, 1, 1, 1]]), 10, 70)).toBeNull();
   });
 });
+
+describe('Bollinger Bands', () => {
+  it('middle is the SMA, bands are k standard deviations away, matching the width indicator', async () => {
+    const { bollingerBands, bollingerWidth, sma } = await import('../src/analysis/indicators');
+    const close = Array.from({ length: 60 }, (_, i) => 100 + Math.sin(i / 3) * 5);
+    const bb = bollingerBands(close, 20, 2);
+    expect(bb.middle).toEqual(sma(close, 20));
+    const w = bollingerWidth(close, 20, 2);
+    for (let i = 19; i < 60; i++) expect((bb.upper[i] - bb.lower[i]) / bb.middle[i]).toBeCloseTo(w[i], 12);
+  });
+});
