@@ -49,7 +49,11 @@ describe('session-end exits', () => {
     const out = e.onCandles([...minutes('2026-07-15T08:30Z', '2026-07-15T16:10Z'), ...minutes('2026-07-15T08:30Z', '2026-07-15T16:10Z', 'ETHUSDT')]
       .sort((a, b) => a.closeTime - b.closeTime));
     expect(closes(out)).toEqual(['p1 session_end 2026-07-15T16:00Z']);
-    expect(e.positions()[0].pendingClose).toEqual({ reason: 'session_end', placedAt: u('2026-07-15T16:00Z') });
+    // Filled at the open of the next minute (16:00-16:01), recorded when that candle closes.
+    const closed = out.find((x) => x.type === 'position_closed')!;
+    expect(iso(closed.time)).toBe('2026-07-15T16:01Z');
+    expect(closed.payload.reason).toBe('session_end');
+    expect(e.positions()).toEqual([]);
   });
 
   it('each trade closes at the end of its own session', () => {
@@ -128,7 +132,7 @@ describe('replay and determinism', () => {
       return e.onCandles(minutes('2026-07-15T02:00Z', '2026-07-16T02:00Z'));
     };
     const first = run();
-    expect(first.length).toBe(2);
+    expect(first.map((x) => x.type)).toEqual(['order_placed', 'position_closed', 'order_placed', 'position_closed']);
     expect(run()).toEqual(first);
   });
 
@@ -155,8 +159,9 @@ describe('commands', () => {
     e.restore([entry(e, 'p1', '2026-07-15T10:00Z')], u('2026-07-15T10:30Z'));
     expect(closes(e.onCommand({ type: 'close', positionId: 'p1' }))).toEqual(['p1 manual 2026-07-15T10:30Z']);
     expect(e.onCommand({ type: 'close', positionId: 'p1' })).toEqual([]);
-    // The pending manual close is not replaced by a session-end close.
-    expect(e.onCandles(minutes('2026-07-15T10:30Z', '2026-07-15T17:00Z'))).toEqual([]);
+    // Filled at the next minute's open; no session-end close follows.
+    const after = e.onCandles(minutes('2026-07-15T10:30Z', '2026-07-15T17:00Z'));
+    expect(after.map((x) => `${x.type} ${x.payload.reason} ${iso(x.time)}`)).toEqual(['position_closed manual 2026-07-15T10:31Z']);
   });
 
   it('close of an unknown position is an error', () => {

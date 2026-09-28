@@ -143,6 +143,10 @@ exits:
   fixed_target_pct: 5.0
   partial_at_pct: 5.0
   partial_close_pct: 50
+  # Where the stop goes: beyond the setup (the zone, or the pullback's extreme
+  # since arming) with a 1h-ATR buffer, or beyond the last 15m swing before
+  # the confirmation with a 15m-ATR buffer.
+  stop_anchor: swing_15m        # setup | swing_15m
   stop_buffer_atr: 0.3
   max_stop_pct: 2.5
   min_rr: 2.0
@@ -163,6 +167,9 @@ exits:
     on_4h_state_change: close
     on_btc_move_1h_pct: 2.0
     on_btc_move_action: tighten     # tighten | close
+    # Close a trade going nowhere: 15m relative volume under rvol_max for
+    # `candles` candles in a row while the best gain so far is under max_peak_pct.
+    stagnation: { rvol_max: 0.5, candles: 6, max_peak_pct: 1.0 }
 
 risk:
   max_trades_per_symbol_per_day: 2
@@ -175,3 +182,5 @@ sim:                            # simulated execution
   taker_fee_pct: 0.05           # every fill is a market or stop order
   slippage_pct: 0.05            # applied to every fill, against the trade
   charge_funding: true
+  maintenance_margin_pct: 0.5   # for the simulated liquidation price
+  entry_timeout_min: 5          # an entry with no price to fill at by then is cancelled

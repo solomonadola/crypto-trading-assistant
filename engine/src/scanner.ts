@@ -4,6 +4,9 @@
 import type { EngineConfig } from './config';
 import type { BinancePublic, SymbolInfo, Ticker24h } from './feed/binancePublic';
 import { atr } from './analysis/indicators';
+import { baseName } from './symbols';
+
+export { baseName };
 
 export interface ScanRow {
   symbol: string;
@@ -18,11 +21,6 @@ export interface ScanResult {
   selected: ScanRow[];
   /** Why the rest were dropped, counted. */
   dropped: Record<string, number>;
-}
-
-/** Excluded when the base asset, with any 1000/1M multiplier prefix removed, is on the exclude or black list. */
-export function baseName(baseAsset: string): string {
-  return baseAsset.replace(/^(1000000|1000|1M)(?=[A-Z])/, '');
 }
 
 /** Volume, exclusion and 24h-change filters; returns candidates by volume, largest first. */

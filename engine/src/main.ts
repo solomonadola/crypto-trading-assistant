@@ -1,6 +1,5 @@
-// Engine entry point: config, database, engine core, scanner, live candle
-// feed, the API and the web page. The simulator and the rest of the API plug
-// in here in later phases (ENGINE_PLAN.md Section 14).
+// Engine entry point: config, database, engine core with the simulated
+// account, scanner, live candle feed, the API and the web page.
 import dotenv from 'dotenv';
 import express from 'express';
 import { existsSync } from 'node:fs';
@@ -12,7 +11,8 @@ import { BinancePublic } from './feed/binancePublic';
 import { CandleStore } from './feed/candleStore';
 import { LiveFeed } from './feed/liveFeed';
 import { replayCandles } from './feed/replayFeed';
-import { Engine } from './core/engine';
+import { CommandError, Engine, type EngineCommand } from './core/engine';
+import { Results } from './storage/results';
 import { SignalLog } from './storage/signals';
 import { scan, type ScanResult } from './scanner';
 import type { SymbolInfo } from './feed/binancePublic';
@@ -20,7 +20,7 @@ import type { Candle, Timeframe } from '../../shared/types';
 
 dotenv.config({ path: ['.env.local', '.env'], quiet: true });
 
-export const ENGINE_VERSION = '0.4.0';
+export const ENGINE_VERSION = '0.5.0';
 const CLOCK_KEY = 'engine_clock';
 const UNIVERSE_KEY = 'universe';
 const SIGNAL_RETENTION_DAYS = 30;
@@ -32,6 +32,7 @@ const db = openDb(dbPath);
 const store = new CandleStore(db);
 const events = new EventLog(db);
 const signals = new SignalLog(db);
+const results = new Results(db);
 const client = new BinancePublic({
   restBase: config.feed.rest_base,
   timeoutMs: config.feed.request_timeout_ms,
@@ -42,17 +43,32 @@ const engine = new Engine({ config, configHash: hash, engineVersion: ENGINE_VERS
 // The universe: the last scan's shortlist, or the configured watch list until the first scan.
 let universe: string[] = JSON.parse(getKv(db, UNIVERSE_KEY) ?? 'null') ?? config.feed.watch_symbols;
 engine.setUniverse(universe);
-// Fed: BTC (the filters compare every coin with it), the universe, and any coin with an open position.
-const symbols = () => [...new Set(['BTCUSDT', ...universe, ...engine.positions().map((p) => p.symbol)])];
+// Fed: BTC (the filters compare every coin with it), the universe, and any coin with a position or pending entry.
+const symbols = () => [...new Set(['BTCUSDT', ...universe, ...engine.account().positions.map((p) => p.symbol), ...engine.account().pendingEntries.map((p) => p.symbol)])];
 
-/** Runs candles through the engine; its events, signals and clock are saved together or not at all. */
+/** Runs candles through the engine; its events, signals, results and clock are saved together or not at all. */
 const persist = db.transaction((batch: Candle[]) => {
+  const before = engine.now();
   const produced = engine.onCandles(batch);
   const sigs = engine.takeSignals();
   events.append(produced);
   signals.append(sigs);
+  results.appendShadows(engine.takeShadowResults());
   setKv(db, CLOCK_KEY, String(engine.now()));
+  // The equity curve: a point every 5 minutes of engine time.
+  const every = 300_000;
+  if (Math.floor(engine.now() / every) > Math.floor(before / every)) {
+    const a = engine.account();
+    results.recordEquity({ time: Math.floor(engine.now() / every) * every, balance: a.balance, equity: a.equity, openPositions: a.positions.length });
+  }
   return { produced, sigs };
+});
+
+/** Runs a control command; its events are saved before the answer. */
+const command = db.transaction((cmd: EngineCommand) => {
+  const produced = engine.onCommand(cmd);
+  events.append(produced);
+  return produced;
 });
 
 const iso = (t: number) => new Date(t).toISOString().slice(0, 16);
@@ -88,7 +104,7 @@ feed.onHistory((candles) => engine.seedHistory(candles));
 
 const pruneTimer = setInterval(() => {
   const removed = store.prune(config.storage.candle_retention_days, Date.now());
-  const oldSignals = signals.prune(Date.now() - SIGNAL_RETENTION_DAYS * 86_400_000);
+  const oldSignals = signals.prune(Date.now() - SIGNAL_RETENTION_DAYS * 86_400_000) + results.prune(Date.now() - SIGNAL_RETENTION_DAYS * 86_400_000);
   if (removed || oldSignals) console.log(`[engine] pruned ${removed} old candles, ${oldSignals} old signals`);
 }, 3_600_000);
 
@@ -98,6 +114,7 @@ const symbolsCache: { list: SymbolInfo[]; at: number } = { list: [], at: 0 };
 async function rescan(): Promise<void> {
   try {
     lastScan = await scan(client, config.scanner, Date.now(), symbolsCache);
+    engine.setSymbolRules(Object.fromEntries(symbolsCache.list.map((s) => [s.symbol, { stepSize: s.stepSize, minQty: s.minQty, minNotional: s.minNotional }])));
     universe = lastScan.selected.map((r) => r.symbol);
     engine.setUniverse(universe);
     signals.append(engine.takeSignals());
@@ -130,6 +147,7 @@ app.get('/api/status', (_req, res) => {
     // The engine has no time until its first candle closes; 0 would read as 1970.
     session: engine.now() ? engine.sessionInfo() : null,
     openPositions: engine.positions().length,
+    halted: engine.account().halted,
     lastEventId: events.lastId(),
     latest1m: Object.fromEntries(status.symbols.map((s) => [s, store.latest(s, '1m', 1)[0] ?? null])),
   });
@@ -143,6 +161,44 @@ app.get('/api/analysis/:symbol', (req, res) => {
   }
   res.json(a);
 });
+app.use(express.json());
+
+app.get('/api/account', (_req, res) => {
+  res.json(engine.account());
+});
+app.get('/api/trades', (req, res) => {
+  const limit = Math.min(Number(req.query.limit) || 200, 2000);
+  res.json(engine.closedTrades().slice(-limit).reverse());
+});
+app.get('/api/events', (req, res) => {
+  const positionId = req.query.position ? String(req.query.position) : null;
+  res.json(positionId ? events.forPosition(positionId) : events.after(Math.max(0, events.lastId() - (Number(req.query.limit) || 200))).reverse());
+});
+app.get('/api/equity', (req, res) => {
+  const hours = Number(req.query.hours) || 24 * 7;
+  res.json(results.equity(engine.now() - hours * 3_600_000));
+});
+app.get('/api/shadows', (req, res) => {
+  const hours = Number(req.query.hours) || 24 * 7;
+  res.json({ stats: results.shadowStats(engine.now() - hours * 3_600_000), recent: results.recentShadows(Number(req.query.limit) || 100) });
+});
+
+// Controls. They act at the engine's time and are saved like any other event.
+const control = (build: (req: express.Request) => EngineCommand) => (req: express.Request, res: express.Response) => {
+  try {
+    const produced = command(build(req));
+    for (const e of produced) console.log(`[control] ${e.type} ${e.symbol ?? ''} ${JSON.stringify(e.payload)}`);
+    res.json({ ok: true, events: produced.length, account: engine.account() });
+  } catch (err) {
+    res.status(err instanceof CommandError ? 400 : 500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+  }
+};
+app.post('/api/positions/:id/close', control((req) => ({ type: 'close', positionId: String(req.params.id) })));
+app.post('/api/control/kill', control(() => ({ type: 'kill', reason: 'manual kill' })));
+app.post('/api/control/pause', control(() => ({ type: 'pause', reason: 'paused from the dashboard' })));
+app.post('/api/control/resume', control(() => ({ type: 'resume' })));
+app.post('/api/control/reset', control((req) => ({ type: 'reset_balance', balance: Number(req.body?.balance) || undefined })));
+
 app.get('/api/scanner', (_req, res) => {
   res.json({ universe, lastScan });
 });

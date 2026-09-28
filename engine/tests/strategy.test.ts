@@ -180,8 +180,10 @@ describe('15m confirmation', () => {
 const lowH1 = () => series(Array.from({ length: 60 }, (_, i) => candle(i, 99, 99.5, 98.5, 99, '1h')));
 
 describe('trade plan', () => {
-  it('stop below the zone plus buffer; target at the first objective or nearer resistance', () => {
-    const c = ctx({ h1: lowH1() });
+  const setupAnchor = { ...cfg, exits: { ...cfg.exits, stop_anchor: 'setup' as const } };
+
+  it('stop_anchor setup: below the zone plus a 1h-ATR buffer; target at the first objective or nearer resistance', () => {
+    const c = ctx({ h1: lowH1() }, setupAnchor);
     const a = armedAt(c, { zone: zone() });
     const plan = planTrade(c, a);
     expect(plan.stop).toBeCloseTo(98 - cfg.exits.stop_buffer_atr * 2, 9);
@@ -194,10 +196,20 @@ describe('trade plan', () => {
     expect(capped.targetSource).toBe('supply zone');
   });
 
+  it('with stop_anchor swing_15m: beyond the last 15m swing low, with a 15m-ATR buffer', () => {
+    const config = { ...cfg, exits: { ...cfg.exits, stop_anchor: 'swing_15m' as const } };
+    const c = ctx({ h1: lowH1(), pivots15m: [pivot('low', 40, 97), pivot('high', 45, 104), pivot('low', 50, 99)] }, config);
+    const plan = planTrade(c, armedAt(c, { zone: zone() }));
+    expect(plan.stop).toBeCloseTo(99 - cfg.exits.stop_buffer_atr * 1, 9);   // 15m ATR is 1
+    // No 15m swing below the entry: the pullback's extreme instead.
+    const none = ctx({ h1: lowH1(), pivots15m: [pivot('low', 50, 100.5)] }, config);
+    expect(planTrade(none, armedAt(none)).stop).toBeCloseTo(99.5 - cfg.exits.stop_buffer_atr * 1, 9);
+  });
+
   it('without a zone, the stop goes beyond the pullback extreme', () => {
     const bars = Array.from({ length: 60 }, (_, i) => candle(i, 100, 100.5, 99.5, 100));
     bars[57] = candle(57, 100, 100.2, 97, 99.8);
-    const c = ctx({ m15: series(bars) });
+    const c = ctx({ m15: series(bars) }, setupAnchor);
     expect(planTrade(c, armedAt(c)).stop).toBeCloseTo(97 - cfg.exits.stop_buffer_atr * 2, 9);
   });
 });

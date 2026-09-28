@@ -50,7 +50,9 @@ export type TradeEventType =
   | 'funding_charged'
   | 'position_closed'
   | 'liquidated'
-  | 'balance_reset';
+  | 'balance_reset'
+  | 'engine_halted'
+  | 'engine_resumed';
 
 /** One row of the append-only trade log. Positions and balance are derived from these. */
 export interface TradeEvent {
@@ -86,7 +88,83 @@ export interface SignalRecord {
   payload: Record<string, unknown>;
 }
 
-export type FeedState ='starting' | 'backfilling' | 'live' | 'stalled' | 'stopped';
+/**
+ * What a confirmed signal would have done if traded exactly as planned:
+ * followed on 1m candles to its stop, first target or session end, with fees
+ * and slippage, without touching the balance. Recorded for filtered signals
+ * (and taken ones, for comparison), so the data shows what each filter saves
+ * or costs.
+ */
+export interface ShadowResult {
+  id?: number;
+  /** When it resolved (engine clock). */
+  time: number;
+  signalTime: number;
+  symbol: string;
+  direction: Direction;
+  signalStatus: 'taken' | 'filtered';
+  signalReason: string | null;
+  entry: number;
+  stop: number;
+  target: number;
+  exit: number;
+  outcome: 'stop' | 'target' | 'session_end';
+  /** Result in multiples of the planned risk, after costs. */
+  r: number;
+}
+
+export interface PositionView {
+  id: string;
+  symbol: string;
+  side: Direction;
+  qty: number;
+  entryPrice: number;
+  stop: number;
+  target: number | null;
+  price: number | null;
+  unrealized: number;
+  pnlPct: number;
+  openedAt: number;
+  sessionName: string | null;
+  sessionClose: number | null;
+  ladderStep: number;
+  partialDone: boolean;
+  pendingClose: string | null;
+  fees: number;
+  funding: number;
+  realized: number;
+}
+
+export interface AccountSummary {
+  time: number;
+  startingBalance: number;
+  balance: number;
+  equity: number;
+  unrealized: number;
+  exposure: number;
+  openRisk: number;
+  dayPnl: number;
+  peakEquity: number;
+  drawdownPct: number;
+  halted: { reason: string; at: number } | null;
+  positions: PositionView[];
+  pendingEntries: { positionId: string; symbol: string; side: Direction; notional: number; placedAt: number }[];
+}
+
+export interface ClosedTradeView {
+  id: string;
+  symbol: string;
+  side: Direction;
+  openedAt: number;
+  closedAt: number;
+  entryPrice: number;
+  exitPrice: number;
+  qty: number;
+  pnl: number;
+  reason: string;
+}
+
+export type FeedState = 'starting' | 'backfilling' | 'live' | 'stalled' | 'stopped';
 
 export interface FeedStatus {
   state: FeedState;

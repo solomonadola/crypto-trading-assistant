@@ -23,7 +23,7 @@ describe('database', () => {
     setKv(db, 'last_minute', '123');
     db.close();
     const again = openDb(file);
-    expect(again.pragma('user_version', { simple: true })).toBe(1);
+    expect(again.pragma('user_version', { simple: true })).toBe(2);
     expect(getKv(again, 'last_minute')).toBe('123');
     expect(getKv(again, 'missing')).toBeNull();
     again.close();

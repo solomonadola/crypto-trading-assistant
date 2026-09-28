@@ -66,6 +66,32 @@ const MIGRATIONS: string[] = [
     value TEXT NOT NULL
   );
   `,
+  // 2: shadow trades of confirmed signals, and the equity curve
+  `
+  CREATE TABLE shadow_results (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    time INTEGER NOT NULL,
+    signal_time INTEGER NOT NULL,
+    symbol TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    signal_status TEXT NOT NULL,
+    signal_reason TEXT,
+    entry REAL NOT NULL,
+    stop REAL NOT NULL,
+    target REAL NOT NULL,
+    exit REAL NOT NULL,
+    outcome TEXT NOT NULL,
+    r REAL NOT NULL
+  );
+  CREATE INDEX shadow_results_time ON shadow_results (time);
+
+  CREATE TABLE equity (
+    time INTEGER PRIMARY KEY,
+    balance REAL NOT NULL,
+    equity REAL NOT NULL,
+    open_positions INTEGER NOT NULL
+  );
+  `,
 ];
 
 export function openDb(file: string): DB {

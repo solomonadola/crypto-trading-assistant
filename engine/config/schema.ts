@@ -148,6 +148,7 @@ export const configSchema = z.object({
     fixed_target_pct: positive,
     partial_at_pct: positive,
     partial_close_pct: pct,
+    stop_anchor: z.enum(['setup', 'swing_15m']),
     stop_buffer_atr: z.number().min(0),
     max_stop_pct: positive,
     min_rr: z.number().min(0),
@@ -164,6 +165,7 @@ export const configSchema = z.object({
       on_4h_state_change: z.enum(['close', 'ignore']),
       on_btc_move_1h_pct: positive,
       on_btc_move_action: z.enum(['tighten', 'close']),
+      stagnation: z.object({ rvol_max: positive, candles: posInt, max_peak_pct: z.number().min(0) }).strict(),
     }).strict(),
   }).strict(),
 
@@ -179,6 +181,8 @@ export const configSchema = z.object({
     taker_fee_pct: z.number().min(0).max(1),
     slippage_pct: z.number().min(0).max(5),
     charge_funding: z.boolean(),
+    maintenance_margin_pct: z.number().min(0).max(10),
+    entry_timeout_min: posInt,
   }).strict(),
 }).strict()
   .superRefine((c, ctx) => {

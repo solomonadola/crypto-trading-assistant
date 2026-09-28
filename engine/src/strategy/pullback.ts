@@ -199,20 +199,31 @@ export interface TradePlan {
 }
 
 /**
- * Stop beyond the zone (or the pullback's extreme when no zone is part of the
- * confluence) plus a buffer; target at the exit mode's first objective or the
- * nearest opposing level, whichever is closer.
+ * Stop per exits.stop_anchor: `setup` puts it beyond the zone (or the
+ * pullback's extreme when no zone is part of the confluence) with a 1h-ATR
+ * buffer; `swing_15m` beyond the last 15m swing low (long) before the
+ * confirming candle with a 15m-ATR buffer. Target at the exit mode's first
+ * objective or the nearest opposing level, whichever is closer.
  */
 export function planTrade(ctx: Context, a: Armed): TradePlan {
   const cfg = ctx.config;
   const s = sign(a.direction);
   const entry = ctx.price;
-  const buffer = cfg.exits.stop_buffer_atr * lastOf(ctx.atr1h);
-  let anchor: number;
-  if (a.zone) anchor = a.direction === 'long' ? a.zone.low : a.zone.high;
-  else {
+  const pullbackExtreme = () => {
     const since = ctx.m15.candles.filter((c) => c.closeTime > a.armedAt - 3_600_000);
-    anchor = a.direction === 'long' ? Math.min(...since.map((c) => c.low)) : Math.max(...since.map((c) => c.high));
+    return a.direction === 'long' ? Math.min(...since.map((c) => c.low)) : Math.max(...since.map((c) => c.high));
+  };
+  let anchor: number;
+  let buffer: number;
+  if (cfg.exits.stop_anchor === 'swing_15m') {
+    const n = ctx.m15.close.length - 1;
+    const swing = [...ctx.pivots15m].reverse()
+      .find((p) => p.type === (a.direction === 'long' ? 'low' : 'high') && p.index < n && s * (entry - p.price) > 0);
+    anchor = swing ? swing.price : pullbackExtreme();
+    buffer = cfg.exits.stop_buffer_atr * lastOf(ctx.atr15m);
+  } else {
+    anchor = a.zone ? (a.direction === 'long' ? a.zone.low : a.zone.high) : pullbackExtreme();
+    buffer = cfg.exits.stop_buffer_atr * lastOf(ctx.atr1h);
   }
   const stop = anchor - s * buffer;
 
