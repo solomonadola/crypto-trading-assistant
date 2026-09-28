@@ -42,7 +42,8 @@ export class MarketBook {
   private readonly candles = new Map<string, Map<Timeframe, Candle[]>>();
   private readonly analysis = new Map<string, SymbolAnalysis>();
 
-  constructor(private readonly config: EngineConfig) {}
+  /** `extras`: the chart-reading analysis (FVGs, volume profiles, trend meter). Trading does not use it; the backtest skips it for speed. */
+  constructor(private readonly config: EngineConfig, private readonly extras = true) {}
 
   /** Adds candles; returns the symbols whose analysis changed. Older or duplicate candles are ignored or replaced. */
   add(batch: Candle[]): string[] {
@@ -84,7 +85,7 @@ export class MarketBook {
     } else {
       list.push(c);
     }
-    const cap = this.config.feed.history[c.tf];
+    const cap = this.config.feed.history[c.tf] ?? 500;
     if (list.length > cap) list.splice(0, list.length - cap);
   }
 
@@ -121,8 +122,12 @@ export class MarketBook {
       return list.length ? list[0].openTime + TIMEFRAME_MS[tf] : 0;
     }));
     // Working gaps nearest the price, at most max_per_tf per timeframe: old gaps far away are noise.
-    const px = lastOf(this.recent(symbol, '1m', 1).map((c) => c.close)) ?? close ?? 0;
+    const px = lastOf(this.recent(symbol, this.config.timeframes.exits, 1).map((c) => c.close)) ?? close ?? 0;
     const dist = (g: Fvg) => (px > g.top ? px - g.top : px < g.bottom ? g.bottom - px : 0);
+    if (!this.extras) {
+      const none = { structure: null, supertrend: null, line: null };
+      return { symbol, asOf, structure, ema4h: { fast, slow, close }, long: view('long'), short: view('short'), zones, fvgs: [], profiles: [], trendMeter: { '4h': none, '1h': none, '15m': none }, adx1h: null };
+    }
     const fvgs = this.config.fvg.timeframes.flatMap((tf) => activeFvgs(detectFvgs(this.recent(symbol, tf), this.config.fvg))
       .sort((a, b) => dist(a) - dist(b))
       .slice(0, this.config.fvg.max_per_tf));

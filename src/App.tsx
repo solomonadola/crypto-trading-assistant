@@ -1,7 +1,7 @@
 // Dashboard shell: navigation, live status, controls, and the pages.
 import { useEffect, useState } from 'react';
 import type { User } from 'firebase/auth';
-import { CandlestickChart, Compass, Crosshair, FlaskConical, History, LayoutDashboard, LogIn, LogOut, Pause, Play, Power, Radio, RotateCcw, Zap } from 'lucide-react';
+import { CandlestickChart, Compass, Crosshair, FlaskConical, FlaskRound, History, LayoutDashboard, LogIn, LogOut, Pause, Play, Power, Radio, RotateCcw, Zap } from 'lucide-react';
 import { get, post, usePoll, type Status } from './lib/api';
 import { signIn, signOutUser, watchUser } from './lib/auth';
 import { hhmm, words } from './lib/format';
@@ -13,6 +13,7 @@ import { Signals } from './pages/Signals';
 import { Trades } from './pages/Trades';
 import { FilterLab } from './pages/FilterLab';
 import { Ideas } from './pages/Ideas';
+import { Backtest } from './pages/Backtest';
 
 const PAGES = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
@@ -22,6 +23,7 @@ const PAGES = [
   { id: 'signals', label: 'Signals', icon: Radio },
   { id: 'trades', label: 'Trades', icon: History },
   { id: 'lab', label: 'Filter lab', icon: FlaskConical },
+  { id: 'backtest', label: 'Backtest', icon: FlaskRound },
 ] as const;
 type PageId = (typeof PAGES)[number]['id'];
 
@@ -158,6 +160,7 @@ function Dashboard({ user }: { user: User | null }) {
           {route.page === 'signals' && <Signals go={go} />}
           {route.page === 'trades' && <Trades go={go} />}
           {route.page === 'lab' && <FilterLab go={go} />}
+          {route.page === 'backtest' && <Backtest />}
         </main>
       </div>
     </div>

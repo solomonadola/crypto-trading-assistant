@@ -5,7 +5,7 @@ import { z } from 'zod';
 const pct = z.number().min(0).max(100);
 const positive = z.number().positive();
 const posInt = z.number().int().positive();
-const timeframe = z.enum(['1m', '15m', '1h', '4h']);
+const timeframe = z.enum(['1m', '5m', '15m', '1h', '4h']);
 const hhmm = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'expected "HH:MM"');
 const onOff = <T extends z.ZodRawShape>(shape: T) => z.object({ enabled: z.boolean(), ...shape }).strict();
 
@@ -27,7 +27,7 @@ export const configSchema = z.object({
   feed: z.object({
     rest_base: z.string().url(),
     timeframes: z.array(timeframe).min(1),
-    history: z.object({ '1m': posInt, '15m': posInt, '1h': posInt, '4h': posInt }).strict(),
+    history: z.object({ '1m': posInt, '5m': posInt.optional(), '15m': posInt, '1h': posInt, '4h': posInt }).strict(),
     watch_symbols: z.array(z.string().regex(/^[A-Z0-9]+USDT$/)).min(1),
     poll_delay_ms: z.number().int().min(0).max(30_000),
     concurrency: z.number().int().min(1).max(32),
@@ -39,7 +39,7 @@ export const configSchema = z.object({
 
   storage: z.object({
     path: z.string().min(1),
-    candle_retention_days: z.object({ '1m': posInt, '15m': posInt, '1h': posInt, '4h': posInt }).strict(),
+    candle_retention_days: z.object({ '1m': posInt, '5m': posInt.optional(), '15m': posInt, '1h': posInt, '4h': posInt }).strict(),
   }).strict(),
 
   backup: z.object({
@@ -205,7 +205,7 @@ export const configSchema = z.object({
     if (c.pullback.fib_min >= c.pullback.fib_max) issue(['pullback', 'fib_min'], 'must be below fib_max');
     if (c.breakout.rsi_min >= c.breakout.rsi_max) issue(['breakout', 'rsi_min'], 'must be below rsi_max');
     if (c.trend.ema_fast >= c.trend.ema_slow) issue(['trend', 'ema_fast'], 'must be below ema_slow');
-    if (!c.feed.timeframes.includes('1m')) issue(['feed', 'timeframes'], '1m is required: stops and session exits run on it');
+    if (!c.feed.timeframes.includes(c.timeframes.exits)) issue(['feed', 'timeframes'], `the exits timeframe (${c.timeframes.exits}) must be fed: stops and session exits run on it`);
     c.exits.ladder.forEach((step, i) => {
       if (step.lock_pct >= step.trigger_pct) issue(['exits', 'ladder', i, 'lock_pct'], 'must be below trigger_pct');
       const prev = c.exits.ladder[i - 1];

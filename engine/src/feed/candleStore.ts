@@ -76,12 +76,12 @@ export class CandleStore {
   }
 
   /** Deletes candles older than the retention for their timeframe. Returns rows removed. */
-  prune(retentionDays: Record<Timeframe, number>, now: number): number {
+  prune(retentionDays: Partial<Record<Timeframe, number>>, now: number): number {
     let removed = 0;
     const del = this.db.prepare('DELETE FROM candles WHERE tf = ? AND open_time < ?');
     this.db.transaction(() => {
       for (const [tf, days] of Object.entries(retentionDays)) {
-        removed += del.run(tf, now - days * 86_400_000).changes;
+        if (days) removed += del.run(tf, now - days * 86_400_000).changes;
       }
     })();
     return removed;

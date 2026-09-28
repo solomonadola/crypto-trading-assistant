@@ -1,6 +1,6 @@
 // Everything the pullback setup, the filters and the score read for one
 // symbol at one 15m close, computed once from the market book. Pure.
-import type { Candle, Direction } from '../../../shared/types';
+import { TIMEFRAME_MS, type Candle, type Direction } from '../../../shared/types';
 import type { EngineConfig } from '../config';
 import type { MarketBook, SymbolAnalysis } from '../analysis/market';
 import { adx, atr, bollingerWidth, choppiness, ema, rsi, rvol, swingPivots, vwapDaily, type Pivot } from '../analysis/indicators';
@@ -72,13 +72,15 @@ export function buildContext(book: MarketBook, symbol: string, t: number, config
 
   const k = config.trend.swing_lookback;
   const emaLevels = [...new Set([20, 50, ...config.pullback.ema_levels])];
-  // BTC over the hour to `t`: the 1m candle closing at t and the one closing 60 minutes earlier
+  // BTC over the hour to `t` on the exits timeframe: the candle closing at t and the one closing an hour earlier
   // (newer candles may already be stored when this is evaluated between 15m closes).
-  const btc1m = book.recent('BTCUSDT', '1m');
+  const exitTf = config.timeframes.exits;
+  const perHour = 3_600_000 / TIMEFRAME_MS[exitTf];
+  const btc = book.recent('BTCUSDT', exitTf);
   let atT = -1;
-  for (let i = btc1m.length - 1; i >= 0; i--) if (btc1m[i].closeTime === t) { atT = i; break; }
-  const btcChange1hPct = atT >= 60 && btc1m[atT - 60].closeTime === t - 3_600_000
-    ? (btc1m[atT].close / btc1m[atT - 60].close - 1) * 100
+  for (let i = btc.length - 1; i >= 0; i--) if (btc[i].closeTime === t) { atT = i; break; }
+  const btcChange1hPct = atT >= perHour && btc[atT - perHour].closeTime === t - 3_600_000
+    ? (btc[atT].close / btc[atT - perHour].close - 1) * 100
     : null;
 
   return {

@@ -1,9 +1,10 @@
 // Types shared by the engine, the API and the UI.
 
-export type Timeframe = '1m' | '15m' | '1h' | '4h';
+export type Timeframe = '1m' | '5m' | '15m' | '1h' | '4h';
 
 export const TIMEFRAME_MS: Record<Timeframe, number> = {
   '1m': 60_000,
+  '5m': 300_000,
   '15m': 900_000,
   '1h': 3_600_000,
   '4h': 14_400_000,
@@ -14,7 +15,7 @@ export const TIMEFRAME_MS: Record<Timeframe, number> = {
  * and 1m close), the larger timeframe is handed to the engine first, so the
  * analysis it feeds is current before the smaller timeframes act on it.
  */
-export const TIMEFRAME_ORDER: Timeframe[] = ['4h', '1h', '15m', '1m'];
+export const TIMEFRAME_ORDER: Timeframe[] = ['4h', '1h', '15m', '5m', '1m'];
 
 /** A closed candle. `closeTime` is the moment it completed: openTime + the timeframe's length. */
 export interface Candle {
@@ -163,6 +164,8 @@ export interface ClosedTradeView {
   pnl: number;
   reason: string;
   session: string | null;
+  signalId?: string | null;
+  riskUsd?: number;
 }
 
 /** A price level where several sources agree. */

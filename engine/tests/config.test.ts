@@ -39,7 +39,7 @@ describe('engine config', () => {
   it('requires the 1m timeframe, which stops and session exits run on', () => {
     const r = raw();
     r.feed.timeframes = ['15m', '1h', '4h'];
-    expect(() => validateConfig(r)).toThrow(/1m is required/);
+    expect(() => validateConfig(r)).toThrow(/exits timeframe \(1m\) must be fed/);
   });
 
   it('hash is stable across key order and changes with any value', () => {

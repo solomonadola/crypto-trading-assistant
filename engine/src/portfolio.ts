@@ -96,6 +96,9 @@ export interface ClosedTrade {
   pnl: number;
   reason: CloseReason;
   session: string | null;
+  signalId: string | null;
+  /** Money at risk at entry: distance to the initial stop x quantity (before costs). */
+  riskUsd: number;
 }
 
 const day = (t: number) => Math.floor(t / 86_400_000);
@@ -192,6 +195,8 @@ export class Portfolio {
           entryPrice: pos.entryPrice, exitPrice: Number(p.price), qty: pos.initialQty, pnl: net,
           reason: (e.type === 'liquidated' ? 'liquidation' : p.reason) as CloseReason,
           session: pos.session?.name ?? null,
+          signalId: pos.signalId,
+          riskUsd: Math.abs(pos.entryPrice - pos.initialStop) * pos.initialQty,
         });
         this.dayPnl.set(day(e.time), (this.dayPnl.get(day(e.time)) ?? 0) + net);
         if (net < 0) {

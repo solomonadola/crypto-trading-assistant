@@ -101,7 +101,7 @@ describe('live feed', () => {
     for (const tf of config.timeframes) {
       const lastClosed = T0 - TIMEFRAME_MS[tf];
       expect(store.lastOpenTime('BTCUSDT', tf)).toBe(lastClosed);
-      expect(store.range('BTCUSDT', tf, 0, Infinity)).toHaveLength(config.history[tf]);
+      expect(store.range('BTCUSDT', tf, 0, Infinity)).toHaveLength(config.history[tf]!);
     }
     expect(feed.status().state).toBe('live');
   });

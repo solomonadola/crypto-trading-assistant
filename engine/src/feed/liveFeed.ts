@@ -133,7 +133,7 @@ export class LiveFeed {
     const warmUp = stored === null;
     if (warmUp) this.st.state = 'backfilling';
     const resume = warmUp ? this.deps.resumeFrom?.() ?? 0 : 0;
-    let from = warmUp ? lastClosedOpen - (this.deps.config.history[tf] - 1) * tfMs : stored + tfMs;
+    let from = warmUp ? lastClosedOpen - ((this.deps.config.history[tf] ?? 500) - 1) * tfMs : stored + tfMs;
     // Back to the engine's clock, at most MAX_RESUME_MS ago.
     if (resume > 0) from = Math.min(from, Math.max(resume - tfMs, now - MAX_RESUME_MS));
     const candles = (await this.deps.client.klinesRange(symbol, tf, from, lastClosedOpen))

@@ -3,7 +3,7 @@
 // (behind sign-in when ALLOWED_EMAILS is set) and the web page.
 import dotenv from 'dotenv';
 import express from 'express';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
 import path from 'node:path';
@@ -166,7 +166,7 @@ function startEngine(): void {
   // Analysis history for every symbol, up to the engine's clock; anything newer is replayed below.
   for (const symbol of symbols()) {
     for (const tf of config.feed.timeframes) {
-      engine.seedHistory(store.latest(symbol, tf, config.feed.history[tf], engine.now() || Date.now()));
+      engine.seedHistory(store.latest(symbol, tf, config.feed.history[tf] ?? 500, engine.now() || Date.now()));
     }
   }
   started = true;
@@ -331,6 +331,21 @@ app.post('/api/control/pause', control(() => ({ type: 'pause', reason: 'paused f
 app.post('/api/control/resume', control(() => ({ type: 'resume' })));
 app.post('/api/control/reset', control((req) => ({ type: 'reset_balance', balance: Number(req.body?.balance) || undefined })));
 
+// Backtest results written by `npm run backtest` (data/backtest/results).
+const RESULTS_DIR = path.resolve('data/backtest/results');
+app.get('/api/backtests', (_req, res) => {
+  const files = existsSync(RESULTS_DIR) ? readdirSync(RESULTS_DIR).filter((f) => f.endsWith('.json')).sort().reverse() : [];
+  res.json(files);
+});
+app.get('/api/backtests/:file', (req, res) => {
+  const file = path.basename(req.params.file);
+  const full = path.join(RESULTS_DIR, file);
+  if (!file.endsWith('.json') || !existsSync(full)) {
+    res.status(404).json({ error: 'No such backtest' });
+    return;
+  }
+  res.type('json').send(readFileSync(full, 'utf8'));
+});
 app.get('/api/sessions', (req, res) => {
   const to = Number(req.query.to) || engine.now() || Date.now();
   const from = Math.max(Number(req.query.from) || to - 86_400_000, to - 60 * 86_400_000);

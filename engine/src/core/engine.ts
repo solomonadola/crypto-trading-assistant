@@ -36,6 +36,14 @@ export interface EngineDeps {
   config: EngineConfig;
   configHash: string;
   engineVersion: string;
+  /**
+   * Backtest research: every confirmed setup becomes a trade of this fixed
+   * size, whatever its checks said and with no risk limits, so each setup's
+   * outcome can be measured and any combination of checks tested afterwards.
+   */
+  research?: { notional: number };
+  /** Compute the chart-reading analysis (default true). */
+  analysisExtras?: boolean;
 }
 
 export type EngineCommand =
@@ -79,7 +87,7 @@ export class Engine {
   constructor(private readonly deps: EngineDeps) {
     this.cfg = deps.config;
     this.sessions = new SessionCalendar(deps.config.sessions);
-    this.market = new MarketBook(deps.config);
+    this.market = new MarketBook(deps.config, deps.analysisExtras ?? true);
     this.portfolio = new Portfolio(deps.config.starting_balance_usdt, deps.config.risk.losing_streak_size_cut);
     this.peakEquity = deps.config.starting_balance_usdt;
   }
@@ -152,7 +160,7 @@ export class Engine {
     const at15 = buildContext(this.market, symbol, last15.closeTime, this.cfg, this.funding.get(symbol) ?? null);
     if (!at15) return null;
     // Analysis as of the last 15m close; distances and "in the entry area" from the latest minute's price.
-    const live = this.market.recent(symbol, '1m', 1)[0];
+    const live = this.market.recent(symbol, this.cfg.timeframes.exits, 1)[0];
     const ctx = live && live.closeTime > at15.t ? { ...at15, price: live.close } : at15;
     return tradeIdea(ctx, {
       armed: this.armedSetups().filter((a) => a.symbol === symbol).map((a) => a.direction),
@@ -277,7 +285,8 @@ export class Engine {
       this.clock = t;
       out.push(...this.onTime());
     }
-    for (const c of candles) if (c.tf === '1m') out.push(...this.onMinute(c));
+    // The exits timeframe (1m live; 5m in a backtest on 5m data) drives fills, stops and targets.
+    for (const c of candles) if (c.tf === this.cfg.timeframes.exits) out.push(...this.onMinute(c));
     out.push(...this.guardrails());
     for (const c of candles) {
       if (c.tf !== this.cfg.timeframes.trigger) continue;
@@ -367,7 +376,7 @@ export class Engine {
     const lossPct = (Math.abs(price - e.stop) / price) * 100 + 2 * (cfg.sim.taker_fee_pct + cfg.sim.slippage_pct);
     const maxNotional = ((cfg.allocation.max_loss_per_trade_pct / 100) * equity / lossPct) * 100;
     const rules = this.rules.get(e.symbol);
-    const qty = roundQty(Math.min(e.notional, maxNotional) / price, rules?.stepSize ?? 0);
+    const qty = roundQty((this.deps.research ? e.notional : Math.min(e.notional, maxNotional)) / price, rules?.stepSize ?? 0);
     if (qty <= 0 || qty < (rules?.minQty ?? 0) || qty * price < (rules?.minNotional ?? 5)) return cancel('size_too_small', { qty });
 
     const liqPrice = liquidationPrice(e.side, price, cfg.leverage, cfg.sim.maintenance_margin_pct);
@@ -408,6 +417,7 @@ export class Engine {
 
   /** Daily loss limit bookkeeping and the drawdown kill switch. */
   private guardrails(): TradeEvent[] {
+    if (this.deps.research) return [];
     const equity = equityOf(this.portfolio, (s) => this.priceOf(s));
     const today = Math.floor(this.clock / DAY);
     if (this.dayStart.day !== today) this.dayStart = { day: today, equity };
@@ -452,7 +462,7 @@ export class Engine {
     const { symbol, t } = ctx;
     const block = this.sessions.entryBlock(t);
     const windowClosed = block !== null && WINDOW_CLOSED.has(block);
-    const busy = this.portfolio.positions().some((p) => p.symbol === symbol) || this.portfolio.pendingEntries().some((e) => e.symbol === symbol);
+    const busy = !this.deps.research && (this.portfolio.positions().some((p) => p.symbol === symbol) || this.portfolio.pendingEntries().some((e) => e.symbol === symbol));
     for (const dir of DIRECTIONS) {
       const key = `${symbol}|${dir}`;
       const armed = this.armed.get(key);
@@ -497,7 +507,7 @@ export class Engine {
       ...(score.total >= cfg.scoring.min_score ? [] : ['score_too_low']),
     ];
     const lastHour = this.market.recent(a.symbol, '1h', 1)[0];
-    const risk = failures.length ? null : decideEntry({
+    const risk = failures.length || this.deps.research ? null : decideEntry({
       config: cfg, t: ctx.t, symbol: a.symbol, side: a.direction, entry: plan.entry, stop: plan.stop,
       portfolio: this.portfolio, priceOf: (s) => this.priceOf(s), dayStartEquity: this.dayStart.equity || this.portfolio.balance,
       lastHourVolume: lastHour ? lastHour.quoteVolume : null, rules: this.rules.get(a.symbol) ?? null, score: score.total,
@@ -516,6 +526,14 @@ export class Engine {
         signalTime: ctx.t, symbol: a.symbol, direction: a.direction, signalStatus: status, signalReason: failures[0] ?? null, plan,
         sessionClose: owner?.closeTime ?? ctx.t + DAY,
       });
+    }
+    if (this.deps.research) {
+      if (!(plan.stopDistancePct > 0) || block) return [];
+      const order: OpenOrder = {
+        action: 'open', orderType: 'market', side: a.direction, notional: this.deps.research.notional, stop: plan.stop,
+        target: cfg.exits.mode === 'ladder' ? null : plan.target, chochLevel: conf.level, signalId: a.id, refPrice: plan.entry,
+      };
+      return [this.emit('order_placed', `${a.id}-pos`, a.symbol, { ...order, plan, score: score.total })];
     }
     if (status !== 'taken') return [];
 
@@ -556,7 +574,7 @@ export class Engine {
 
   /** Latest known price: the newest 1m close. */
   private priceOf(symbol: string): number | null {
-    const c = this.market.recent(symbol, '1m', 1)[0];
+    const c = this.market.recent(symbol, this.cfg.timeframes.exits, 1)[0];
     return c ? c.close : null;
   }
 
