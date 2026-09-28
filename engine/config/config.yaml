@@ -20,6 +20,7 @@ feed:
   # Coins fed before the scanner exists (Phase 4). BTC is always fed: filters use it.
   watch_symbols: [BTCUSDT, ETHUSDT, SOLUSDT]
   poll_delay_ms: 3000           # wait after each minute closes before asking Binance for it
+  concurrency: 8                # requests in flight at once (Binance allows far more)
   stall_after_sec: 120          # no new 1m candle for this long = feed stalled, no new entries
   request_timeout_ms: 10000
   max_retries: 4
@@ -83,7 +84,14 @@ zones:
   lookback_candles: 200
   max_zone_width_pct: 3.0
 
-pullback: { ema_levels: [20, 50], fib_min: 0.5, fib_max: 0.618, min_confluence: 2, armed_expiry_hours: 6 }
+pullback:
+  ema_levels: [20, 50]
+  fib_min: 0.5
+  fib_max: 0.618
+  min_confluence: 2
+  armed_expiry_hours: 6
+  tolerance_atr: 0.5            # a factor counts when price is within this many 1h ATRs of it
+  breakout_levels: 5            # how many earlier 1h swing points to check as old resistance/support
 
 breakout:
   enabled: false                # added in Phase 9, after the pullback path is proven
@@ -93,7 +101,12 @@ breakout:
   rsi_max: 75
   min_range_candles_1h: 8
 
-trigger: { confirmations_min: 1, rsi_period: 14 }   # the 15m CHoCH close is always required
+trigger:                        # the 15m CHoCH close is always required
+  confirmations_min: 1
+  rsi_period: 14
+  rvol_min: 1.5                 # relative volume on the trigger candle
+  rejection_wick_body: 2.0      # wick at least this many times the body
+  lookback_candles: 3           # engulfing/rejection/RSI-cross may be on the trigger or the 2 candles before
 
 filters:                        # every filter can be switched off individually
   chop:       { enabled: true, adx_min_1h: 20, choppiness_max_1h: 61.8, ema_cross_max_1h: 2, ema20_slope_min_atr: 0.1, range_lookback_1h: 12, range_min_pct: 3.0 }

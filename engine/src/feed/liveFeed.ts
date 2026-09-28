@@ -93,16 +93,15 @@ export class LiveFeed {
       this.st.symbols = symbols;
       const fresh: Candle[] = [];
       let errors = 0;
-      for (const symbol of symbols) {
-        for (const tf of this.deps.config.timeframes) {
-          try {
-            fresh.push(...await this.catchUp(symbol, tf, now));
-          } catch (err) {
-            errors++;
-            this.fail(err, `${symbol} ${tf}`);
-          }
+      const jobs = symbols.flatMap((symbol) => this.deps.config.timeframes.map((tf) => ({ symbol, tf })));
+      await inParallel(jobs, this.deps.config.concurrency, async ({ symbol, tf }) => {
+        try {
+          fresh.push(...await this.catchUp(symbol, tf, now));
+        } catch (err) {
+          errors++;
+          this.fail(err, `${symbol} ${tf}`);
         }
-      }
+      });
       if (!errors) this.st.lastError = null;
       fresh.sort(compareCandles);
       for (const c of fresh) {
@@ -165,4 +164,13 @@ export class LiveFeed {
     this.st.lastError = msg;
     this.log(`error ${msg}`);
   }
+}
+
+/** Runs `work` over `items` with at most `limit` in flight. */
+async function inParallel<T>(items: T[], limit: number, work: (item: T) => Promise<void>): Promise<void> {
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) await work(items[next++]);
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
 }

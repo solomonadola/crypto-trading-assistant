@@ -65,7 +65,28 @@ export interface TradeEvent {
   configHash: string;
 }
 
-export type FeedState = 'starting' | 'backfilling' | 'live' | 'stalled' | 'stopped';
+export type Direction = 'long' | 'short';
+
+/**
+ * Stages a setup is recorded at (ENGINE_PLAN.md Section 8.4): armed at a
+ * confluence area; expired without confirmation; or confirmed and then
+ * taken (every check passed) or filtered (the first failing check is the reason).
+ */
+export type SignalStatus = 'armed' | 'expired' | 'taken' | 'filtered';
+
+export interface SignalRecord {
+  id?: number;
+  /** Engine clock. */
+  time: number;
+  symbol: string;
+  setup: 'pullback' | 'breakout';
+  direction: Direction;
+  status: SignalStatus;
+  reason: string | null;
+  payload: Record<string, unknown>;
+}
+
+export type FeedState ='starting' | 'backfilling' | 'live' | 'stalled' | 'stopped';
 
 export interface FeedStatus {
   state: FeedState;

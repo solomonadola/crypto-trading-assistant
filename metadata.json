@@ -1,6 +1,5 @@
 {
-  "name": "Crypto Quant HFT Trading Bot",
-  "description": "High-frequency crypto quantitative trading bot with real-time order flow analytics, scanner, autopilot engine, and Firebase persistence.",
-  "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "name": "Session Engine",
+  "description": "Simulated crypto futures engine: session-based trend pullback setups on Binance public data, no exchange account.",
+  "requestFramePermissions": []
 }

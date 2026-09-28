@@ -152,6 +152,22 @@ describe('live feed', () => {
     expect(store.lastOpenTime('BTCUSDT', '1m')).toBe(T0 - 60_000);
   });
 
+  it('fetches in parallel, never more than `concurrency` at once', async () => {
+    const { feed, config, ex } = setup(['A', 'B', 'C', 'D', 'E', 'F'].map((s) => `${s}USDT`));
+    let inFlight = 0;
+    let most = 0;
+    const real = ex.api.klinesRange.bind(ex.api);
+    ex.api.klinesRange = async (...args: Parameters<typeof real>) => {
+      most = Math.max(most, ++inFlight);
+      await new Promise((r) => setTimeout(r, 5));
+      inFlight--;
+      return real(...args);
+    };
+    await feed.poll();
+    expect(ex.calls).toHaveLength(6 * config.timeframes.length);
+    expect(most).toBe(config.concurrency);
+  });
+
   it('one failing symbol does not stop the others, and is reported', async () => {
     const { feed, store } = setup(['BTCUSDT', 'ETHUSDT'], { failFor: new Set(['ETHUSDT']) });
     await feed.poll();

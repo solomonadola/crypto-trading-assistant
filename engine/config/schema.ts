@@ -30,6 +30,7 @@ export const configSchema = z.object({
     history: z.object({ '1m': posInt, '15m': posInt, '1h': posInt, '4h': posInt }).strict(),
     watch_symbols: z.array(z.string().regex(/^[A-Z0-9]+USDT$/)).min(1),
     poll_delay_ms: z.number().int().min(0).max(30_000),
+    concurrency: z.number().int().min(1).max(32),
     stall_after_sec: posInt,
     request_timeout_ms: posInt,
     max_retries: z.number().int().min(0).max(10),
@@ -95,6 +96,8 @@ export const configSchema = z.object({
     fib_max: z.number().min(0).max(1),
     min_confluence: posInt,
     armed_expiry_hours: positive,
+    tolerance_atr: positive,
+    breakout_levels: posInt,
   }).strict(),
 
   breakout: onOff({
@@ -105,7 +108,13 @@ export const configSchema = z.object({
     min_range_candles_1h: posInt,
   }),
 
-  trigger: z.object({ confirmations_min: z.number().int().min(0), rsi_period: posInt }).strict(),
+  trigger: z.object({
+    confirmations_min: z.number().int().min(0),
+    rsi_period: posInt,
+    rvol_min: positive,
+    rejection_wick_body: positive,
+    lookback_candles: posInt,
+  }).strict(),
 
   filters: z.object({
     chop: onOff({ adx_min_1h: z.number().min(0), choppiness_max_1h: pct, ema_cross_max_1h: z.number().int().min(0), ema20_slope_min_atr: z.number().min(0), range_lookback_1h: posInt, range_min_pct: pct }),

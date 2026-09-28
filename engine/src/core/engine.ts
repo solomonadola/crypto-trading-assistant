@@ -4,14 +4,22 @@
 // same trade events every time, which is what makes replay, restart recovery
 // and the later backtest trustworthy.
 //
-// So far: the clock, sessions, session-end exits and market analysis (trend
-// states and zones). Entries and the simulated broker plug in at the marked
-// points in later phases.
-import type { Candle, TradeEvent, TradeEventType } from '../../../shared/types';
+// So far: the clock, sessions, session-end exits, market analysis (trend
+// states and zones) and the pullback setup up to a taken or filtered signal.
+// Entries and the simulated broker plug in at the marked points in Phase 5.
+import type { Candle, Direction, SignalRecord, TradeEvent, TradeEventType } from '../../../shared/types';
 import type { EngineConfig } from '../config';
 import { SessionCalendar, type SessionInfo } from '../sessions';
 import { Portfolio, type CloseOrder, type CloseReason, type Position } from '../portfolio';
 import { MarketBook, type SymbolAnalysis } from '../analysis/market';
+import { buildContext, type Context } from '../strategy/context';
+import { armedStillValid, planTrade, tryArm, tryConfirm, type Armed, type Confirmation } from '../strategy/pullback';
+import { runFilters } from '../filters';
+import { scoreSignal } from '../scoring';
+
+const DIRECTIONS: Direction[] = ['long', 'short'];
+/** Entry-window blocks that end an armed setup; a funding pause only delays it. */
+const WINDOW_CLOSED = new Set(['outside_sessions', 'session_ending', 'weekend']);
 
 export interface EngineDeps {
   config: EngineConfig;
@@ -30,6 +38,10 @@ export class Engine {
   readonly sessions: SessionCalendar;
   private readonly portfolio = new Portfolio();
   private readonly market: MarketBook;
+  private readonly armed = new Map<string, Armed>();
+  private universe = new Set<string>();
+  private readonly funding = new Map<string, number>();
+  private signals: SignalRecord[] = [];
 
   constructor(private readonly deps: EngineDeps) {
     this.sessions = new SessionCalendar(deps.config.sessions);
@@ -50,6 +62,37 @@ export class Engine {
 
   analysedSymbols(): string[] {
     return this.market.symbols();
+  }
+
+  /** Coins setups may arm on (the scanner's shortlist). Armed setups on coins that leave it expire at their next evaluation. */
+  setUniverse(symbols: string[]): void {
+    this.universe = new Set(symbols);
+    for (const [key, a] of this.armed) {
+      if (!this.universe.has(a.symbol)) {
+        this.armed.delete(key);
+        this.signal(a.symbol, a.direction, 'expired', 'left_universe', { armedId: a.id });
+      }
+    }
+  }
+
+  universeSymbols(): string[] {
+    return [...this.universe];
+  }
+
+  /** Latest funding rate for a symbol, as a fraction per 8h. */
+  onFunding(symbol: string, rate: number): void {
+    this.funding.set(symbol, rate);
+  }
+
+  armedSetups(): Armed[] {
+    return [...this.armed.values()];
+  }
+
+  /** Signals recorded since the last call, oldest first. */
+  takeSignals(): SignalRecord[] {
+    const out = this.signals;
+    this.signals = [];
+    return out;
   }
 
   /** Rebuilds state from the event log and the clock saved with it. */
@@ -99,9 +142,71 @@ export class Engine {
       this.clock = t;
       out.push(...this.onTime());
     }
-    // Later phases: armed setups confirmed on 15m closes; 1m candles drive
-    // stops, the ladder and simulated fills.
+    for (const c of candles) {
+      if (c.tf === this.deps.config.timeframes.trigger && this.universe.has(c.symbol)) this.evaluate(c.symbol, t);
+    }
+    // Phase 5: 1m candles drive stops, the ladder and simulated fills.
     return out;
+  }
+
+  /** The pullback setup for one symbol at a 15m close: expire, confirm, or arm. */
+  private evaluate(symbol: string, t: number): void {
+    const ctx = buildContext(this.market, symbol, t, this.deps.config, this.funding.get(symbol) ?? null);
+    if (!ctx) return;
+    const block = this.sessions.entryBlock(t);
+    const windowClosed = block !== null && WINDOW_CLOSED.has(block);
+    const inPosition = this.portfolio.positions().some((p) => p.symbol === symbol);
+    for (const dir of DIRECTIONS) {
+      const key = `${symbol}|${dir}`;
+      const armed = this.armed.get(key);
+      if (armed) {
+        const why = armedStillValid(ctx, armed, windowClosed);
+        if (why) {
+          this.armed.delete(key);
+          this.signal(symbol, dir, 'expired', why, { armedId: armed.id, price: ctx.price });
+        } else {
+          const conf = tryConfirm(ctx, armed);
+          if (conf) {
+            this.armed.delete(key);
+            this.check(ctx, armed, conf, block);
+          }
+          continue;
+        }
+      }
+      if (windowClosed || inPosition) continue;
+      const fresh = tryArm(ctx, dir);
+      if (fresh) {
+        this.armed.set(key, fresh);
+        this.signal(symbol, dir, 'armed', null, {
+          armedId: fresh.id, price: fresh.price, factors: fresh.factors, zone: fresh.zone && { id: fresh.zone.id, low: fresh.zone.low, high: fresh.zone.high, status: fresh.zone.status },
+          areaLow: fresh.areaLow, areaHigh: fresh.areaHigh, expiresAt: fresh.expiresAt, trendState: ctx.analysis[dir].state,
+        });
+      }
+    }
+  }
+
+  /** A confirmed setup: session, filters, stop, reward/risk and score, in that order. The first failure is the reason. */
+  private check(ctx: Context, a: Armed, conf: Confirmation, block: string | null): void {
+    const cfg = this.deps.config;
+    const filters = runFilters(ctx, a, conf);
+    const plan = planTrade(ctx, a);
+    const score = scoreSignal(ctx, a, conf, plan);
+    const failures = [
+      ...(block ? [`session_${block}`] : []),
+      ...filters.filter((f) => !f.pass).map((f) => `filter_${f.name}`),
+      ...(plan.stopDistancePct > 0 && plan.stopDistancePct <= cfg.exits.max_stop_pct ? [] : ['stop_too_wide']),
+      ...(plan.rewardRisk >= cfg.exits.min_rr ? [] : ['rr_too_low']),
+      ...(score.total >= cfg.scoring.min_score ? [] : ['score_too_low']),
+    ];
+    this.signal(a.symbol, a.direction, failures.length ? 'filtered' : 'taken', failures[0] ?? null, {
+      armedId: a.id, armedAt: a.armedAt, factors: a.factors, trendState: ctx.analysis[a.direction].state,
+      session: this.sessions.ownerAt(ctx.t)?.name ?? null, confirmation: conf, plan, score, filters, failures,
+    });
+    // Phase 5: a taken signal goes to risk sizing and becomes an entry order.
+  }
+
+  private signal(symbol: string, direction: Direction, status: SignalRecord['status'], reason: string | null, payload: Record<string, unknown>): void {
+    this.signals.push({ time: this.clock, symbol, setup: 'pullback', direction, status, reason, payload });
   }
 
   /** Commands act at the engine's current time, never the wall clock. */

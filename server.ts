@@ -1,18 +1,15 @@
-// Entry point for AI Studio Full-Stack hosting
+// Entry point for `npm run dev`, `npm start` and AI Studio hosting.
+// Production runs the bundle `npm run build` makes from engine/src/main.ts;
+// development runs the TypeScript source directly (through tsx).
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const bundledServer = path.join(__dirname, 'server.js');
+const here = path.dirname(fileURLToPath(import.meta.url));
+const bundled = path.join(here, 'server.js');
 
-if (process.env.NODE_ENV === 'production' && fs.existsSync(bundledServer)) {
-  // In production, execute the pre-built, bundled Node.js server
+if (process.env.NODE_ENV === 'production' && fs.existsSync(bundled)) {
   await import('./server.js');
 } else {
-  // In development, execute src/server.ts directly via tsx / Node
-  await import('./src/server.js').catch(async () => {
-    await import('./src/server.ts');
-  });
+  await import('./engine/src/main.ts');
 }

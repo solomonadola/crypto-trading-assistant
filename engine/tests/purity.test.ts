@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 
-const CORE = ['engine/src/core', 'engine/src/analysis', 'engine/src/sessions.ts', 'engine/src/portfolio.ts'];
+const CORE = ['engine/src/core', 'engine/src/analysis', 'engine/src/strategy', 'engine/src/sessions.ts', 'engine/src/portfolio.ts', 'engine/src/filters.ts', 'engine/src/scoring.ts'];
 
 const FORBIDDEN: [RegExp, string][] = [
   [/Date\.now\s*\(/, 'Date.now()'],

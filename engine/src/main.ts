@@ -1,8 +1,10 @@
-// Engine entry point: config, database, engine core, live candle feed and a
-// status API. Strategy, simulator and the full API plug in here in later
-// phases (ENGINE_PLAN.md Section 14).
-import 'dotenv/config';
+// Engine entry point: config, database, engine core, scanner, live candle
+// feed, the API and the web page. The simulator and the rest of the API plug
+// in here in later phases (ENGINE_PLAN.md Section 14).
+import dotenv from 'dotenv';
 import express from 'express';
+import { existsSync } from 'node:fs';
+import path from 'node:path';
 import { loadConfig, configHash } from './config';
 import { getKv, openDb, setKv } from './storage/db';
 import { EventLog } from './storage/eventLog';
@@ -11,10 +13,17 @@ import { CandleStore } from './feed/candleStore';
 import { LiveFeed } from './feed/liveFeed';
 import { replayCandles } from './feed/replayFeed';
 import { Engine } from './core/engine';
+import { SignalLog } from './storage/signals';
+import { scan, type ScanResult } from './scanner';
+import type { SymbolInfo } from './feed/binancePublic';
 import type { Candle, Timeframe } from '../../shared/types';
 
-export const ENGINE_VERSION = '0.3.0';
+dotenv.config({ path: ['.env.local', '.env'], quiet: true });
+
+export const ENGINE_VERSION = '0.4.0';
 const CLOCK_KEY = 'engine_clock';
+const UNIVERSE_KEY = 'universe';
+const SIGNAL_RETENTION_DAYS = 30;
 
 const config = loadConfig();
 const hash = configHash(config);
@@ -22,6 +31,7 @@ const dbPath = process.env.ENGINE_DB_PATH || config.storage.path;
 const db = openDb(dbPath);
 const store = new CandleStore(db);
 const events = new EventLog(db);
+const signals = new SignalLog(db);
 const client = new BinancePublic({
   restBase: config.feed.rest_base,
   timeoutMs: config.feed.request_timeout_ms,
@@ -29,20 +39,27 @@ const client = new BinancePublic({
 });
 const engine = new Engine({ config, configHash: hash, engineVersion: ENGINE_VERSION });
 
-// BTC is always fed: the filters compare every coin with it.
-const symbols = () => [...new Set(['BTCUSDT', ...config.feed.watch_symbols])];
+// The universe: the last scan's shortlist, or the configured watch list until the first scan.
+let universe: string[] = JSON.parse(getKv(db, UNIVERSE_KEY) ?? 'null') ?? config.feed.watch_symbols;
+engine.setUniverse(universe);
+// Fed: BTC (the filters compare every coin with it), the universe, and any coin with an open position.
+const symbols = () => [...new Set(['BTCUSDT', ...universe, ...engine.positions().map((p) => p.symbol)])];
 
-/** Runs candles through the engine; its events and its clock are saved together or not at all. */
+/** Runs candles through the engine; its events, signals and clock are saved together or not at all. */
 const persist = db.transaction((batch: Candle[]) => {
   const produced = engine.onCandles(batch);
+  const sigs = engine.takeSignals();
   events.append(produced);
+  signals.append(sigs);
   setKv(db, CLOCK_KEY, String(engine.now()));
-  return produced;
+  return { produced, sigs };
 });
 
+const iso = (t: number) => new Date(t).toISOString().slice(0, 16);
 function process_(batch: Candle[]): void {
-  const produced = persist(batch);
-  for (const e of produced) console.log(`[engine] ${new Date(e.time).toISOString()} ${e.type} ${e.symbol ?? ''} ${JSON.stringify(e.payload)}`);
+  const { produced, sigs } = persist(batch);
+  for (const e of produced) console.log(`[engine] ${iso(e.time)} ${e.type} ${e.symbol ?? ''} ${JSON.stringify(e.payload)}`);
+  for (const s of sigs) console.log(`[signal] ${iso(s.time)} ${s.symbol} ${s.direction} ${s.status}${s.reason ? ` (${s.reason})` : ''}`);
 }
 
 // Restart (ENGINE_PLAN.md Section 4A.3): state from the event log, then any
@@ -71,8 +88,32 @@ feed.onHistory((candles) => engine.seedHistory(candles));
 
 const pruneTimer = setInterval(() => {
   const removed = store.prune(config.storage.candle_retention_days, Date.now());
-  if (removed) console.log(`[engine] pruned ${removed} old candles`);
+  const oldSignals = signals.prune(Date.now() - SIGNAL_RETENTION_DAYS * 86_400_000);
+  if (removed || oldSignals) console.log(`[engine] pruned ${removed} old candles, ${oldSignals} old signals`);
 }, 3_600_000);
+
+// Scanner and funding rates, every rescan_interval_sec.
+let lastScan: ScanResult | null = null;
+const symbolsCache: { list: SymbolInfo[]; at: number } = { list: [], at: 0 };
+async function rescan(): Promise<void> {
+  try {
+    lastScan = await scan(client, config.scanner, Date.now(), symbolsCache);
+    universe = lastScan.selected.map((r) => r.symbol);
+    engine.setUniverse(universe);
+    signals.append(engine.takeSignals());
+    setKv(db, UNIVERSE_KEY, JSON.stringify(universe));
+    console.log(`[scanner] ${universe.length} coins: ${universe.join(' ')}`);
+  } catch (err) {
+    console.log(`[scanner] failed, keeping ${universe.length} coins: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  try {
+    const fed = new Set(symbols());
+    for (const p of await client.premiumIndex()) if (fed.has(p.symbol)) engine.onFunding(p.symbol, p.lastFundingRate);
+  } catch (err) {
+    console.log(`[funding] failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+const scanTimer = setInterval(() => void rescan(), config.scanner.rescan_interval_sec * 1000);
 
 const app = express();
 app.get('/api/health', (_req, res) => {
@@ -86,7 +127,8 @@ app.get('/api/status', (_req, res) => {
     database: dbPath,
     engineClock: engine.now(),
     feed: status,
-    session: engine.sessionInfo(),
+    // The engine has no time until its first candle closes; 0 would read as 1970.
+    session: engine.now() ? engine.sessionInfo() : null,
     openPositions: engine.positions().length,
     lastEventId: events.lastId(),
     latest1m: Object.fromEntries(status.symbols.map((s) => [s, store.latest(s, '1m', 1)[0] ?? null])),
@@ -101,6 +143,20 @@ app.get('/api/analysis/:symbol', (req, res) => {
   }
   res.json(a);
 });
+app.get('/api/scanner', (_req, res) => {
+  res.json({ universe, lastScan });
+});
+app.get('/api/armed', (_req, res) => {
+  res.json(engine.armedSetups());
+});
+app.get('/api/signals', (req, res) => {
+  const status = req.query.status ? String(req.query.status) as 'armed' | 'expired' | 'taken' | 'filtered' : undefined;
+  res.json(signals.recent({ limit: Number(req.query.limit) || 100, symbol: req.query.symbol ? String(req.query.symbol).toUpperCase() : undefined, status }));
+});
+app.get('/api/signals/summary', (req, res) => {
+  const hours = Number(req.query.hours) || 24;
+  res.json(signals.summary(engine.now() - hours * 3_600_000));
+});
 app.get('/api/candles/:symbol', (req, res) => {
   const tf = String(req.query.tf ?? '15m');
   if (!config.feed.timeframes.includes(tf as Timeframe)) {
@@ -111,16 +167,37 @@ app.get('/api/candles/:symbol', (req, res) => {
   res.json(store.latest(req.params.symbol.toUpperCase(), tf as Timeframe, limit));
 });
 
-const port = Number(process.env.ENGINE_PORT || process.env.PORT || 3100);
+// Any other /api address: a JSON answer, not the web page.
+app.all('/api/*', (req, res) => {
+  res.status(404).json({ error: `No ${req.method} ${req.path}` });
+});
+
+// The web page: Vite with live reload in development, the built files in production.
+const dist = path.resolve('dist');
+if (process.env.NODE_ENV === 'production') {
+  if (existsSync(dist)) {
+    app.use(express.static(dist));
+    app.get('*', (_req, res) => res.sendFile(path.join(dist, 'index.html')));
+  } else {
+    console.log('[engine] no dist/ folder: run `npm run build` to serve the web page');
+  }
+} else {
+  const { createServer } = await import('vite');
+  const vite = await createServer({ server: { middlewareMode: true }, appType: 'spa' });
+  app.use(vite.middlewares);
+}
+
+const port = Number(process.env.PORT || 3000);
 const server = app.listen(port, '0.0.0.0', () => {
-  console.log(`[engine] v${ENGINE_VERSION} config ${hash}, database ${dbPath}, listening on http://localhost:${port}`);
-  feed.start();
+  console.log(`[engine] v${ENGINE_VERSION} config ${hash}, database ${dbPath}, open http://localhost:${port}`);
+  void rescan().then(() => feed.start());
 });
 
 const shutdown = () => {
   console.log('[engine] shutting down');
   feed.stop();
   clearInterval(pruneTimer);
+  clearInterval(scanTimer);
   server.close(() => {
     db.close();
     process.exit(0);
