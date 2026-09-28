@@ -91,10 +91,13 @@ describe('replay feed', () => {
 });
 
 describe('live feed', () => {
-  it('stores warm-up history without handing it on', async () => {
+  it('stores warm-up history and hands it only to history listeners', async () => {
     const { feed, store, handed, config } = setup();
+    const history: Candle[] = [];
+    feed.onHistory((c) => history.push(...c));
     expect(await feed.poll()).toEqual([]);
     expect(handed).toEqual([]);
+    expect(history.filter((c) => c.symbol === 'BTCUSDT' && c.tf === '4h')).toHaveLength(config.history['4h']);
     for (const tf of config.timeframes) {
       const lastClosed = T0 - TIMEFRAME_MS[tf];
       expect(store.lastOpenTime('BTCUSDT', tf)).toBe(lastClosed);

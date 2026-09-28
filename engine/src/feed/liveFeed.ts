@@ -5,7 +5,8 @@
 // and the strategy acts on 15m closes, where seconds do not matter.
 //
 // A symbol seen for the first time gets `history` candles per timeframe as
-// warm-up; those are stored but not handed on. Candles missed while the
+// warm-up; those are stored and handed to history listeners (for analysis),
+// not to candle listeners (which act on them). Candles missed while the
 // process was down or the network failed are handed on, in order, so the
 // engine processes the gap exactly as if it had been running.
 import { TIMEFRAME_MS, compareCandles, type Candle, type FeedStatus, type Timeframe } from '../../../shared/types';
@@ -28,6 +29,7 @@ export interface LiveFeedDeps {
 
 export class LiveFeed {
   private readonly listeners: Listener[] = [];
+  private readonly historyListeners: Listener[] = [];
   private readonly now: () => number;
   private readonly log: (msg: string) => void;
   private timer: ReturnType<typeof setTimeout> | null = null;
@@ -45,6 +47,11 @@ export class LiveFeed {
 
   onCandles(listener: Listener): void {
     this.listeners.push(listener);
+  }
+
+  /** Warm-up history of a symbol seen for the first time: for analysis only, never to act on. */
+  onHistory(listener: Listener): void {
+    this.historyListeners.push(listener);
   }
 
   status(): FeedStatus {
@@ -125,6 +132,7 @@ export class LiveFeed {
     if (warmUp) {
       if (tf === '1m' && candles.length) this.st.lastCloseTime[symbol] = candles[candles.length - 1].closeTime;
       this.log(`${symbol} ${tf}: ${candles.length} candles of history`);
+      if (candles.length) for (const l of this.historyListeners) l(candles);
       return [];
     }
     if (candles.length > 1) this.log(`${symbol} ${tf}: caught up ${candles.length} candles`);
