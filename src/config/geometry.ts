@@ -54,6 +54,96 @@
  * harvest ladder returns profit factor 1.001 on a zero-drift null. It is the
  * exit that collects the entry's edge before it decays.
  */
+
+export type StrategyProfileId = 'ASYMMETRIC_SNIPER' | 'DYNAMIC_SCALP';
+
+export interface StrategyProfile {
+  id: StrategyProfileId;
+  name: string;
+  shortName: string;
+  badge: string;
+  description: string;
+  stopAtrMultiple: number;
+  tier1RMultiple: number;
+  tier2RMultiple: number;
+  tier3RMultiple: number;
+  tier1HarvestPct: number;
+  tier2HarvestPct: number;
+  tier3HarvestPct: number;
+  breakevenFloorRMultiple: number;
+  monthlyRiskCapPct: number;
+}
+
+export const STRATEGY_PROFILES: Record<StrategyProfileId, StrategyProfile> = {
+  ASYMMETRIC_SNIPER: {
+    id: 'ASYMMETRIC_SNIPER',
+    name: 'Asymmetric Sniper (1:3 Core + 1:5 Runner)',
+    shortName: 'Sniper 1:3 / 1:5 R',
+    badge: '1:3 to 1:5 R',
+    description: 'Institutional trend mode. 1.0x ATR stop. 1.5R (30% derisk & move stop to entry +0.5R), 3.0R (40% core target banked), 5.0R (30% parabolic runner). High monthly expectancy with low turnover.',
+    stopAtrMultiple: 1.0,
+    tier1RMultiple: 1.5,
+    tier2RMultiple: 3.0,
+    tier3RMultiple: 5.0,
+    tier1HarvestPct: 0.30,
+    tier2HarvestPct: 0.40,
+    tier3HarvestPct: 0.30,
+    breakevenFloorRMultiple: 0.5,
+    monthlyRiskCapPct: 6.0,
+  },
+  DYNAMIC_SCALP: {
+    id: 'DYNAMIC_SCALP',
+    name: 'Dynamic Scalp (1:1.5 R Quick Rotations)',
+    shortName: 'Scalp 1:1.5 R',
+    badge: '1:1.5 R',
+    description: 'Faster rotations for tight range conditions. 0.75x ATR stop, 1.0R (33%), 1.8R (33%), 2.8R (34%).',
+    stopAtrMultiple: 0.75,
+    tier1RMultiple: 1.0,
+    tier2RMultiple: 1.8,
+    tier3RMultiple: 2.8,
+    tier1HarvestPct: 0.33,
+    tier2HarvestPct: 0.33,
+    tier3HarvestPct: 0.34,
+    breakevenFloorRMultiple: 0.3,
+    monthlyRiskCapPct: 8.0,
+  },
+};
+
+const STRATEGY_PROFILE_STORAGE_KEY = 'crypto_scalp_strategy_profile';
+
+/** Window event fired when the profile is changed from outside the HUD (the server's choice). */
+export const STRATEGY_PROFILE_EVENT = 'strategy-profile-changed';
+
+export function getActiveStrategyProfile(): StrategyProfile {
+  try {
+    if (typeof localStorage !== 'undefined') {
+      const saved = localStorage.getItem(STRATEGY_PROFILE_STORAGE_KEY);
+      if (saved && saved in STRATEGY_PROFILES) {
+        return STRATEGY_PROFILES[saved as StrategyProfileId];
+      }
+    }
+  } catch {}
+  return STRATEGY_PROFILES.ASYMMETRIC_SNIPER;
+}
+
+export function setActiveStrategyProfile(id: StrategyProfileId): StrategyProfile {
+  const profile = STRATEGY_PROFILES[id] || STRATEGY_PROFILES.ASYMMETRIC_SNIPER;
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(STRATEGY_PROFILE_STORAGE_KEY, profile.id);
+    }
+  } catch {}
+  GEOMETRY_CONFIG.stopAtrMultiple = profile.stopAtrMultiple;
+  GEOMETRY_CONFIG.tier1RMultiple = profile.tier1RMultiple;
+  GEOMETRY_CONFIG.tier2RMultiple = profile.tier2RMultiple;
+  GEOMETRY_CONFIG.tier3RMultiple = profile.tier3RMultiple;
+  GEOMETRY_CONFIG.breakevenFloorRMultiple = profile.breakevenFloorRMultiple;
+  GEOMETRY_CONFIG.tier1HarvestPct = profile.tier1HarvestPct;
+  GEOMETRY_CONFIG.tier2HarvestPct = profile.tier2HarvestPct;
+  GEOMETRY_CONFIG.tier3HarvestPct = profile.tier3HarvestPct;
+  return profile;
+}
+
 export interface GeometryConfig {
   /** false restores the original capped behaviour for a controlled comparison. */
   useAtrGeometry: boolean;
@@ -65,6 +155,16 @@ export interface GeometryConfig {
   tier1RMultiple: number;
   tier2RMultiple: number;
   tier3RMultiple: number;
+
+  /**
+   * Share of the position each tier covers, as fractions of the whole. Stamped
+   * on each tier (as `percent`) when a trade opens, and the exit engine banks
+   * what the trade was opened with, so switching profile never changes an
+   * open trade. Tier 3 banks half its share and trails the other half.
+   */
+  tier1HarvestPct: number;
+  tier2HarvestPct: number;
+  tier3HarvestPct: number;
 
   /** Sanity bounds on the stop, in percent. Wide enough not to bind normally. */
   minStopPct: number;
@@ -144,22 +244,64 @@ export interface GeometryConfig {
    * totals rather than surfacing it.
    */
   maxGapHarvestMultiple: number;
+
+  /**
+   * Structural Level-Aware Profit Snapping:
+   * When true, take-profit targets (Tier 1 and Tier 2) snap to the nearest
+   * key market structural resistance (for longs) or support (for shorts)
+   * if that level is closer than the default ATR multiple.
+   */
+  useStructuralTakeProfit: boolean;
+
+  /**
+   * Front-run buffer in ATR when snapping to a structural level.
+   * E.g. 0.08 means placing the take-profit target 0.08 * ATR in front of
+   * the institutional support/resistance wall so limit/market orders fill before the bounce/rejection.
+   */
+  structuralFrontRunAtrBuffer: number;
+
+  /**
+   * Minimum reward-to-risk (R) multiple allowed when snapping a tier to a key level.
+   * Prevents shrinking Tier 1 to a negligible gain if a level is too close to entry.
+   */
+  minStructuralTier1R: number;
+
+  /**
+   * Maximum trail tightening for parabolic bullish runners.
+   * For strong, sustained bullish runners (gain >= 20% or >= 35%),
+   * gives enough breathing room (e.g. 3.5% / 2.8%) so high-momentum trends
+   * aren't prematurely stopped out by normal micro-pullback noise.
+   */
+  runnerParabolicBuffer20Pct: number;
+  runnerParabolicBuffer35Pct: number;
+  runnerDefaultBufferPct: number;
 }
+
+const defaultProfile = getActiveStrategyProfile();
 
 export const GEOMETRY_CONFIG: GeometryConfig = {
   useAtrGeometry: true,
-  stopAtrMultiple: 0.75,
-  tier1RMultiple: 1.0,
-  tier2RMultiple: 2.0,
-  tier3RMultiple: 3.0,
-  minStopPct: 1.5,
-  maxStopPct: 15.0,
-  breakevenFloorRMultiple: 0.1,
-  trailAfterTier: 3,
-  trailAtrMultiple: 1.5,
-  useRiskBasedSizing: false,
-  riskPerTradePct: 0.8,
+  stopAtrMultiple: defaultProfile.stopAtrMultiple,
+  tier1RMultiple: defaultProfile.tier1RMultiple,
+  tier2RMultiple: defaultProfile.tier2RMultiple,
+  tier3RMultiple: defaultProfile.tier3RMultiple,
+  tier1HarvestPct: defaultProfile.tier1HarvestPct,
+  tier2HarvestPct: defaultProfile.tier2HarvestPct,
+  tier3HarvestPct: defaultProfile.tier3HarvestPct,
+  minStopPct: 2.0,       // Realistic minimum stop floor to avoid micro-whipsaws
+  maxStopPct: 7.5,       // Cap at 7.5% to avoid oversized risk on ultra-volatile coins
+  breakevenFloorRMultiple: defaultProfile.breakevenFloorRMultiple,
+  trailAfterTier: 1,
+  trailAtrMultiple: 1.0,
+  useRiskBasedSizing: true, // Equal dollar risk per trade across all assets
+  riskPerTradePct: 0.35,    // Risk 0.35% of portfolio equity ($0.35 on $100 bankroll) per trade
   maxGapHarvestMultiple: 3.0,
+  useStructuralTakeProfit: true,
+  structuralFrontRunAtrBuffer: 0.08,
+  minStructuralTier1R: 0.8,
+  runnerParabolicBuffer20Pct: 0.035, // 3.5% buffer for >=20% runner
+  runnerParabolicBuffer35Pct: 0.025, // 2.5% buffer for >=35% runner
+  runnerDefaultBufferPct: 0.04,     // 4.0% buffer for standard runner
 };
 
 /** Resolves the full ladder from ATR. Returns percentages. */

@@ -102,7 +102,11 @@ check('falling series is bearish', m.trendFromEmas(upCloses.slice().reverse()), 
 const pb = [];
 let ti = 0;
 [104, 102, 100, 102, 106, 110, 114, 118, 120, 118, 115, 112].forEach((p) => pb.push(c(ti++, p, p + 0.5, p - 0.5, p)));
-pb.push(c(ti++, 112, 114, 111.5, 113.8));     // reclaim candle
+// The same candle on ordinary volume is not a reclaim: it has to come with
+// at least 1.15x the average volume of the 20 candles before it.
+const quiet = m.pullbackState([...pb, c(ti, 112, 114, 111.5, 113.8)], 2);
+check('reclaim on ordinary volume is not a reclaim', quiet.reclaimed, false);
+pb.push(c(ti++, 112, 114, 111.5, 113.8, 2));  // reclaim candle, on twice the volume
 const state = m.pullbackState(pb, 2);
 check('recognised as a pullback', state.isPullback, true);
 check('retracement measured (~40% of the move)', Math.abs(state.retracement - 0.4) < 0.15, true);

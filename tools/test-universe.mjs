@@ -25,7 +25,8 @@ const rows = [
   tk('BTCUSDT', 100000, 3000), tk('ETHUSDT', 4000, 2000), tk('USDCUSDT', 1.0001, 5000, { highPrice: '1.0003', lowPrice: '0.9999' }),
   tk('FDUSDUSDT', 1, 4000), tk('NEWUSDT', 0.5, 900), tk('WBTCUSDT', 100000, 800), tk('CRCLBUSDT', 91, 700),
   tk('ODDSTABLEUSDT', 0.999, 600, { highPrice: '1.001', lowPrice: '0.998' }), tk('DEADUSDT', 2, 500, { count: 0 }),
-  tk('SOLUSDT', 200, 400), tk('SOLBTC', 0.002, 9999), tk('TINYUSDT', 1.5, 1),
+  tk('SOLUSDT', 200, 400), tk('SOLBTC', 0.002, 9999), tk('TINYUSDT', 1.5, 60),
+  tk('THINUSDT', 3, 20),   // under the $50M volume floor
 ];
 const tickers = new Map(rows);
 
@@ -36,6 +37,7 @@ check('stablecoins left out (listed or behaving like $1)', !u.includes('USDC') &
 check('wrapped coins and apparent stock tokens left out', !u.includes('WBTC') && !u.includes('CRCLB'));
 check('pairs with no trades left out', !u.includes('DEAD'));
 check('only USDT pairs', !u.some((s) => s.endsWith('BTC') && s !== 'BTC'));
+check('under the volume floor left out', !m.selectUniverse(tickers).includes('THIN'));
 
 console.log('\n2. The list is kept for a day, then re-chosen');
 const t0 = Date.UTC(2026, 8, 22, 8);
@@ -44,6 +46,11 @@ check('chosen on first use', first.length > 0 && first[0] === 'BTC');
 const changed = new Map(rows);
 changed.set('TINYUSDT', tk('TINYUSDT', 1.5, 99999)[1]);    // suddenly the most traded
 check('an hour later: unchanged', m.currentUniverse(changed, t0 + 3600_000).join() === first.join());
+// Fewer coins clear the floor than the list has room for, so a coin that
+// crosses it makes the list longer. That is a ranking change, not a change of
+// configuration: the list is kept until it is due.
+changed.set('THINUSDT', tk('THINUSDT', 3, 70)[1]);
+check('a coin crossing the volume floor: unchanged', m.currentUniverse(changed, t0 + 2 * 3600_000).join() === first.join());
 check('a day later: re-chosen', m.currentUniverse(changed, t0 + 25 * 3600_000)[0] === 'TINY');
 
 console.log('\n3. A configuration change takes effect now, not a day later');

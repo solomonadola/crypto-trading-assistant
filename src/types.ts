@@ -36,6 +36,9 @@ export interface CryptoCoin {
   price_change_percentage_7d?: number;
   /** Real candle-derived analysis, when it could be fetched (marketAnalysisService). */
   analysis?: import('./services/marketAnalysisService').CoinAnalysis;
+  /** Binance Futures 8-hour funding rate in percent (e.g. 0.01 = 0.01% / 8h). */
+  funding_rate?: number;
+  funding_time?: number;
   micro?: {
     currentHourGreen: boolean;
     hourlyChangePct: number;

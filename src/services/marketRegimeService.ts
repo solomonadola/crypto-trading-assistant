@@ -2,6 +2,7 @@ import { CryptoCoin } from '../types';
 import { outcome, netPnlUSD } from './metrics';
 import { EntrySignalResult } from '../types/entryScanner';
 import { AutomatedTradeRecord } from '../types/automatedFeed';
+import { AUTOPILOT_CONFIG } from '../config/autopilot';
 
 export interface BtcMacroRegime {
   btcPrice: number;
@@ -10,6 +11,8 @@ export interface BtcMacroRegime {
   safetyRating: 'SAFE_FOR_LONGS' | 'CAUTION_REDUCED_RISK' | 'LOCK_ALL_LONGS';
   rationale: string;
   allowNewLongs: boolean;
+  allowNewShorts: boolean;
+  favoredDirection: 'LONGS_ONLY' | 'SHORTS_ONLY' | 'BOTH_ALIGNED' | 'DEFENSIVE_HOLD';
   recommendedMaxExposurePct: number;
 }
 
@@ -45,38 +48,69 @@ export function evaluateBtcMacroRegime(coins: CryptoCoin[]): BtcMacroRegime {
   const btcChange = btc?.price_change_percentage_24h ?? 0;
   const btcHourly = btc?.micro?.hourlyChangePct ?? 0;
 
-  if (btcHourly < -2.2 || btcChange < -6.5) {
+  // Macro trend indicators from real candle analysis (if available)
+  const btcAnalysis = btc?.analysis;
+  const isBelowDailyMa25 = btcAnalysis?.ma25_daily ? btcPrice < btcAnalysis.ma25_daily : false;
+  const isBelowDailyMa7 = btcAnalysis?.ma7_daily ? btcPrice < btcAnalysis.ma7_daily : false;
+  const isBtcMacroBearish = (isBelowDailyMa25 && isBelowDailyMa7) || (btcAnalysis?.structure?.trend === 'BEARISH');
+
+  // Heavy dump: hourly drop > 1.2%, 24h drop > 2.8%, or sustained macro downtrend with negative momentum
+  if (btcHourly < -1.2 || btcChange < -2.8 || (isBtcMacroBearish && btcChange < -0.8)) {
     return {
       btcPrice,
       btc24hChangePct: btcChange,
       status: 'HEAVY_DUMP',
       safetyRating: 'LOCK_ALL_LONGS',
-      rationale: `Bitcoin experiencing aggressive sell-off (${btcChange.toFixed(1)}% 24h, ${btcHourly.toFixed(1)}% 1h). Altcoin Long entries strictly paused to prevent stop-outs.`,
+      rationale: isBtcMacroBearish
+        ? `Bitcoin is in a sustained macro downtrend below daily MA(25) & MA(7) with negative momentum. Altcoin Long entries locked to prevent bear market bleed; breakdown Shorts aligned.`
+        : `Bitcoin experiencing aggressive sell-off (${btcChange.toFixed(1)}% 24h, ${btcHourly.toFixed(1)}% 1h). Altcoin Long entries strictly paused; only breakdown Shorts aligned.`,
       allowNewLongs: false,
+      allowNewShorts: true,
+      favoredDirection: 'SHORTS_ONLY',
       recommendedMaxExposurePct: 30
     };
   }
 
-  if (btcHourly < -1.0 || btcChange < -3.0) {
+  // Macro Bearish Consolidation: Price is below major daily moving averages, preventing naive long deployments
+  if (isBtcMacroBearish && btcChange <= 1.0) {
     return {
       btcPrice,
       btc24hChangePct: btcChange,
       status: 'DEFENSIVE_PULLBACK',
       safetyRating: 'CAUTION_REDUCED_RISK',
-      rationale: `Bitcoin pulling back (${btcChange.toFixed(1)}%). Only top A+ setups (Score ≥ 85) allowed.`,
+      rationale: `Bitcoin remains structurally below Daily MA(25) ($${btcAnalysis?.ma25_daily?.toFixed(0) || 'N/A'}). Long deployments restricted to exceptional A+ setups; Shorts permitted on breakdown.`,
+      allowNewLongs: false,
+      allowNewShorts: true,
+      favoredDirection: 'SHORTS_ONLY',
+      recommendedMaxExposurePct: 50
+    };
+  }
+
+  // Defensive pullback: hourly drop > 0.5% or 24h drop > 1.0%
+  if (btcHourly < -0.5 || btcChange < -1.0) {
+    return {
+      btcPrice,
+      btc24hChangePct: btcChange,
+      status: 'DEFENSIVE_PULLBACK',
+      safetyRating: 'CAUTION_REDUCED_RISK',
+      rationale: `Bitcoin pulling back (${btcChange.toFixed(1)}% 24h). Only A+ setups (Score ≥ 85) strictly aligned with trend allowed. Shorts locked to avoid squeeze risk.`,
       allowNewLongs: true,
+      allowNewShorts: false,
+      favoredDirection: 'LONGS_ONLY',
       recommendedMaxExposurePct: 60
     };
   }
 
-  if (btcChange >= 2.0 && btcHourly >= 0) {
+  if (btcChange >= 1.5 && btcHourly >= 0) {
     return {
       btcPrice,
       btc24hChangePct: btcChange,
       status: 'BULLISH_EXPANSION',
       safetyRating: 'SAFE_FOR_LONGS',
-      rationale: `Bitcoin in strong upward impulse (+${btcChange.toFixed(1)}%). Optimal environment for altcoin trend setups.`,
+      rationale: `Bitcoin in strong upward impulse (+${btcChange.toFixed(1)}%). Shorts locked to avoid squeeze risk; Longs favored.`,
       allowNewLongs: true,
+      allowNewShorts: false,
+      favoredDirection: 'LONGS_ONLY',
       recommendedMaxExposurePct: 100
     };
   }
@@ -86,8 +120,10 @@ export function evaluateBtcMacroRegime(coins: CryptoCoin[]): BtcMacroRegime {
     btc24hChangePct: btcChange,
     status: 'HEALTHY_CONSOLIDATION',
     safetyRating: 'SAFE_FOR_LONGS',
-    rationale: `Bitcoin consolidating stably (${btcChange >= 0 ? '+' : ''}${btcChange.toFixed(1)}%). Normal selective deployments active.`,
+    rationale: `Bitcoin consolidating stably (${btcChange >= 0 ? '+' : ''}${btcChange.toFixed(1)}%). Normal selective deployments active for aligned long setups.`,
     allowNewLongs: true,
+    allowNewShorts: false,
+    favoredDirection: 'LONGS_ONLY',
     recommendedMaxExposurePct: 100
   };
 }
@@ -144,6 +180,37 @@ export function evaluateLiquiditySession(date: Date = new Date()): LiquiditySess
   }
 
   // Monday - Friday UTC sessions
+  // 1. Post-US / CME & Binance Funding Rollover Dead Gap (21:00 - 01:00 UTC)
+  // US cash markets closed, Binance daily rollover and funding fee settlement active, Asia not yet open.
+  if (hours >= 21 || hours === 0) {
+    return {
+      sessionName: 'Rollover Dead Gap (21:00 - 01:00 UTC)',
+      zone: 'DEAD_ZONE',
+      utcTimeStr,
+      isWeekend: false,
+      isDeadZone: true,
+      badgeLabel: 'Rollover Dead Gap',
+      badgeColor: 'rose',
+      description: 'US closed, Binance daily funding settlement active. Order book depth drops 50% with high stop-hunt wick risk.'
+    };
+  }
+
+  // 2. Pre-London / European Open Lull (05:30 - 07:00 UTC)
+  // Asian desks winding down / lunch, European institutions have not yet arrived.
+  if ((hours === 5 && minutes >= 30) || hours === 6) {
+    return {
+      sessionName: 'Pre-London Lull (05:30 - 07:00 UTC)',
+      zone: 'DEAD_ZONE',
+      utcTimeStr,
+      isWeekend: false,
+      isDeadZone: true,
+      badgeLabel: 'Pre-London Lull',
+      badgeColor: 'amber',
+      description: 'Asian volume tapering, London desks not yet online. High fakeout and low breakout follow-through risk.'
+    };
+  }
+
+  // 3. Peak Liquidity Overlap: London & New York (13:00 - 16:30 UTC)
   if (hours >= 13 && (hours < 16 || (hours === 16 && minutes <= 30))) {
     return {
       sessionName: 'London & NY Overlap (Peak Daily Liquidity)',
@@ -157,6 +224,7 @@ export function evaluateLiquiditySession(date: Date = new Date()): LiquiditySess
     };
   }
 
+  // 4. US / New York Session (16:30 - 21:00 UTC)
   if (hours >= 13 && hours < 21) {
     return {
       sessionName: 'US / New York Session (NYSE Active)',
@@ -170,6 +238,7 @@ export function evaluateLiquiditySession(date: Date = new Date()): LiquiditySess
     };
   }
 
+  // 5. London / Europe Open (07:00 - 13:00 UTC)
   if (hours >= 7 && hours < 13) {
     return {
       sessionName: 'London / Europe Open',
@@ -183,19 +252,7 @@ export function evaluateLiquiditySession(date: Date = new Date()): LiquiditySess
     };
   }
 
-  if (hours >= 21 || hours < 0) {
-    return {
-      sessionName: 'Evening Dead Gap (21:00 - 00:00 UTC)',
-      zone: 'DEAD_ZONE',
-      utcTimeStr,
-      isWeekend: false,
-      isDeadZone: true,
-      badgeLabel: 'Dead Zone Gap',
-      badgeColor: 'rose',
-      description: 'US markets closed, Asia not yet open. Thin order books and high false breakout risk.'
-    };
-  }
-
+  // 6. Asia Session (01:00 - 05:30 UTC)
   return {
     sessionName: 'Asia Session (Tokyo / Singapore / HK)',
     zone: 'MODERATE',
@@ -250,8 +307,8 @@ export function evaluateMarketActivityRadar(coins: CryptoCoin[]): MarketActivity
   const activeCoins = validCoins.filter(c => Math.abs(c.price_change_percentage_24h || 0) >= 3.0);
 
   // Strict Consolidation Lock trigger:
-  // Triggered if average 24h market volatility is below 2.0% OR fewer than 3 active coins moving
-  const isConsolidationLocked = avgVol < 2.0 || activeCoins.length <= 2;
+  // Triggered if average 24h market volatility is below 3.2% OR fewer than 4 active coins moving (±3%)
+  const isConsolidationLocked = avgVol < 3.2 || activeCoins.length < 4;
 
   if (isConsolidationLocked) {
     return {
@@ -260,10 +317,10 @@ export function evaluateMarketActivityRadar(coins: CryptoCoin[]): MarketActivity
       activePairsCount: activeCoins.length,
       isConsolidationLocked: true,
       liquiditySession: session,
-      badgeLabel: 'Consolidation Lock (<2.0%)',
+      badgeLabel: 'Chop Lock (<3.2%)',
       badgeColor: 'blue',
-      rationale: `Sideways compression (avg ±${avgVol}%, only ${activeCoins.length}/18 pairs moving). Market lacks breakout follow-through.`,
-      guidance: '100% Cash Defense: Strict Consolidation Lock active. Auto-Pilot will not fire trades until volatility expands.'
+      rationale: `Low volatility compression (avg ±${avgVol}%, only ${activeCoins.length} active pairs moving). Market lacks expansion follow-through.`,
+      guidance: '100% Cash Defense: Strict Consolidation Lock active. Auto-Pilot will not fire trades until volatility expands above 3.2%.'
     };
   }
 
@@ -324,24 +381,103 @@ export function evaluateRecentLossCircuitBreaker(trades: AutomatedTradeRecord[])
   const count = recentLosses.length;
   const totalLossUSD = +(recentLosses.reduce((acc, t) => acc + Math.abs(netPnlUSD(t)), 0)).toFixed(2);
 
-  // Auto-Pilot continuous execution: do not trip cooldown lock
+  // Protective loss circuit breaker:
+  // Trips if 2 or more stop-outs occurred in the last 2 hours OR recent loss >= $1.20.
+  // Enforces a 45-minute cool-down shield to halt deployment into hostile/choppy markets.
+  const isEligibleToTrip = count >= 2 || totalLossUSD >= 1.20;
+  const latestLossTime = recentLosses[0]?.closedAtTimestamp || (recentLosses[0]?.openedAtTimestamp ? recentLosses[0].openedAtTimestamp + 1800000 : now);
+  const cooldownDurationMs = 45 * 60 * 1000;
+  const cooldownUntil = latestLossTime + cooldownDurationMs;
+  const isTripped = isEligibleToTrip && now < cooldownUntil;
+  const minutesRemaining = isTripped ? Math.max(1, Math.ceil((cooldownUntil - now) / 60000)) : 0;
+
   return {
-    isTripped: false,
+    isTripped,
     recentLossesCount: count,
     recentLossUSD: totalLossUSD,
-    cooldownUntil: 0,
-    minutesRemaining: 0,
-    reason: count > 0
-      ? `${count} recent stop-out(s) in last 2h (-$${totalLossUSD.toFixed(2)}). Auto-Pilot continuous scanning active.`
+    cooldownUntil: isTripped ? cooldownUntil : 0,
+    minutesRemaining,
+    reason: isTripped
+      ? `Anti-Chop Shield Active: ${count} stop-out(s) in last 2h (-$${totalLossUSD.toFixed(2)}). Pausing new entries for ${minutesRemaining}m to prevent chop bleeding.`
+      : count > 0
+      ? `${count} recent stop-out(s) in last 2h (-$${totalLossUSD.toFixed(2)}). Cooldown passed; selective scanning resumed.`
       : `Zero stop-outs in last 2h. System operating in optimal win regime.`
+  };
+}
+
+export interface MonthlyRiskBudgetInfo {
+  isExhausted: boolean;
+  maxMonthlyRiskBudgetUSD: number;
+  currentMonthNetPnLUSD: number;
+  currentMonthLossPct: number;
+  remainingRiskBudgetUSD: number;
+  budgetUtilizationPct: number;
+  monthName: string;
+  statusBadge: string;
+  statusColor: string;
+  reason: string;
+}
+
+/**
+ * Evaluates the Monthly Risk Budget (-6.0% maximum monthly drawdown circuit breaker).
+ * Protects portfolio capital during hostile chop cycles.
+ */
+export function evaluateMonthlyRiskBudget(
+  trades: AutomatedTradeRecord[],
+  startingCapitalUSD: number = 1000,
+  maxMonthlyRiskCapPct: number = 6.0
+): MonthlyRiskBudgetInfo {
+  const now = new Date();
+  const curYear = now.getUTCFullYear();
+  const curMonth = now.getUTCMonth();
+  const startOfMonthMs = Date.UTC(curYear, curMonth, 1, 0, 0, 0, 0);
+
+  const monthTrades = trades.filter((t) => {
+    if (t.status === 'OPEN') return false;
+    const closedAt = t.closedAtTimestamp || (t.openedAtTimestamp ? t.openedAtTimestamp + 3600000 : 0);
+    return closedAt >= startOfMonthMs;
+  });
+
+  const currentMonthNetPnLUSD = monthTrades.reduce((acc, t) => acc + netPnlUSD(t), 0);
+  const maxMonthlyRiskBudgetUSD = +(startingCapitalUSD * (maxMonthlyRiskCapPct / 100)).toFixed(2);
+  const currentMonthLossUSD = currentMonthNetPnLUSD < 0 ? Math.abs(currentMonthNetPnLUSD) : 0;
+  const currentMonthLossPct = +((currentMonthLossUSD / startingCapitalUSD) * 100).toFixed(2);
+  const remainingRiskBudgetUSD = +(Math.max(0, maxMonthlyRiskBudgetUSD - currentMonthLossUSD)).toFixed(2);
+  const budgetUtilizationPct = Math.min(100, +((currentMonthLossUSD / maxMonthlyRiskBudgetUSD) * 100).toFixed(1));
+
+  const isExhausted = currentMonthLossPct >= maxMonthlyRiskCapPct;
+  const monthName = now.toLocaleString('en-US', { month: 'short', year: 'numeric' });
+
+  return {
+    isExhausted,
+    maxMonthlyRiskBudgetUSD,
+    currentMonthNetPnLUSD: +currentMonthNetPnLUSD.toFixed(2),
+    currentMonthLossPct,
+    remainingRiskBudgetUSD,
+    budgetUtilizationPct,
+    monthName,
+    statusBadge: isExhausted
+      ? 'Monthly Risk Cap Reached'
+      : currentMonthNetPnLUSD >= 0
+      ? `+$${currentMonthNetPnLUSD.toFixed(2)} Profit`
+      : `${budgetUtilizationPct}% Risk Spent`,
+    statusColor: isExhausted ? 'rose' : currentMonthNetPnLUSD >= 0 ? 'emerald' : budgetUtilizationPct > 60 ? 'amber' : 'blue',
+    reason: isExhausted
+      ? `Monthly Risk Budget Exceeded (-${currentMonthLossPct}% vs -${maxMonthlyRiskCapPct}% cap). Capital Preservation Lock is active for ${monthName}. Auto-Pilot will resume on the 1st of next month.`
+      : currentMonthNetPnLUSD >= 0
+      ? `${monthName} net PnL is +$${currentMonthNetPnLUSD.toFixed(2)}. Full $${maxMonthlyRiskBudgetUSD} risk budget available.`
+      : `${monthName} drawdown is -$${currentMonthLossUSD.toFixed(2)} (-${currentMonthLossPct}%). $${remainingRiskBudgetUSD} risk budget remains before defense lock.`
   };
 }
 
 export type AutoPilotPacingState = 
   | 'SLOTS_FULL'
+  | 'MONTHLY_RISK_CAP_LOCKED'
   | 'LOSS_STREAK_COOLDOWN'
   | 'BTC_ARMOR_PAUSE'
+  | 'BTC_PULLBACK_CAUTION'
   | 'CONSOLIDATION_LOCK'
+  | 'DEAD_ZONE_PAUSE'
   | 'QUIET_CHOP_PATIENT'
   | 'SCANNING_FOR_A_PLUS'
   | 'AUTO_PILOT_OFF';
@@ -353,6 +489,8 @@ export interface AutoPilotPacingInfo {
   badgeColor: string;
   explanation: string;
   isDeployingAllowed: boolean;
+  btcRegime: BtcMacroRegime;
+  monthlyRiskBudget?: MonthlyRiskBudgetInfo;
 }
 
 /**
@@ -364,81 +502,123 @@ export function getAutoPilotPacingInfo(
   maxSlots: number,
   btcRegime: BtcMacroRegime,
   lossCircuitBreaker: RecentLossCircuitBreaker,
-  activityRadar: MarketActivityRadar
+  activityRadar: MarketActivityRadar,
+  monthlyRiskBudget?: MonthlyRiskBudgetInfo
 ): AutoPilotPacingInfo {
-  if (!isAutoPilot) {
-    return {
-      state: 'AUTO_PILOT_OFF',
-      headline: 'Auto-Pilot is Paused',
-      badge: 'Manual Only',
-      badgeColor: 'stone',
-      explanation: 'Autonomous execution is toggled off. Deploy signals manually from the scanner queue.',
-      isDeployingAllowed: false
-    };
-  }
+  const base = ((): Omit<AutoPilotPacingInfo, 'btcRegime' | 'monthlyRiskBudget'> => {
+    if (!isAutoPilot) {
+      return {
+        state: 'AUTO_PILOT_OFF',
+        headline: 'Auto-Pilot is Paused',
+        badge: 'Manual Only',
+        badgeColor: 'stone',
+        explanation: 'Autonomous execution is toggled off. Deploy signals manually from the scanner queue.',
+        isDeployingAllowed: false
+      };
+    }
 
-  if (openTradesCount >= maxSlots) {
-    return {
-      state: 'SLOTS_FULL',
-      headline: `All ${maxSlots}/${maxSlots} Tranche Slots Occupied`,
-      badge: '10/10 Slots Full',
-      badgeColor: 'amber',
-      explanation: `Bankroll is 100% deployed across 10 diversified assets. Auto-Pilot will open new positions as existing trades harvest tiers or exit.`,
-      isDeployingAllowed: false
-    };
-  }
+    if (monthlyRiskBudget?.isExhausted) {
+      return {
+        state: 'MONTHLY_RISK_CAP_LOCKED',
+        headline: `Monthly Risk Budget Cap Reached (-${monthlyRiskBudget.currentMonthLossPct}%)`,
+        badge: 'Monthly Defense Lock',
+        badgeColor: 'rose',
+        explanation: monthlyRiskBudget.reason,
+        isDeployingAllowed: false
+      };
+    }
 
-  if (lossCircuitBreaker.isTripped) {
-    return {
-      state: 'LOSS_STREAK_COOLDOWN',
-      headline: `Protective Cooldown (${lossCircuitBreaker.minutesRemaining}m left)`,
-      badge: 'Chop Shield Active',
-      badgeColor: 'red',
-      explanation: lossCircuitBreaker.reason,
-      isDeployingAllowed: false
-    };
-  }
+    if (openTradesCount >= maxSlots) {
+      return {
+        state: 'SLOTS_FULL',
+        headline: `All ${maxSlots}/${maxSlots} Tranche Slots Occupied`,
+        badge: '10/10 Slots Full',
+        badgeColor: 'amber',
+        explanation: `Bankroll is 100% deployed across 10 diversified assets. Auto-Pilot will open new positions as existing trades harvest tiers or exit.`,
+        isDeployingAllowed: false
+      };
+    }
 
-  if (btcRegime.status === 'HEAVY_DUMP') {
-    return {
-      state: 'BTC_ARMOR_PAUSE',
-      headline: 'BTC Flash-Crash Armor Triggered',
-      badge: 'BTC Armor Engaged',
-      badgeColor: 'rose',
-      explanation: `Bitcoin is experiencing aggressive downside velocity (${btcRegime.btc24hChangePct.toFixed(1)}% 24h). All new long entries are locked to prevent catching falling knives.`,
-      isDeployingAllowed: false
-    };
-  }
+    if (lossCircuitBreaker.isTripped) {
+      return {
+        state: 'LOSS_STREAK_COOLDOWN',
+        headline: `Protective Cooldown (${lossCircuitBreaker.minutesRemaining}m left)`,
+        badge: 'Chop Shield Active',
+        badgeColor: 'red',
+        explanation: lossCircuitBreaker.reason,
+        isDeployingAllowed: false
+      };
+    }
 
-  if (activityRadar.isConsolidationLocked) {
-    return {
-      state: 'CONSOLIDATION_LOCK',
-      headline: 'Strict Consolidation Lock (100% Cash Defense)',
-      badge: 'Consolidation Lock (<2.0%)',
-      badgeColor: 'blue',
-      explanation: `Binance is in tight sideways consolidation (avg 24h volatility is ±${activityRadar.avgVolatilityPct}%, with only ${activityRadar.activePairsCount}/18 pairs moving). Breakout follow-through is near 0%. Auto-Pilot is locked 100% in cash to prevent bleed until volatility expands above 2.0%.`,
-      isDeployingAllowed: false
-    };
-  }
+    if (btcRegime.status === 'HEAVY_DUMP') {
+      return {
+        state: 'BTC_ARMOR_PAUSE',
+        headline: 'BTC Flash-Crash Armor Active (Shorts Only)',
+        badge: 'BTC Armor Engaged',
+        badgeColor: 'rose',
+        explanation: `Bitcoin is experiencing aggressive downside velocity (${btcRegime.btc24hChangePct.toFixed(1)}% 24h). Altcoin Long entries are locked to prevent knife-catching; only confirmed breakdown Shorts are allowed.`,
+        isDeployingAllowed: true
+      };
+    }
 
-  if (activityRadar.activityLevel === 'QUIET_CHOP') {
+    if (activityRadar.isConsolidationLocked) {
+      return {
+        state: 'CONSOLIDATION_LOCK',
+        headline: 'Strict Consolidation Lock (100% Cash Defense)',
+        badge: 'Chop Lock (<3.0%)',
+        badgeColor: 'blue',
+        explanation: `Market is in low-volatility sideways compression (avg 24h volatility is ±${activityRadar.avgVolatilityPct}%). Breakout follow-through is low. Auto-Pilot is locked 100% in cash to prevent bleed until volatility expands above 3.0%.`,
+        isDeployingAllowed: false
+      };
+    }
+
+    if (AUTOPILOT_CONFIG.enforceSessionFilter && activityRadar.liquiditySession.isDeadZone) {
+      return {
+        state: 'DEAD_ZONE_PAUSE',
+        headline: `${activityRadar.liquiditySession.sessionName} (${activityRadar.liquiditySession.utcTimeStr})`,
+        badge: activityRadar.liquiditySession.badgeLabel,
+        badgeColor: 'amber',
+        explanation: `${activityRadar.liquiditySession.description} Auto-Pilot is paused to prevent false breakouts and thin order book slippage. Normal execution resumes at liquid session open.`,
+        isDeployingAllowed: false
+      };
+    }
+
+    if (btcRegime.status === 'DEFENSIVE_PULLBACK') {
+      return {
+        state: 'BTC_PULLBACK_CAUTION',
+        headline: 'BTC Pullback Caution (Score ≥ 85 Required)',
+        badge: 'BTC Caution (85+)',
+        badgeColor: 'amber',
+        explanation: `Bitcoin is in a corrective pullback (${btcRegime.btc24hChangePct.toFixed(1)}% 24h). Auto-Pilot requires strict A+ conviction (score ≥ 85) to enter.`,
+        isDeployingAllowed: true
+      };
+    }
+
+    if (activityRadar.activityLevel === 'QUIET_CHOP') {
+      return {
+        state: 'QUIET_CHOP_PATIENT',
+        headline: 'Preserving Cash (Quiet Chop Doldrums)',
+        badge: 'Patience Mode (85+ Required)',
+        badgeColor: 'blue',
+        explanation: `Market-wide trading volume is unusually low. Breakout follow-through is weak, so Auto-Pilot requires a stricter 85/100 conviction score to prevent chop losses.`,
+        isDeployingAllowed: true
+      };
+    }
+
     return {
-      state: 'QUIET_CHOP_PATIENT',
-      headline: 'Preserving Cash (Quiet Chop Doldrums)',
-      badge: 'Patience Mode (85+ Required)',
-      badgeColor: 'blue',
-      explanation: `Market-wide trading volume is unusually low. Breakout follow-through is weak, so Auto-Pilot requires a stricter 85/100 conviction score to prevent chop losses.`,
+      state: 'SCANNING_FOR_A_PLUS',
+      headline: 'Actively Scanning for A+ Momentum Setups',
+      badge: 'Scanning (Score ≥ 80)',
+      badgeColor: 'emerald',
+      explanation: `Market liquidity is healthy (${activityRadar.liquiditySession.sessionName}). Auto-Pilot is continuously evaluating 18 pairs every 10 seconds for qualified entries.`,
       isDeployingAllowed: true
     };
-  }
+  })();
 
   return {
-    state: 'SCANNING_FOR_A_PLUS',
-    headline: 'Actively Scanning for A+ Momentum Setups',
-    badge: 'Scanning (Score ≥ 80)',
-    badgeColor: 'emerald',
-    explanation: `Market liquidity is healthy (${activityRadar.liquiditySession.sessionName}). Auto-Pilot is continuously evaluating 18 pairs every 10 seconds for qualified entries.`,
-    isDeployingAllowed: true
+    ...base,
+    btcRegime,
+    monthlyRiskBudget
   };
 }
 

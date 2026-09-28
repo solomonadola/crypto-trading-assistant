@@ -7,8 +7,8 @@
  */
 import { Candle, Interval, fetchCandles, fetchCandlesForSymbols } from './candleService';
 import {
-  atr, ema, rsi, levelsFrom, nearestLevel, structureFrom, pullbackState,
-  Level, Structure, PullbackState,
+  atr, ema, rsi, levelsFrom, nearestLevel, structureFrom, pullbackState, evaluateInducement,
+  Level, Structure, PullbackState, InducementState,
 } from './indicators';
 
 export interface CoinAnalysis {
@@ -31,14 +31,22 @@ export interface CoinAnalysis {
     consecutiveRedHours: number;
     threeHourChangePct: number;
   };
-  /** Nearest real level below and above, from clustered 4h swings. */
+  /** Nearest real level below and above, selecting best 4H or 1H key level. */
   support: Level | null;
   resistance: Level | null;
+  support4h: Level | null;
+  resistance4h: Level | null;
+  support1h: Level | null;
+  resistance1h: Level | null;
+  keySupportTimeframe: '4H' | '1H';
   /** Distance to those levels in ATR: 0.3 means "a third of a daily range away". */
   distToSupportAtr: number | null;
   distToResistanceAtr: number | null;
   structure: Structure;
   pullback: PullbackState;
+  pullback4h: PullbackState;
+  /** Smart Money Concept (SMC) Inducement & Liquidity Sweep detection. */
+  inducement: InducementState;
 }
 
 const sma = (values: number[], period: number): number | null =>
@@ -85,10 +93,45 @@ export function analyzeFromCandles(
   let consecutiveRedHours = 0;
   for (let i = h1.length - 1; i >= 0 && h1[i].c < h1[i].o; i--) consecutiveRedHours++;
 
-  // Levels from 4h swings, clustered within a third of a daily range.
-  const levels = levelsFrom(h4, dailyAtr / 3, 2);
-  const support = nearestLevel(price, levels, 'SUPPORT', 2);
-  const resistance = nearestLevel(price, levels, 'RESISTANCE', 2);
+  // Levels from 4h swings (macro structural key levels)
+  const levels4h = levelsFrom(h4, dailyAtr / 3, 2);
+  const support4h = nearestLevel(price, levels4h, 'SUPPORT', 2);
+  const resistance4h = nearestLevel(price, levels4h, 'RESISTANCE', 2);
+
+  // Levels from 1h swings (intraday key levels)
+  const levels1h = levelsFrom(h1, dailyAtr / 4, 2);
+  const support1h = nearestLevel(price, levels1h, 'SUPPORT', 2);
+  const resistance1h = nearestLevel(price, levels1h, 'RESISTANCE', 2);
+
+  // Select key support:
+  // If 4H support is nearby (<= 0.35 ATR), prefer 4H as the primary structural anchor.
+  // Otherwise if 1H support is close (<= 0.25 ATR), lock onto 1H key level.
+  let support: Level | null = support4h;
+  let keySupportTimeframe: '4H' | '1H' = '4H';
+  if (support4h && (price - support4h.price) <= dailyAtr * 0.35) {
+    support = support4h;
+    keySupportTimeframe = '4H';
+  } else if (support1h && (price - support1h.price) <= dailyAtr * 0.25) {
+    support = support1h;
+    keySupportTimeframe = '1H';
+  } else if (support4h && support1h) {
+    if (Math.abs(price - support4h.price) <= Math.abs(price - support1h.price)) {
+      support = support4h;
+      keySupportTimeframe = '4H';
+    } else {
+      support = support1h;
+      keySupportTimeframe = '1H';
+    }
+  } else {
+    support = support4h ?? support1h;
+    keySupportTimeframe = support4h ? '4H' : '1H';
+  }
+
+  // Resistance ceiling: 4H preferred, fallback to 1H
+  const resistance = resistance4h ?? resistance1h;
+
+  const pullback1h = pullbackState(h1, 2);
+  const pullback4h = pullbackState(h4, 2);
 
   return {
     at,
@@ -110,10 +153,17 @@ export function analyzeFromCandles(
     },
     support,
     resistance,
+    support4h,
+    resistance4h,
+    support1h,
+    resistance1h,
+    keySupportTimeframe,
     distToSupportAtr: support ? +((price - support.price) / dailyAtr).toFixed(2) : null,
     distToResistanceAtr: resistance ? +((resistance.price - price) / dailyAtr).toFixed(2) : null,
     structure: structureFrom(h4, 2),
-    pullback: pullbackState(h1, 2),
+    pullback: pullback1h,
+    pullback4h,
+    inducement: evaluateInducement(price, h1, support, dailyAtr, 'LONG'),
   };
 }
 

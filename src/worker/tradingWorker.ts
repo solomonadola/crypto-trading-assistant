@@ -1,7 +1,7 @@
 // Must be first: the data layer below keeps its working state in localStorage.
 import { saveStateNow, STATE_FILE } from './memoryStorage';
 import { db, FIRESTORE_WRITES_ENABLED, getFirestoreHealth, FirestoreHealth } from '../lib/firebase';
-import { doc, setDoc, onSnapshot } from 'firebase/firestore';
+import { doc, setDoc, getDocFromServer } from 'firebase/firestore';
 import { fetchLiveMarketCoins, buildPriceMap, getLastTickerFetchTime } from '../services/binanceService';
 import {
   loadLocalTrades,
@@ -17,6 +17,7 @@ import {
   reconcileWithFirestore,
   getLastReconcile,
   ReconcileResult,
+  resetAutomatedTrades,
 } from '../services/automatedFeedService';
 import { closeTradeAt } from '../services/cycleEngineService';
 import { CryptoCoin } from '../types';
@@ -27,6 +28,8 @@ import { computePacing, selectAutoPilotCandidate, manualDeployBlockReason, findE
 import { visibleTrades, isClosed } from '../services/metrics';
 import { getUsage, usageSummary, Usage } from '../services/firestoreMeter';
 import { AutomatedTradeRecord } from '../types/automatedFeed';
+import { AUTOPILOT_CONFIG, getAllowShorts, setAllowShorts } from '../config/autopilot';
+import { STRATEGY_PROFILES, StrategyProfileId, getActiveStrategyProfile, setActiveStrategyProfile } from '../config/geometry';
 
 /**
  * 24/7 trading worker: the browser's refresh loop, run by a server process so
@@ -68,6 +71,9 @@ export interface WorkerStatus {
   /** Why the worker is not running, when it is not. */
   disabledReason: string | null;
   isAutoPilot: boolean;
+  allowShorts: boolean;
+  /** The exit profile new trades open with (config/geometry.ts). */
+  strategyProfile: StrategyProfileId;
   ticksCount: number;
   lastTickAt: number | null;
   /** Milliseconds since the last completed tick, measured on the server. */
@@ -144,11 +150,47 @@ function logEvent(message: string, level: WorkerLogEntry['level'] = 'info') {
   console.log(`[TradingWorker ${new Date().toISOString().slice(11, 19)}] ${message}`);
 }
 
-// One at a time: ticks, actions, flushes.
+// One at a time: ticks, actions, flushes, protected by self-healing timeouts.
 let lock: Promise<unknown> = Promise.resolve();
-function exclusive<T>(fn: () => Promise<T>): Promise<T> {
-  const run = lock.then(fn, fn);
-  lock = run.catch(() => {});
+let lockOwner = '';
+let lockAcquiredAt = 0;
+
+export function resetWorkerLock(): void {
+  lock = Promise.resolve();
+  isTickInFlight = false;
+  lockOwner = '';
+  lockAcquiredAt = 0;
+  console.log('[TradingWorker] Worker lock and tick status forcefully reset');
+}
+
+function exclusive<T>(name: string, fn: () => Promise<T>, timeoutMs = 25_000): Promise<T> {
+  // If the lock has been held longer than timeoutMs, break it to prevent deadlocks
+  if (lockAcquiredAt > 0 && Date.now() - lockAcquiredAt > timeoutMs) {
+    console.warn(`[TradingWorker] Lock held by "${lockOwner}" for ${Date.now() - lockAcquiredAt}ms (> ${timeoutMs}ms limit). Breaking lock.`);
+    lock = Promise.resolve();
+  }
+
+  const run = lock.then(async () => {
+    lockOwner = name;
+    lockAcquiredAt = Date.now();
+    try {
+      return await Promise.race([
+        fn(),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error(`Operation "${name}" timed out after ${timeoutMs}ms`)), timeoutMs)
+        ),
+      ]);
+    } finally {
+      lockAcquiredAt = 0;
+      lockOwner = '';
+    }
+  });
+
+  lock = run.catch(() => {
+    lockAcquiredAt = 0;
+    lockOwner = '';
+  });
+
   return run;
 }
 
@@ -166,7 +208,7 @@ function subscribe() {
 // one: each change bumps a version number, and the caller sends back the
 // version it has. bootId changes on restart, when versions start again.
 
-const bootId = Math.random().toString(36).slice(2, 10);
+let bootId = Math.random().toString(36).slice(2, 10);
 let feedVersion = 1;   // never 0: callers send 0 to ask for the full list
 const tradeSignature = new Map<string, string>();
 const changedAtVersion = new Map<string, number>();
@@ -206,7 +248,7 @@ export interface TradesFeed {
  * gets the full list.
  */
 export function getTradesFeed(since: number, boot: string): TradesFeed | null {
-  if (!isWorkerRunning || !hasConfirmedTradeList()) return null;
+  if (!hasConfirmedTradeList()) return null;
   trackChanges(loadLocalTrades());
   const full = boot !== bootId || !(since > 0) || since > feedVersion;
   const all = loadLocalTrades();
@@ -224,11 +266,24 @@ function skip(reason: string): TickResult {
   return { success: false, skipped: true, reason };
 }
 
+let tickStartedAt = 0;
+
 export async function executeTradingTick(): Promise<TickResult> {
   if (!isWorkerRunning) return skip(disabledReason || 'Worker is not running');
-  if (isTickInFlight) return skip('A tick is already running');
+  if (isTickInFlight) {
+    if (tickStartedAt > 0 && Date.now() - tickStartedAt > 35_000) {
+      logEvent('Previous tick exceeded 35s. Breaking lock and recovering worker.', 'warn');
+      resetWorkerLock();
+    } else {
+      return skip('A tick is already running');
+    }
+  }
   isTickInFlight = true;
-  return exclusive(runTick).finally(() => { isTickInFlight = false; });
+  tickStartedAt = Date.now();
+  return exclusive('tick', runTick, 25_000).finally(() => {
+    isTickInFlight = false;
+    tickStartedAt = 0;
+  });
 }
 
 async function runTick(): Promise<TickResult> {
@@ -307,7 +362,7 @@ async function runTick(): Promise<TickResult> {
         signals: scanLiveMarketEntries(coins, 'FUTURES_1_2D'),
         trades: book,
         bankroll,
-        pacingInfo: computePacing(coins, book, true, bankroll.totalSlots),
+        pacingInfo: computePacing(coins, book, true, bankroll.totalSlots, bankroll.totalPortfolioValueUSD),
         now,
         lastDeployAt,
       });
@@ -330,6 +385,10 @@ async function runTick(): Promise<TickResult> {
       lastDecision = { reason: 'Auto-pilot is off on the server' };
     }
 
+    if (getPendingWriteCount() > 0 && (sync.events.length > 0 || deployedSymbol || excess.length > 0)) {
+      await flushPendingWrites().catch((e) => console.warn('Tick milestone flush error:', e));
+    }
+
     ticksCount += 1;
     lastTickAt = Date.now();
     lastTickDurationMs = lastTickAt - startTime;
@@ -348,7 +407,7 @@ async function runTick(): Promise<TickResult> {
 
 /** Writes queued changes to Firestore now (also runs every WORKER_FLUSH_MINUTES). */
 export function flushNow(): Promise<number> {
-  return exclusive(async () => {
+  return exclusive('flushNow', async () => {
     const pending = getPendingWriteCount();
     if (!pending) return 0;
     const written = await flushPendingWrites();
@@ -356,32 +415,28 @@ export function flushNow(): Promise<number> {
     if (f.error) logEvent(`Firestore save failed after ${written} of ${pending}; kept for the next save: ${f.error}`, 'warn');
     else if (written) logEvent(`Saved ${written} change(s) to Firestore`);
     return written;
-  });
+  }, 15_000);
 }
 
 /**
- * One sync round: compare with Firestore first (changes since the last round,
- * or every trade when `full`), pulling what Firestore has newer and queueing
- * what the server has newer, and only then write.
- *
- * The order matters. Pushing first overwrote changes made elsewhere: a trade
- * closed in a browser, with the server still holding it open and a routine
- * checkpoint queued, was written back as open - and because a write merges
- * fields, Firestore was left with status OPEN still carrying exitReason and
- * closedAtTimestamp. That is the trade "coming back to life" with its original
- * entry price. Reading first lets the close cancel the queued write instead.
+ * One sync round: flushes pending writes down to Firestore.
+ * When `full` is true (e.g. on manual resync or cold start), reconciles with Firestore.
+ * In server-first architecture, the server memory is authoritative and writes down to Firestore with ZERO read churn.
  */
 export function syncWithFirestore(full = false): Promise<ReconcileResult | null> {
-  return exclusive(async () => {
+  return exclusive('syncWithFirestore', async () => {
     if (!hasConfirmedTradeList()) return null;
-    const r = await reconcileWithFirestore(full);
+    let r: ReconcileResult | null = null;
+    if (full) {
+      r = await reconcileWithFirestore(true);
+    }
     await flushPendingWrites();
     const f = getLastFlush();
-    if (r.error) logEvent(`Firestore check failed: ${r.error}`, 'warn');
-    else if (r.pulled || r.pushed) logEvent(`Firestore ${r.full ? 'full ' : ''}check: pulled ${r.pulled} newer from Firestore, pushed ${r.pushed} newer from the server`);
+    if (r?.error) logEvent(`Firestore check failed: ${r.error}`, 'warn');
+    else if (r && (r.pulled || r.pushed)) logEvent(`Firestore full check: pulled ${r.pulled} newer from Firestore, pushed ${r.pushed} newer from the server`);
     if (f.error) logEvent(`Firestore save failed; kept for the next round: ${f.error}`, 'warn');
-    return r;
-  });
+    return r ?? { at: Date.now(), full: false, read: 0, pulled: 0, pushed: 0, error: null };
+  }, 25_000);
 }
 
 // ---------------------------------------------------------------- actions
@@ -400,15 +455,19 @@ function findTrade(id: string) {
 
 /** Closes an open trade at its latest price (manual close or stagnation recycle). */
 export function closeTradeById(id: string, reason: 'manual' | 'time_decay' = 'manual') {
-  return exclusive(async () => {
+  return exclusive('closeTrade', async () => {
     const trade = findTrade(id);
     if (trade.status !== 'OPEN') throw new ActionError(`${trade.symbol} is already closed`);
     const price = trade.currentPrice || trade.entryPrice;
     const closed = closeTradeAt(trade, price, reason === 'time_decay' ? 'CLOSED_TIME_DECAY' : 'CLOSED_MANUAL');
     await updateAutomatedTrade(closed, true);
+    await Promise.race([
+      flushPendingWrites(),
+      new Promise((r) => setTimeout(r, 4000)),
+    ]).catch((err) => console.warn('Immediate close flush error:', err));
     logEvent(`${trade.symbol} closed by request (${reason}) at ${price}`, 'info');
     return closed;
-  });
+  }, 12_000);
 }
 
 /**
@@ -418,7 +477,7 @@ export function closeTradeById(id: string, reason: 'manual' | 'time_decay' = 'ma
  * would only hide it from the screen while it still blocked new entries.
  */
 export function setTradeExcluded(id: string, excluded: boolean) {
-  return exclusive(async () => {
+  return exclusive('setTradeExcluded', async () => {
     const trade = findTrade(id);
     if (excluded && trade.status === 'OPEN') {
       throw new ActionError(`${trade.symbol} is still open. Close it first, then exclude the record.`);
@@ -429,14 +488,18 @@ export function setTradeExcluded(id: string, excluded: boolean) {
       excludedReason: excluded ? 'Excluded from statistics in the Data Health panel' : '',
     };
     await updateAutomatedTrade(updated, true);
+    await Promise.race([
+      flushPendingWrites(),
+      new Promise((r) => setTimeout(r, 4000)),
+    ]).catch((err) => console.warn('Immediate exclude flush error:', err));
     logEvent(`${trade.symbol} ${excluded ? 'excluded from' : 'counted in'} statistics by request`);
     return updated;
-  });
+  }, 12_000);
 }
 
 /** Opens a position in `symbol` from the server's own latest scan (manual deploy). */
 export function deploySymbol(symbol: string) {
-  return exclusive(async () => {
+  return exclusive('deploySymbol', async () => {
     if (!hasConfirmedTradeList()) throw new ActionError('The trade list is still loading');
     if (!lastCoins.length) throw new ActionError('No prices yet; try again in 30 seconds');
     const signal = scanLiveMarketEntries(lastCoins, 'FUTURES_1_2D').find((s) => s.symbol.toUpperCase() === symbol.toUpperCase());
@@ -446,18 +509,86 @@ export function deploySymbol(symbol: string) {
     const blocked = manualDeployBlockReason(signal, book, bankroll);
     if (blocked) throw new ActionError(blocked);
     const trade = await deploySignalToAutomatedFeed(signal, bankroll.trancheSizeUSD);
+    await Promise.race([
+      flushPendingWrites(),
+      new Promise((r) => setTimeout(r, 4000)),
+    ]).catch((err) => console.warn('Immediate deploy flush error:', err));
     logEvent(`Deployed $${trade.positionSizeUSD.toFixed(2)} into ${signal.symbol} by request`, 'success');
     return trade;
-  });
+  }, 15_000);
 }
 
-/** Rebuilds the list from a full Firestore read (after edits made directly in Firestore). */
-export function resyncFromFirestore() {
-  return exclusive(async () => {
+/** Rebuilds the list from a full Firestore read (after edits made directly in Firestore or cache clear). */
+export function resyncFromFirestore(clearServerCache = false) {
+  return exclusive('resyncFromFirestore', async () => {
+    if (clearServerCache) {
+      logEvent('Wiping server-side trade cache before fresh Firestore resync...', 'info');
+      try {
+        if (typeof localStorage !== 'undefined') {
+          localStorage.removeItem('crypto_automated_trades_local_fallback');
+          localStorage.removeItem('crypto_automated_trades_sync_cursor');
+          localStorage.removeItem('crypto_automated_trades_full_sync_at');
+          localStorage.removeItem('crypto_automated_trades_reconcile_cursor');
+          localStorage.removeItem('crypto_automated_trades_sync_version');
+          localStorage.removeItem('crypto_automated_trades_pending_writes');
+        }
+      } catch {}
+      bootId = Math.random().toString(36).slice(2, 10);
+      feedVersion++;
+      tradeSignature.clear();
+      changedAtVersion.clear();
+      removedAtVersion.clear();
+      saveStateNow();
+    }
     const ok = await forceFullResync();
     logEvent(ok ? 'Rebuilt the trade list from Firestore' : 'Rebuild from Firestore failed; list unchanged', ok ? 'info' : 'warn');
     return ok;
-  });
+  }, 25_000);
+}
+
+/**
+ * Completely resets and clears all data:
+ * 1. Purges all trade documents from Firestore (crypto_automated_trades)
+ * 2. Wipes server memory storage and mirrors empty state to worker-state.json
+ * 3. Resets all tracking versions, counters, and feeds
+ * 4. Logs the event and returns success
+ */
+export function resetWorkerAndDatabase() {
+  return exclusive('resetWorkerAndDatabase', async () => {
+    logEvent('Initiating complete data reset: wiping Firestore and server state...', 'warn');
+    await resetAutomatedTrades();
+
+    // Wipe local state file and memory storage
+    try {
+      if (typeof localStorage !== 'undefined') {
+        localStorage.clear();
+      }
+    } catch {}
+    saveStateNow();
+
+    // Re-initialize core tracking
+    bootId = Math.random().toString(36).slice(2, 10);
+    feedVersion = 1;
+    tradeSignature.clear();
+    changedAtVersion.clear();
+    removedAtVersion.clear();
+    ticksCount = 0;
+    lastTickAt = null;
+    lastDeployAt = 0;
+    openPositionsCount = 0;
+    lastDecision = {};
+    lastTickSummary = 'System reset complete. Fresh start with $100 starting capital.';
+
+    // Save fresh clean worker state
+    saveStateNow();
+
+    logEvent('System reset complete: Firestore and server memory are completely empty. Ready to trade fresh.', 'success');
+    return {
+      success: true,
+      message: 'All data cleared from Firebase and local server. System reset fresh to $100 cash.',
+      bootId,
+    };
+  }, 35_000);
 }
 
 export function startTradingWorker(intervalMs = 30_000): void {
@@ -485,39 +616,50 @@ export function startTradingWorker(intervalMs = 30_000): void {
     if (saved === 'true' || saved === 'false') isAutoPilot = saved === 'true';
   } catch {}
 
-  // Sync auto-pilot setting with Firestore config so all browsers and servers stay identical
+  // One-time read of auto-pilot setting from Firestore on startup (no continuous listener)
   if (FIRESTORE_WRITES_ENABLED) {
     try {
       const configRef = doc(db, 'crypto_automated_config', 'autopilot');
-      configUnsubscribe = onSnapshot(configRef, (snap) => {
-        // Defensive: only a document snapshot has exists()/data().
+      getDocFromServer(configRef).then((snap) => {
         const data = typeof snap?.exists === 'function' && snap.exists() && typeof snap.data === 'function'
           ? snap.data()
           : null;
-        if (typeof data?.enabled === 'boolean' && data.enabled !== isAutoPilot) {
+        if (typeof data?.enabled === 'boolean') {
           isAutoPilot = data.enabled;
           try {
             localStorage.setItem(AUTOPILOT_KEY, String(data.enabled));
             saveStateNow();
           } catch {}
-          logEvent(`Auto-pilot synced from Firestore: ${data.enabled ? 'on' : 'off'}`);
+          logEvent(`Auto-pilot initialized from Firestore on startup: ${data.enabled ? 'on' : 'off'}`);
         }
-      }, (err) => {
-        console.warn('[TradingWorker] Firestore autopilot config listener:', err?.message || err);
+        if (typeof data?.allowShorts === 'boolean') {
+          setAllowShorts(data.allowShorts);
+          logEvent(`Short trading initialized from Firestore on startup: ${data.allowShorts ? 'enabled' : 'disabled'}`);
+        }
+        if (typeof data?.strategyProfile === 'string' && data.strategyProfile in STRATEGY_PROFILES) {
+          setActiveStrategyProfile(data.strategyProfile as StrategyProfileId);
+          logEvent(`Strategy profile initialized from Firestore on startup: ${data.strategyProfile}`);
+        }
+      }).catch((err) => {
+        console.warn('[TradingWorker] Initial Firestore autopilot config read error:', err?.message || err);
       });
     } catch (err) {
-      console.warn('[TradingWorker] Setup Firestore config listener error:', err);
+      console.warn('[TradingWorker] Setup Firestore config read error:', err);
     }
   }
 
-  subscribe();
-  logEvent(`Started: tick every ${intervalMs / 1000}s, Firestore sync every ${FLUSH_EVERY_MS / 60_000} min, ` +
+  logEvent(`Started: tick every ${intervalMs / 1000}s, Firestore flush every ${FLUSH_EVERY_MS / 60_000} min, ` +
     `auto-pilot ${isAutoPilot ? 'on' : 'off'}, state file ${STATE_FILE}`);
-  // Resumed from the state file (no Firestore read was needed to build the
-  // list): compare every trade now, to catch anything changed meanwhile.
-  if (hasConfirmedTradeList()) syncWithFirestore(true).catch((e) => console.error('Startup sync error:', e));
-  flushTimer = setInterval(() => { syncWithFirestore(false).catch((e) => console.error('Sync error:', e)); }, FLUSH_EVERY_MS);
-  fullReconcileTimer = setInterval(() => { syncWithFirestore(true).catch((e) => console.error('Sync error:', e)); }, FULL_RECONCILE_EVERY_MS);
+
+  // One read at startup. Without a saved list, subscribe() builds it from a
+  // full Firestore read (the server keeps no listener after that); resumed
+  // from the state file, every trade is compared once instead. After that the
+  // server runs from memory and only writes. Without the subscribe() a fresh
+  // start had nothing to confirm its list, so it did not trade until a later
+  // tick happened to resubscribe.
+  subscribe();
+  if (hasConfirmedTradeList()) syncWithFirestore(true).catch((e) => console.error('Startup Firestore read sync error:', e));
+  flushTimer = setInterval(() => { flushNow().catch((e) => console.error('Flush error:', e)); }, FLUSH_EVERY_MS);
   usageTimer = setInterval(() => logEvent(`Firestore usage: ${usageSummary()}`), 3_600_000);
   executeTradingTick().catch((e) => console.error('Worker tick error:', e));
   intervalTimer = setInterval(() => {
@@ -576,6 +718,52 @@ export function setWorkerAutoPilot(enabled: boolean): void {
   }
 }
 
+export function setWorkerAllowShorts(allowed: boolean): void {
+  setAllowShorts(allowed);
+  logEvent(`Short trading ${allowed ? 'enabled' : 'disabled'}`);
+
+  if (FIRESTORE_WRITES_ENABLED) {
+    try {
+      const configRef = doc(db, 'crypto_automated_config', 'autopilot');
+      setDoc(configRef, {
+        allowShorts: allowed,
+        updatedAt: Date.now(),
+        updatedBy: 'server',
+      }, { merge: true }).catch((err) => {
+        console.warn('[TradingWorker] Failed to write allowShorts to Firestore:', err);
+      });
+    } catch (err) {
+      console.warn('[TradingWorker] Failed to setup Firestore allowShorts setDoc:', err);
+    }
+  }
+}
+
+/**
+ * Sets the exit profile the server opens trades with. The server is the one
+ * trading, so a profile chosen in a browser has to reach it; it is kept across
+ * restarts in the same config document as the auto-pilot switch. Open trades
+ * keep the ladder they were opened with.
+ */
+export function setWorkerStrategyProfile(id: StrategyProfileId): void {
+  const profile = setActiveStrategyProfile(id);
+  logEvent(`Strategy profile set to ${profile.name}`);
+
+  if (FIRESTORE_WRITES_ENABLED) {
+    try {
+      const configRef = doc(db, 'crypto_automated_config', 'autopilot');
+      setDoc(configRef, {
+        strategyProfile: profile.id,
+        updatedAt: Date.now(),
+        updatedBy: 'server',
+      }, { merge: true }).catch((err) => {
+        console.warn('[TradingWorker] Failed to write strategyProfile to Firestore:', err);
+      });
+    } catch (err) {
+      console.warn('[TradingWorker] Failed to setup Firestore strategyProfile setDoc:', err);
+    }
+  }
+}
+
 export function getInstanceId(): string {
   return bootId;
 }
@@ -586,6 +774,8 @@ export function getWorkerStatus(): WorkerStatus {
     workerRunning: isWorkerRunning,
     disabledReason,
     isAutoPilot,
+    allowShorts: AUTOPILOT_CONFIG.allowShorts,
+    strategyProfile: getActiveStrategyProfile().id,
     ticksCount,
     lastTickAt,
     tickAgeMs: lastTickAt === null ? null : Date.now() - lastTickAt,

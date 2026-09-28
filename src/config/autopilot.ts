@@ -12,7 +12,9 @@ export interface AutoPilotConfig {
    * Short entries. Measured forward returns were negative in both samples:
    * in-sample t = -2.02 at 5m; out-of-sample the short leg collapsed from
    * -38 bps (t = -4.08) to -6.65 bps (t = -1.16). Alt perps also carry
-   * negative drift and adverse funding for shorts. Off by default.
+   * negative drift and adverse funding for shorts. Off unless switched on
+   * (the switch in the app, or the saved choice); tools/backtest.mjs --shorts
+   * measures them on the current rules.
    */
   allowShorts: boolean;
 
@@ -36,7 +38,8 @@ export interface AutoPilotConfig {
   oneDeployPerSnapshot: boolean;
 
   /** Minimum conviction score. Note the score proved non-monotonic against
-   *  forward returns, so this is a floor, not a ranking signal. */
+   *  forward returns, so this is a floor, not a ranking signal. Raised to 82
+   *  to filter out lower-decile noise and eliminate turnover fee drag. */
   minScore: number;
 
   /**
@@ -56,13 +59,43 @@ export interface AutoPilotConfig {
    * old ungated behaviour for a controlled comparison.
    */
   enforceRegimeGates: boolean;
+
+  /**
+   * Enforce liquidity session gating (blocks entries during the 21:00-00:00 UTC
+   * dead gap and weekend low-volume chop traps where order books thin out and
+   * false wicks cause stop-outs).
+   */
+  enforceSessionFilter: boolean;
+}
+
+const SHORTS_STORAGE_KEY = 'crypto_scalp_autopilot_shorts';
+
+export function getAllowShorts(): boolean {
+  try {
+    if (typeof localStorage !== 'undefined') {
+      const saved = localStorage.getItem(SHORTS_STORAGE_KEY);
+      if (saved === 'false') return false;
+      if (saved === 'true') return true;
+    }
+  } catch {}
+  return false; // Off by default: see allowShorts above
+}
+
+export function setAllowShorts(allowed: boolean): void {
+  AUTOPILOT_CONFIG.allowShorts = allowed;
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(SHORTS_STORAGE_KEY, String(allowed));
+    }
+  } catch {}
 }
 
 export const AUTOPILOT_CONFIG: AutoPilotConfig = {
-  allowShorts: false,
-  minMsBetweenDeploys: 120_000,
+  allowShorts: getAllowShorts(),
+  minMsBetweenDeploys: 180_000,
   oneDeployPerSnapshot: true,
-  minScore: 75,
-  maxConcurrentTrades: 10,
+  minScore: 84,
+  maxConcurrentTrades: 5,
   enforceRegimeGates: true,
+  enforceSessionFilter: true,
 };

@@ -32,6 +32,9 @@ const trade = (dir = 'LONG') => {
     entryPrice: 100, currentPrice: 100, positionSizeUSD: 10, totalFeesUSD: 0.015,
     realizedCashBankedUSD: 0, pnlUSD: 0, stopLossPrice: px(-4), stopLossPct: -4,
     sessionHighPrice: 100, sessionLowPrice: 100, openedAtTimestamp: T0,
+    // An explicit ATR keeps the trailing stop out of these paths whatever
+    // profile is active; otherwise it is inferred from tier 1 and the profile.
+    atrValue: 8,
     harvestTiers: {
       tier1: { percent: 33, targetPct: 4, targetPrice: px(4), status: 'PENDING' },
       tier2: { percent: 33, targetPct: 8, targetPrice: px(8), status: 'PENDING' },

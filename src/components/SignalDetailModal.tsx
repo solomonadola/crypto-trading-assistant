@@ -12,7 +12,10 @@ import {
   Layers, 
   ChevronRight,
   ArrowRight,
-  Clock
+  Clock,
+  Target,
+  Sparkles,
+  ShieldCheck
 } from 'lucide-react';
 import { EntrySignalResult } from '../types/entryScanner';
 import { formatCashUSD, formatOrderFlowUSD } from '../services/orderFlowService';
@@ -94,6 +97,17 @@ export const SignalDetailModal: React.FC<SignalDetailModalProps> = ({
                     Memes Capped (2/2)
                   </span>
                 )}
+                {signal.fundingRatePct !== undefined && (
+                  <span className={`px-2 py-0.5 rounded text-xs font-bold border flex items-center gap-1 ${
+                    Math.abs(signal.fundingRatePct) <= 0.012
+                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
+                      : Math.abs(signal.fundingRatePct) <= 0.022
+                      ? 'bg-stone-800 text-stone-300 border-stone-700'
+                      : 'bg-rose-500/20 text-rose-300 border-rose-500/30'
+                  }`}>
+                    FR: {signal.fundingRatePct >= 0 ? '+' : ''}{signal.fundingRatePct.toFixed(4)}%/8h
+                  </span>
+                )}
               </div>
               <p className="text-xs text-stone-400 mt-0.5">
                 {signal.archetypeName} • {signal.timeframe}
@@ -167,6 +181,178 @@ export const SignalDetailModal: React.FC<SignalDetailModalProps> = ({
                 <span className="text-[10px] block text-stone-400 mt-0.5">Micro Execution</span>
               </div>
             </div>
+          </div>
+        )}
+
+        {/* Key Level & Pullback Verification */}
+        {signal.levelGate && signal.levelGate.measured && (
+          <div className="mt-4 p-3 rounded-xl bg-stone-900/60 border border-stone-800 text-xs">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-[11px] font-semibold text-stone-300 flex items-center gap-1.5">
+                <Target className="w-3.5 h-3.5 text-amber-400" />
+                Key Level & Pullback Verification ({signal.levelGate.supportTimeframe || '4H'} Support)
+              </span>
+              <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                signal.levelGate.passed 
+                  ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' 
+                  : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+              }`}>
+                {signal.levelGate.passed ? 'Level Gate Passed' : 'Waiting Reclaim'}
+              </span>
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-stone-400 text-[11px]">
+              <div>
+                <span className="text-[10px] text-stone-500 block">Key Level:</span>
+                <span className="font-semibold text-stone-200">{signal.levelGate.supportTimeframe || '4H'} Support Floor</span>
+              </div>
+              <div>
+                <span className="text-[10px] text-stone-500 block">Distance to Support:</span>
+                <span className="font-semibold text-stone-200">{signal.levelGate.distToSupportAtr !== null ? `${signal.levelGate.distToSupportAtr} ATR` : 'N/A'}</span>
+              </div>
+              <div>
+                <span className="text-[10px] text-stone-500 block">Pullback State:</span>
+                <span className={`font-semibold ${
+                  signal.levelGate.pullbackStatus === 'RECLAIMED' || signal.levelGate.pullbackStatus === 'LATE_JOIN'
+                    ? 'text-emerald-400' 
+                    : signal.levelGate.pullbackStatus === 'ACTIVE_FALLING'
+                    ? 'text-amber-400'
+                    : 'text-stone-300'
+                }`}>
+                  {signal.levelGate.pullbackStatus === 'RECLAIMED' ? 'Reclaimed (Confirmed)' 
+                   : signal.levelGate.pullbackStatus === 'LATE_JOIN' ? 'Late Join (Holding Support)'
+                   : signal.levelGate.pullbackStatus === 'ACTIVE_FALLING' ? 'Active Pullback (Falling)'
+                   : 'Stabilized'}
+                </span>
+              </div>
+            </div>
+            {signal.levelGate.reason && !signal.levelGate.passed && (
+              <p className="mt-2 text-[10px] text-amber-300/90 bg-amber-500/10 p-1.5 rounded border border-amber-500/20">
+                {signal.levelGate.reason}
+              </p>
+            )}
+          </div>
+        )}
+
+        {/* Scalping Quality & Carrying Fee Verification */}
+        <div className="mt-4 p-3 rounded-xl bg-stone-900/60 border border-stone-800 text-xs">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-[11px] font-semibold text-stone-300 flex items-center gap-1.5">
+              <Zap className="w-3.5 h-3.5 text-amber-400" />
+              Scalp Liquidity & Low Carry Fee Filters
+            </span>
+            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+              Verified
+            </span>
+          </div>
+          <div className="grid grid-cols-3 gap-2 text-stone-400 text-[11px]">
+            <div>
+              <span className="text-[10px] text-stone-500 block">24h Turn-Over:</span>
+              <span className="font-semibold text-stone-200">
+                ${(signal.volume24hUSD / 1e6).toFixed(1)}M
+                <span className="ml-1 text-[9px] text-emerald-400">(&ge;$50M)</span>
+              </span>
+            </div>
+            <div>
+              <span className="text-[10px] text-stone-500 block">8h Funding Rate:</span>
+              <span className={`font-semibold ${
+                (signal.fundingRatePct ?? 0.01) <= 0.012 ? 'text-emerald-400'
+                : (signal.fundingRatePct ?? 0.01) <= 0.022 ? 'text-stone-200'
+                : 'text-amber-400'
+              }`}>
+                {(signal.fundingRatePct ?? 0.01) >= 0 ? '+' : ''}{(signal.fundingRatePct ?? 0.01).toFixed(4)}%
+                <span className="ml-1 text-[9px] text-stone-400">(&le;0.025%)</span>
+              </span>
+            </div>
+            <div>
+              <span className="text-[10px] text-stone-500 block">24h Price Action:</span>
+              <span className="font-semibold text-stone-200">
+                {signal.priceChange24hPct >= 0 ? '+' : ''}{signal.priceChange24hPct.toFixed(2)}%
+                <span className="ml-1 text-[9px] text-emerald-400">(Dynamic)</span>
+              </span>
+            </div>
+          </div>
+        </div>
+
+        {/* Smart Money Concepts (SMC) Inducement & Liquidity Sweep Inspector */}
+        {signal.inducement && (
+          <div className={`mt-5 p-4 rounded-xl border transition-all ${
+            signal.inducement.status === 'IDM_SWEPT'
+              ? 'bg-purple-950/25 border-purple-800/60 shadow-[0_0_15px_rgba(168,85,247,0.12)]'
+              : signal.inducement.status === 'IDM_ACTIVE_TRAP'
+              ? 'bg-rose-950/25 border-rose-800/60 shadow-[0_0_15px_rgba(244,63,94,0.12)]'
+              : signal.inducement.status === 'DIRECT_STRUCTURAL_TOUCH'
+              ? 'bg-blue-950/25 border-blue-800/60'
+              : 'bg-stone-950/60 border-stone-800'
+          }`}>
+            <div className="flex items-center justify-between pb-3 border-b border-stone-800/80 mb-3">
+              <div className="flex items-center gap-2">
+                <Sparkles className={`w-4 h-4 ${
+                  signal.inducement.status === 'IDM_SWEPT' ? 'text-purple-400' : signal.inducement.status === 'IDM_ACTIVE_TRAP' ? 'text-rose-400' : 'text-blue-400'
+                }`} />
+                <h4 className="text-xs font-bold uppercase tracking-wider text-stone-200">
+                  Smart Money Concept (SMC) • Inducement & Liquidity Sweep
+                </h4>
+              </div>
+              <span className={`px-2 py-0.5 rounded text-[10px] font-black uppercase tracking-wider ${
+                signal.inducement.status === 'IDM_SWEPT'
+                  ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40'
+                  : signal.inducement.status === 'IDM_ACTIVE_TRAP'
+                  ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
+                  : signal.inducement.status === 'DIRECT_STRUCTURAL_TOUCH'
+                  ? 'bg-blue-500/20 text-blue-300 border border-blue-500/40'
+                  : 'bg-stone-800 text-stone-400 border border-stone-700'
+              }`}>
+                {signal.inducement.status === 'IDM_SWEPT'
+                  ? 'Liquidity Grab (Stops Cleared)'
+                  : signal.inducement.status === 'IDM_ACTIVE_TRAP'
+                  ? 'Unswept Inducement Trap'
+                  : signal.inducement.status === 'DIRECT_STRUCTURAL_TOUCH'
+                  ? 'Direct Major Level Bounce'
+                  : 'Clear Momentum Path'}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-xs mb-3">
+              <div className="p-2.5 rounded-lg bg-stone-900/80 border border-stone-800/80">
+                <span className="text-[10px] text-stone-500 uppercase block font-semibold">1H Inducement (IDM)</span>
+                <span className="font-mono font-bold text-stone-200 text-sm">
+                  {signal.inducement.inducementPrice !== null ? `$${signal.inducement.inducementPrice.toFixed(4)}` : 'None'}
+                </span>
+                <span className="text-[9px] text-stone-500 block">Retail Bait Level</span>
+              </div>
+              <div className="p-2.5 rounded-lg bg-stone-900/80 border border-stone-800/80">
+                <span className="text-[10px] text-stone-500 uppercase block font-semibold">Major Anchor</span>
+                <span className="font-mono font-bold text-stone-200 text-sm">
+                  {signal.inducement.majorLevelPrice !== null ? `$${signal.inducement.majorLevelPrice.toFixed(4)}` : 'N/A'}
+                </span>
+                <span className="text-[9px] text-stone-500 block">{signal.levelGate?.supportTimeframe || '4H'} Key Level</span>
+              </div>
+              <div className="p-2.5 rounded-lg bg-stone-900/80 border border-stone-800/80">
+                <span className="text-[10px] text-stone-500 uppercase block font-semibold">Sweep Depth</span>
+                <span className={`font-mono font-bold text-sm ${
+                  (signal.inducement.sweepDepthPct ?? 0) > 0 ? 'text-purple-400' : 'text-stone-400'
+                }`}>
+                  {(signal.inducement.sweepDepthPct ?? 0) > 0 ? `-${signal.inducement.sweepDepthPct}%` : '0.00%'}
+                </span>
+                <span className="text-[9px] text-stone-500 block">Stop Flush Extension</span>
+              </div>
+              <div className="p-2.5 rounded-lg bg-stone-900/80 border border-stone-800/80">
+                <span className="text-[10px] text-stone-500 uppercase block font-semibold">Absorption Volume</span>
+                <span className={`font-mono font-bold text-sm ${
+                  (signal.inducement.sweepVolumeRatio ?? 0) >= 1.2 ? 'text-emerald-400' : 'text-stone-300'
+                }`}>
+                  {signal.inducement.sweepVolumeRatio !== null && signal.inducement.sweepVolumeRatio !== undefined
+                    ? `${signal.inducement.sweepVolumeRatio}x Vol`
+                    : '1.0x Normal'}
+                </span>
+                <span className="text-[9px] text-stone-500 block">Relative To 20-EMA</span>
+              </div>
+            </div>
+
+            <p className="text-xs text-stone-300 leading-relaxed font-sans bg-stone-900/60 p-2.5 rounded-lg border border-stone-800/80">
+              <span className="font-bold text-stone-100 mr-1.5">SMC Diagnosis:</span>
+              {signal.inducement.summary}
+            </p>
           </div>
         )}
 
@@ -247,10 +433,17 @@ export const SignalDetailModal: React.FC<SignalDetailModalProps> = ({
             </div>
           </div>
 
-          <div className="mt-3 text-xs text-stone-400 flex items-center justify-between border-t border-stone-800/80 pt-2.5">
+          <div className="mt-3 text-xs text-stone-400 flex flex-wrap items-center justify-between border-t border-stone-800/80 pt-2.5 gap-2">
             <span>Reward-to-Risk Ratio: <strong className="text-emerald-400">{plan.rewardRiskRatio}:1</strong></span>
             <span>Breakeven Ratchet Floor: <strong className="text-amber-400">${plan.breakevenRatchetPrice}</strong></span>
           </div>
+
+          {plan.isSnappedToStructuralLevel && plan.snappedLevelDescription && (
+            <div className="mt-2.5 p-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-300 text-[11px] flex items-center gap-2">
+              <Zap className="w-3.5 h-3.5 shrink-0 text-amber-400" />
+              <span><strong>Structural Level Front-Running:</strong> {plan.snappedLevelDescription}</span>
+            </div>
+          )}
         </div>
 
         {/* Modal Action Buttons */}

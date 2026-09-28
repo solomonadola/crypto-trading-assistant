@@ -62,11 +62,11 @@ export const FirebaseStatusModal: React.FC<FirebaseStatusModalProps> = ({
     setIsForceSyncing(true);
     setForceSyncResult(null);
     try {
-      const res = await forceResyncTrades(true);
+      const res = await forceResyncTrades(true, true);
       if (res.success) {
         setForceSyncResult({
           success: true,
-          message: `Successfully reloaded ${res.count} records (${res.closedCount} completed) directly from Firestore!`
+          message: `Successfully cleared browser & server trade caches and reloaded ${res.count} records (${res.closedCount} completed) directly from Firestore!`
         });
       } else {
         setForceSyncResult({

@@ -182,18 +182,30 @@ export interface PullbackState {
   isPullback: boolean;
   /** How far back from the high, as a fraction of the impulse that preceded it. */
   retracement: number;
-  /** A candle has closed back up after the pullback (the "reclaim"). */
+  /** Whether price is actively falling (red candle / ongoing downward momentum into support). */
+  isActiveFalling: boolean;
+  /** A candle has closed back up after the pullback, confirming the support level held. */
   reclaimed: boolean;
+  /** Reclaim completed on the prior candle and current candle is holding: safe to join continuation. */
+  isLateJoinCandidate: boolean;
 }
 
 /**
  * A pullback inside an uptrend: price rose from a swing low to a swing high,
- * then came back part of the way without losing that low. `reclaimed` is the
- * confirmation a level-based entry waits for - the last candle closing back
- * above the previous candle's high.
+ * then came back part of the way without losing that low.
+ *
+ * `isActiveFalling`: indicates price is currently falling knives into support without confirmation.
+ * `reclaimed`: the confirmation a level-based entry waits for - candle closing green or above previous high.
+ * `isLateJoinCandidate`: pullback completed 1 candle ago and price remains close to support.
  */
 export function pullbackState(candles: Candle[], lookback = 2): PullbackState {
-  const none: PullbackState = { isPullback: false, retracement: 0, reclaimed: false };
+  const none: PullbackState = {
+    isPullback: false,
+    retracement: 0,
+    isActiveFalling: false,
+    reclaimed: false,
+    isLateJoinCandidate: false,
+  };
   if (candles.length < lookback * 2 + 3) return none;
   const s = structureFrom(candles, lookback);
   if (s.lastSwingHigh === null || s.lastSwingLow === null) return none;
@@ -201,13 +213,289 @@ export function pullbackState(candles: Candle[], lookback = 2): PullbackState {
 
   const last = candles[candles.length - 1];
   const prev = candles[candles.length - 2];
+  const prev2 = candles.length >= 3 ? candles[candles.length - 3] : null;
   const impulse = s.lastSwingHigh - s.lastSwingLow;
   if (!(impulse > 0)) return none;
 
   const retracement = (s.lastSwingHigh - last.c) / impulse;
+  const isPullback = retracement > 0.08 && retracement < 1.05 && last.l >= s.lastSwingLow * 0.995;
+
+  // Volume confirmation on reclaim:
+  // Calculate 20-period average volume to ensure institutional defense
+  const volWindow = candles.slice(-21, -1);
+  const avgVol = volWindow.length > 0 
+    ? volWindow.reduce((acc, c) => acc + (c.v || 0), 0) / volWindow.length 
+    : 0;
+  const isVolumeConfirmed = avgVol > 0 ? (last.v >= avgVol * 1.15) : true;
+
+  // Immediate reclaim: current candle closed above previous candle's high, OR
+  // strong green bounce candle that engulfed the previous close and is closing near highs
+  const isImmediateReclaim = (
+    last.c > prev.h || (
+      last.c > last.o &&
+      last.c > prev.c &&
+      last.l >= s.lastSwingLow &&
+      (last.h - last.c) <= (last.c - last.l) * 1.5
+    )
+  ) && isVolumeConfirmed;
+
+  // Late join: prior candle completed the reclaim, and current candle is consolidating / continuing
+  const prevReclaimed = prev2 ? (prev.c > prev2.h || (prev.c > prev.o && prev.c > prev2.c)) : false;
+  const isLateJoinCandidate = isPullback && !isImmediateReclaim && prevReclaimed && (last.c >= prev.o);
+
+  const reclaimed = isImmediateReclaim || isLateJoinCandidate;
+  const isActiveFalling = isPullback && !reclaimed && (last.c < last.o || last.c < prev.c);
+
   return {
-    isPullback: retracement > 0.1 && retracement < 1 && last.l >= s.lastSwingLow,
+    isPullback,
     retracement: +retracement.toFixed(3),
-    reclaimed: last.c > prev.h,
+    isActiveFalling,
+    reclaimed,
+    isLateJoinCandidate,
+  };
+}
+
+export interface InducementState {
+  hasInducement: boolean;
+  status: 'IDM_SWEPT' | 'IDM_ACTIVE_TRAP' | 'DIRECT_STRUCTURAL_TOUCH' | 'NO_INDUCEMENT';
+  inducementPrice: number | null;
+  inducementTimeframe?: '1H';
+  majorLevelPrice: number | null;
+  sweepCandleTime: number | null;
+  sweepDepthPct?: number | null;
+  sweepVolumeRatio?: number | null;
+  isSafeToEnter: boolean;
+  summary: string;
+}
+
+/**
+ * Smart Money Concept (SMC) Inducement & Liquidity Sweep Detection:
+ * Identifies internal minor swing pivots formed above major structural support (or below resistance).
+ * If price bounces prematurely off an internal pivot without having swept it, flags it as an
+ * Inducement Trap (IDM_ACTIVE_TRAP) to prevent entering right before retail stops get harvested.
+ */
+export function evaluateInducement(
+  price: number,
+  candles: Candle[],
+  majorLevel: Level | null,
+  atrValue: number,
+  direction: 'LONG' | 'SHORT' = 'LONG'
+): InducementState {
+  if (!candles || candles.length < 10 || !(price > 0) || !(atrValue > 0)) {
+    return {
+      hasInducement: false,
+      status: 'NO_INDUCEMENT',
+      inducementPrice: null,
+      inducementTimeframe: '1H',
+      majorLevelPrice: majorLevel ? majorLevel.price : null,
+      sweepCandleTime: null,
+      sweepDepthPct: null,
+      sweepVolumeRatio: null,
+      isSafeToEnter: true,
+      summary: 'Insufficient candles for inducement analysis.',
+    };
+  }
+
+  const lastCandle = candles[candles.length - 1];
+  const volWindow = candles.slice(-21, -1);
+  const avgVol = volWindow.length > 0 
+    ? volWindow.reduce((acc, c) => acc + (c.v || 0), 0) / volWindow.length 
+    : 0;
+
+  if (direction === 'LONG') {
+    const majorSupportPrice = majorLevel ? majorLevel.price : null;
+
+    // If price is already right at the major structural support (within 0.20 ATR),
+    // it's touching institutional bids directly, not hanging in no-man's-land.
+    if (majorSupportPrice && Math.abs(price - majorSupportPrice) <= atrValue * 0.20) {
+      return {
+        hasInducement: false,
+        status: 'DIRECT_STRUCTURAL_TOUCH',
+        inducementPrice: null,
+        inducementTimeframe: '1H',
+        majorLevelPrice: majorSupportPrice,
+        sweepCandleTime: null,
+        sweepDepthPct: null,
+        sweepVolumeRatio: null,
+        isSafeToEnter: true,
+        summary: `Direct touch of primary ${majorLevel?.touches ?? 2}-touch support ($${majorSupportPrice.toFixed(4)}). Pristine structural bounce.`,
+      };
+    }
+
+    // Find minor swing lows in the last 16 hourly candles
+    const recentCandles = candles.slice(-16);
+    const pivots = swingPivots(recentCandles, 1).filter((p) => p.kind === 'LOW');
+
+    // Look for an internal swing low that sits ABOVE major support
+    // (between 0.15 ATR and 1.20 ATR above major support, and below current price)
+    const candidates = pivots.filter((p) => {
+      if (majorSupportPrice) {
+        return p.price > majorSupportPrice + atrValue * 0.15 && p.price < price;
+      }
+      return p.price < price && (price - p.price) <= atrValue * 1.0;
+    });
+
+    if (candidates.length === 0) {
+      return {
+        hasInducement: false,
+        status: 'NO_INDUCEMENT',
+        inducementPrice: null,
+        inducementTimeframe: '1H',
+        majorLevelPrice: majorSupportPrice,
+        sweepCandleTime: null,
+        sweepDepthPct: null,
+        sweepVolumeRatio: null,
+        isSafeToEnter: true,
+        summary: 'No unswept internal inducement low detected.',
+      };
+    }
+
+    // Most recent internal low is the primary inducement
+    const idm = candidates[candidates.length - 1];
+    const idmPrice = idm.price;
+
+    // Check if any candle AFTER this pivot's creation swept below its low
+    const candlesAfterIdm = recentCandles.filter((c) => c.t > idm.time);
+    const sweepCandle = candlesAfterIdm.find((c) => c.l < idmPrice);
+
+    if (sweepCandle) {
+      const sweepDepthPct = idmPrice > 0 ? +(((idmPrice - sweepCandle.l) / idmPrice) * 100).toFixed(2) : 0;
+      const sweepVolumeRatio = avgVol > 0 ? +((sweepCandle.v || 0) / avgVol).toFixed(2) : 1.0;
+
+      // It swept below the inducement low. Did price reclaim back above it?
+      if (lastCandle.c >= idmPrice || (lastCandle.c > lastCandle.o && lastCandle.c >= sweepCandle.c)) {
+        return {
+          hasInducement: true,
+          status: 'IDM_SWEPT',
+          inducementPrice: idmPrice,
+          inducementTimeframe: '1H',
+          majorLevelPrice: majorSupportPrice,
+          sweepCandleTime: sweepCandle.t,
+          sweepDepthPct,
+          sweepVolumeRatio,
+          isSafeToEnter: true,
+          summary: `Inducement low at $${idmPrice.toFixed(4)} swept (-${sweepDepthPct}% flush, ${sweepVolumeRatio}x volume)! Resting stops cleared; green reclaim confirmed.`,
+        };
+      } else {
+        return {
+          hasInducement: true,
+          status: 'IDM_ACTIVE_TRAP',
+          inducementPrice: idmPrice,
+          inducementTimeframe: '1H',
+          majorLevelPrice: majorSupportPrice,
+          sweepCandleTime: sweepCandle.t,
+          sweepDepthPct,
+          sweepVolumeRatio,
+          isSafeToEnter: false,
+          summary: `Sweep in progress beneath $${idmPrice.toFixed(4)} (-${sweepDepthPct}%). Waiting for green reclaim candle.`,
+        };
+      }
+    }
+
+    // If candles have NOT swept below idmPrice, and price is bouncing prematurely:
+    // Retail is buying a premature bounce. High trap risk.
+    return {
+      hasInducement: true,
+      status: 'IDM_ACTIVE_TRAP',
+      inducementPrice: idmPrice,
+      inducementTimeframe: '1H',
+      majorLevelPrice: majorSupportPrice,
+      sweepCandleTime: null,
+      sweepDepthPct: null,
+      sweepVolumeRatio: null,
+      isSafeToEnter: false,
+      summary: `Premature bounce above unswept inducement low ($${idmPrice.toFixed(4)}). High risk of stop-hunt sweep into major support ($${majorSupportPrice ? majorSupportPrice.toFixed(4) : 'below'}).`,
+    };
+  }
+
+  // SHORT side
+  const majorResistancePrice = majorLevel ? majorLevel.price : null;
+  if (majorResistancePrice && Math.abs(price - majorResistancePrice) <= atrValue * 0.20) {
+    return {
+      hasInducement: false,
+      status: 'DIRECT_STRUCTURAL_TOUCH',
+      inducementPrice: null,
+      inducementTimeframe: '1H',
+      majorLevelPrice: majorResistancePrice,
+      sweepCandleTime: null,
+      sweepDepthPct: null,
+      sweepVolumeRatio: null,
+      isSafeToEnter: true,
+      summary: `Direct touch of primary resistance ($${majorResistancePrice.toFixed(4)}).`,
+    };
+  }
+
+  const recentCandles = candles.slice(-16);
+  const pivots = swingPivots(recentCandles, 1).filter((p) => p.kind === 'HIGH');
+  const candidates = pivots.filter((p) => {
+    if (majorResistancePrice) {
+      return p.price < majorResistancePrice - atrValue * 0.15 && p.price > price;
+    }
+    return p.price > price && (p.price - price) <= atrValue * 1.0;
+  });
+
+  if (candidates.length === 0) {
+    return {
+      hasInducement: false,
+      status: 'NO_INDUCEMENT',
+      inducementPrice: null,
+      inducementTimeframe: '1H',
+      majorLevelPrice: majorResistancePrice,
+      sweepCandleTime: null,
+      sweepDepthPct: null,
+      sweepVolumeRatio: null,
+      isSafeToEnter: true,
+      summary: 'No unswept internal inducement high detected.',
+    };
+  }
+
+  const idm = candidates[candidates.length - 1];
+  const idmPrice = idm.price;
+  const candlesAfterIdm = recentCandles.filter((c) => c.t > idm.time);
+  const sweepCandle = candlesAfterIdm.find((c) => c.h > idmPrice);
+
+  if (sweepCandle) {
+    const sweepDepthPct = idmPrice > 0 ? +(((sweepCandle.h - idmPrice) / idmPrice) * 100).toFixed(2) : 0;
+    const sweepVolumeRatio = avgVol > 0 ? +((sweepCandle.v || 0) / avgVol).toFixed(2) : 1.0;
+
+    if (lastCandle.c <= idmPrice) {
+      return {
+        hasInducement: true,
+        status: 'IDM_SWEPT',
+        inducementPrice: idmPrice,
+        inducementTimeframe: '1H',
+        majorLevelPrice: majorResistancePrice,
+        sweepCandleTime: sweepCandle.t,
+        sweepDepthPct,
+        sweepVolumeRatio,
+        isSafeToEnter: true,
+        summary: `Inducement high at $${idmPrice.toFixed(4)} swept (+${sweepDepthPct}% flush, ${sweepVolumeRatio}x volume)! Early short stops cleared; bearish reclaim confirmed.`,
+      };
+    }
+    return {
+      hasInducement: true,
+      status: 'IDM_ACTIVE_TRAP',
+      inducementPrice: idmPrice,
+      inducementTimeframe: '1H',
+      majorLevelPrice: majorResistancePrice,
+      sweepCandleTime: sweepCandle.t,
+      sweepDepthPct,
+      sweepVolumeRatio,
+      isSafeToEnter: false,
+      summary: `Upside sweep in progress above $${idmPrice.toFixed(4)} (+${sweepDepthPct}%). Waiting for red rejection close.`,
+    };
+  }
+
+  return {
+    hasInducement: true,
+    status: 'IDM_ACTIVE_TRAP',
+    inducementPrice: idmPrice,
+    inducementTimeframe: '1H',
+    majorLevelPrice: majorResistancePrice,
+    sweepCandleTime: null,
+    sweepDepthPct: null,
+    sweepVolumeRatio: null,
+    isSafeToEnter: false,
+    summary: `Premature drop below unswept inducement high ($${idmPrice.toFixed(4)}). High risk of stop-hunt sweep higher.`,
   };
 }

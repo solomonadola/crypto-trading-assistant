@@ -12,13 +12,14 @@ import {
   serverTimestamp,
   Timestamp,
   getCountFromServer,
+  writeBatch,
 } from 'firebase/firestore';
 import { db, isQuotaBlocked, markQuotaExceeded, reportFirestoreResult, getFirestoreHealth, FIRESTORE_WRITES_ENABLED } from '../lib/firebase';
 import { outcome, isClosed } from './metrics';
 import { countRead, countWrite } from './firestoreMeter';
 import { AutomatedTradeRecord, AutomatedFeedAuditStats, StrategyVerificationReport } from '../types/automatedFeed';
 import { CryptoCoin } from '../types';
-import { evaluateTradeCycle } from './cycleEngineService';
+import { evaluateTradeCycle, recycleStaleTrade } from './cycleEngineService';
 import { 
   isTradeZombieStale, 
   getBankrollConfig, 
@@ -165,7 +166,7 @@ const FIRESTORE_WAIT_MS = 20_000;
  * so an outage does not stop trading. A read-only copy is its own record.
  */
 export function isTradeListAuthoritative(now: number = Date.now()): boolean {
-  if (!FIRESTORE_WRITES_ENABLED || firstSnapshotAt > 0) return true;
+  if (serverFeedActive || !FIRESTORE_WRITES_ENABLED || firstSnapshotAt > 0) return true;
   const health = getFirestoreHealth();
   if (health === 'denied' || health === 'quota' || health === 'offline') return true;
   return subscribedAt > 0 && now - subscribedAt > FIRESTORE_WAIT_MS;
@@ -178,7 +179,7 @@ export function isTradeListAuthoritative(now: number = Date.now()): boolean {
  * or never-synced list would look like zero open positions.
  */
 export function hasConfirmedTradeList(): boolean {
-  if (firstSnapshotAt > 0) return true;
+  if (serverFeedActive || firstSnapshotAt > 0) return true;
   // A list saved under an older SYNC_VERSION belongs to the old database.
   return Number(safeGetLocalStorage(FULL_SYNC_AT_KEY)) > 0 &&
     safeGetLocalStorage(LOCAL_STORAGE_KEY) !== null &&
@@ -231,6 +232,8 @@ export function getLastFlush(): { at: number; written: number; error: string | n
  * does not hold writes back - writes have their own daily allowance.
  */
 export async function flushPendingWrites(): Promise<number> {
+  // In the browser, all actions are delegated to the 24/7 server; never issue direct Firestore writes from the client
+  if (typeof window !== 'undefined') return 0;
   if (flushing || !FIRESTORE_WRITES_ENABLED || (isQuotaBlocked() && !serverWriterMode)) return 0;
   if (!serverWriterMode && !localWritesAllowed) return 0;
   const pending = getPending();
@@ -244,8 +247,10 @@ export async function flushPendingWrites(): Promise<number> {
       const t = local.get(id);
       if (!t) { setPending(id, null); continue; }
       try {
-        if (pending[id] === 'create') await setDoc(doc(db, TRADES_COLLECTION, id), stamped(t));
-        else await updateDoc(doc(db, TRADES_COLLECTION, id), stamped(t));
+        const writePromise = pending[id] === 'create'
+          ? setDoc(doc(db, TRADES_COLLECTION, id), stamped(t))
+          : updateDoc(doc(db, TRADES_COLLECTION, id), stamped(t));
+        await withTimeout(writePromise, 8000);
         countWrite('reconcile');
         setPending(id, null);
         written++;
@@ -369,7 +374,7 @@ export async function fetchAutomatedTrades(forceNetwork: boolean = false): Promi
       const local = safeGetLocalStorage(LOCAL_STORAGE_KEY);
       if (local) {
         const parsed = JSON.parse(local);
-        if (Array.isArray(parsed)) {
+        if (Array.isArray(parsed) && parsed.length > 0) {
           loadedTrades = parsed;
         }
       }
@@ -378,8 +383,21 @@ export async function fetchAutomatedTrades(forceNetwork: boolean = false): Promi
     }
   }
 
-  // 2. Fetch from Firestore only if requested or if local storage was completely empty
-  if (!loadedTrades && !isQuotaBlocked()) {
+  // 1b. Server-first: pull from /api/trades with ZERO Firestore reads if serverFeed is active
+  if (!loadedTrades && typeof window !== 'undefined' && serverFeedActive) {
+    try {
+      const res = await fetch('/api/trades?since=0&boot=', { cache: 'no-store' });
+      if (res.ok) {
+        const data = await res.json();
+        if (data && Array.isArray(data.trades)) {
+          loadedTrades = data.trades as AutomatedTradeRecord[];
+        }
+      }
+    } catch {}
+  }
+
+  // 2. Fetch from Firestore only if requested or if local storage and server were completely empty
+  if (!loadedTrades && !serverFeedActive && !isQuotaBlocked()) {
     try {
       const colRef = collection(db, TRADES_COLLECTION);
       // Use getDocsFromServer when forceNetwork is true to bypass SDK local cache
@@ -464,10 +482,8 @@ const FULL_SYNC_AT_KEY = 'crypto_automated_trades_full_sync_at';
 const FULL_SYNC_EVERY_MS = 6 * 3_600_000;
 // Bumped when a saved copy may be missing changes the listener could not see;
 // a copy saved under an older version does one full read on its next load.
-// '3': fresh start (database emptied 2026-09-22) - a copy saved under an
-// older version also drops its saved trades and its queue of unsent changes,
-// which belong to the old database.
-const SYNC_VERSION = '3';
+// '4': fresh start - database and all caches cleared completely
+const SYNC_VERSION = '4';
 const SYNC_VERSION_KEY = 'crypto_automated_trades_sync_version';
 const CURSOR_MARGIN_MS = 5 * 60_000;        // covers clock differences between copies
 const LISTENER_RENEW_MS = 12 * 3_600_000;   // keeps a long-running listener's result set small
@@ -572,17 +588,16 @@ const COUNT_CHECK_MS = 60_000;
 let lastCountResync = 0;
 
 async function checkCount(gen: number): Promise<void> {
-  if (gen !== syncGeneration || isQuotaBlocked()) return;
+  if (serverFeedActive || gen !== syncGeneration || isQuotaBlocked()) return;
   try {
     const remote = (await withTimeout(getCountFromServer(collection(db, TRADES_COLLECTION)), 10_000)).data().count;
     countRead('count-check', 1);
-    if (gen !== syncGeneration) return;
+    if (serverFeedActive || gen !== syncGeneration) return;
     const pending = getPending();
     const confirmedLocal = loadLocalTrades().filter((t) => pending[t.id] !== 'create').length;
     if (remote !== confirmedLocal && Date.now() - lastCountResync > COUNT_CHECK_MS) {
       lastCountResync = Date.now();
-      console.info(`[Sync] Firestore has ${remote} trades, this copy ${confirmedLocal}: re-reading all.`);
-      await startSync(true);
+      console.info(`[Sync] Firestore has ${remote} trades, this copy ${confirmedLocal}.`);
     }
   } catch {
     // counted again next minute
@@ -755,14 +770,17 @@ export async function reconcileWithFirestore(full: boolean): Promise<ReconcileRe
     }
     if (doFull) {
       const inFirestore = new Set(remote.map((r) => r.id));
-      for (const t of local) {
-        if (!inFirestore.has(t.id) && !pending[t.id]) {
-          setPending(t.id, 'create');
-          pushed++;
-        }
+      // In a full sync, if a trade is in local memory but NOT in Firestore,
+      // remove it from local state unless it is a newly pending trade from this session.
+      // This prevents deleted or purged trades from resurrecting!
+      const prunedLocal = local.filter((t) => inFirestore.has(t.id) || pending[t.id] === 'create');
+      if (prunedLocal.length !== local.length) {
+        local.length = 0;
+        local.push(...prunedLocal);
+        pulled++;
       }
     }
-    if (pulled) {
+    if (pulled || doFull) {
       const merged = sortTrades(sanitizeActiveTrades(local));
       safeSetLocalStorage(LOCAL_STORAGE_KEY, JSON.stringify(merged));
       notifySubscribers(merged);
@@ -797,14 +815,18 @@ export async function forceFullResync(): Promise<boolean> {
 // Every copy then shows the one list the only trader holds - also when the
 // Firestore read quota is spent - and browsers make no Firestore reads.
 
-let serverFeedActive = false;
+let serverFeedActive = typeof window !== 'undefined';
 
 /** Switches this copy between the trading server's feed and Firestore. */
 export function setServerFeedActive(active: boolean): void {
   if (active === serverFeedActive) return;
   serverFeedActive = active;
-  if (active) stopSync();
-  else if (subscribers.size > 0) startSync().catch(() => {});
+  if (active) {
+    stopSync();
+  } else if (subscribers.size > 0 && typeof window === 'undefined') {
+    // Only headless backend workers fall back to direct Firestore sync
+    startSync().catch(() => {});
+  }
 }
 
 /**
@@ -843,9 +865,12 @@ export function subscribeToAutomatedTrades(callback: (trades: AutomatedTradeReco
   subscribers.add(callback);
   if (!subscribedAt) subscribedAt = Date.now();
 
-  // Started first: it drops data from an older SYNC_VERSION synchronously,
-  // before anything below reads it.
-  if (first) startSync().catch(console.error);
+  // Started first: browsers take the list from the trading server and never
+  // read Firestore; in Node (the 24/7 worker) this is the one startup read that
+  // builds and confirms the list - startSync skips it when a confirmed list was
+  // restored from the state file. Excluding writer mode here left a fresh
+  // server with no confirmed list, so it never traded.
+  if (first && !serverFeedActive && typeof window === 'undefined') startSync().catch(console.error);
 
   // Shown at once so the screen is not empty, but not acted on until
   // Firestore answers (isTradeListAuthoritative).
@@ -878,8 +903,8 @@ export function subscribeToAutomatedTrades(callback: (trades: AutomatedTradeReco
  * to its own saved list.
  */
 async function fetchOpenTradesFromServer(): Promise<AutomatedTradeRecord[] | null> {
-  // In the server its own list is the truth; there is nothing to check against.
-  if (serverWriterMode || !FIRESTORE_WRITES_ENABLED || isQuotaBlocked()) return null;
+  // In the server or on serverFeed (or in any browser tab), its own list is the truth; zero Firestore reads!
+  if (serverFeedActive || serverWriterMode || !FIRESTORE_WRITES_ENABLED || isQuotaBlocked() || typeof window !== 'undefined') return null;
   try {
     const q = query(collection(db, TRADES_COLLECTION), where('status', '==', 'OPEN'));
     const snap = await Promise.race([
@@ -1104,23 +1129,7 @@ export async function evaluateLiveTrades(
     if (bankrollConfig.zombieTradeRecycle?.enabled && bankrollConfig.zombieTradeRecycle.autoRecycleToCash) {
       const zombieCheck = isTradeZombieStale(trade, bankrollConfig.zombieTradeRecycle, livePrice);
       if (zombieCheck.isStale) {
-        const recycledTrade: AutomatedTradeRecord = {
-          ...trade,
-          status: 'STOPPED',
-          exitReason: 'STAGNATION_TIMEOUT',
-          closedAtTimestamp: Date.now(),
-          currentPrice: livePrice,
-          pnlUSD: +( (trade.positionSizeUSD || 10) * (zombieCheck.movementPct / 100) ).toFixed(2),
-          pnlPercentage: zombieCheck.movementPct,
-          numericalCycleMetrics: {
-            ...trade.numericalCycleMetrics,
-            momentumVelocityScore: 25,
-            momentumState: 'STAGNANT_CHOP',
-            stagnationDecile: 10,
-            cycleCompletionPct: 100,
-            cycleStatusSummary: `Auto-Recycled to Cash: ${zombieCheck.reason}`
-          } as any
-        };
+        const recycledTrade = recycleStaleTrade(trade, livePrice, zombieCheck.reason);
         // Status change is a milestone: sync to Firestore
         await updateAutomatedTrade(recycledTrade, true);
         updatedTrades.push(recycledTrade);
@@ -1193,22 +1202,8 @@ export async function syncOpenTradesWithLivePrices(
       const zombieCheck = isTradeZombieStale(trade, bankrollConfig.zombieTradeRecycle, livePrice);
       if (zombieCheck.isStale) {
         const recycledTrade: AutomatedTradeRecord = {
-          ...trade,
-          status: 'STOPPED',
-          exitReason: 'STAGNATION_TIMEOUT',
-          closedAtTimestamp: Date.now(),
+          ...recycleStaleTrade(trade, livePrice, zombieCheck.reason),
           lastEvaluatedAt: now,
-          currentPrice: livePrice,
-          pnlUSD: +( (trade.positionSizeUSD || 10) * (zombieCheck.movementPct / 100) ).toFixed(2),
-          pnlPercentage: zombieCheck.movementPct,
-          numericalCycleMetrics: {
-            ...trade.numericalCycleMetrics,
-            momentumVelocityScore: 25,
-            momentumState: 'STAGNANT_CHOP',
-            stagnationDecile: 10,
-            cycleCompletionPct: 100,
-            cycleStatusSummary: `Auto-Recycled to Cash: ${zombieCheck.reason}`
-          } as any
         };
         // Status change is a milestone: write to Firestore
         await updateAutomatedTrade(recycledTrade, true);
@@ -1245,16 +1240,27 @@ export async function syncOpenTradesWithLivePrices(
 }
 
 /**
- * Resets automated trades feed to default seed state and notifies subscribers
+ * Resets automated trades feed, deletes all Firestore documents in batches, and clears local storage state.
  */
 export async function resetAutomatedTrades(): Promise<AutomatedTradeRecord[]> {
   if (FIRESTORE_WRITES_ENABLED && !isQuotaBlocked()) {
     try {
       const colRef = collection(db, TRADES_COLLECTION);
-      const snap = await getDocs(colRef);
-      for (const d of snap.docs) {
-        await deleteDoc(doc(db, TRADES_COLLECTION, d.id));
+      const snap = await getDocsFromServer(colRef).catch(() => getDocs(colRef));
+      if (snap && snap.docs.length > 0) {
+        console.info(`[Reset] Deleting ${snap.docs.length} documents from Firestore collection ${TRADES_COLLECTION}...`);
+        const chunkSize = 400;
+        for (let i = 0; i < snap.docs.length; i += chunkSize) {
+          const chunk = snap.docs.slice(i, i + chunkSize);
+          const batch = writeBatch(db);
+          for (const d of chunk) {
+            batch.delete(d.ref);
+          }
+          await batch.commit();
+        }
+        console.info(`[Reset] Successfully purged ${snap.docs.length} Firestore documents.`);
       }
+      reportFirestoreResult();
     } catch (err) {
       reportFirestoreResult(err);
       const msg = err instanceof Error ? err.message : String(err);
@@ -1263,8 +1269,14 @@ export async function resetAutomatedTrades(): Promise<AutomatedTradeRecord[]> {
       }
       console.warn('Firestore reset fallback to local storage:', err);
     }
-
   }
+
+  // Clear all pending write queues and local storage cursors
+  safeSetLocalStorage(PENDING_KEY, '{}');
+  safeSetLocalStorage(SYNC_CURSOR_KEY, '0');
+  safeSetLocalStorage(FULL_SYNC_AT_KEY, String(Date.now()));
+  safeSetLocalStorage(SYNC_VERSION_KEY, SYNC_VERSION);
+  safeSetLocalStorage(RECONCILE_CURSOR_KEY, '0');
   safeSetLocalStorage(LOCAL_STORAGE_KEY, JSON.stringify([]));
   notifySubscribers([]);
   return [];
@@ -1285,18 +1297,26 @@ export interface ForceResyncResult {
 
 /**
  * Explicitly forces a fresh reconciliation of trades from Firebase Firestore or the 24/7 Server.
- * Clears stale local cursors and un-sticks browsers (like Edge or private sessions) where local storage was stale.
+ * Clears stale local cursors, wipes server trade cache, and un-sticks browsers where local storage was stale.
  */
-export async function forceResyncTrades(directFirestore: boolean = false): Promise<ForceResyncResult> {
-  // Clear stale cached cursors and any temporary quota block flag
+export async function forceResyncTrades(directFirestore: boolean = false, clearServerCache: boolean = true): Promise<ForceResyncResult> {
+  // Clear stale cached cursors and any temporary quota block flag in the browser
   try {
     localStorage.removeItem('firebase_quota_blocked_until');
     localStorage.removeItem(SYNC_CURSOR_KEY);
     localStorage.removeItem(FULL_SYNC_AT_KEY);
+    localStorage.removeItem(SYNC_VERSION_KEY);
     if (directFirestore) {
       localStorage.removeItem(LOCAL_STORAGE_KEY);
     }
   } catch {}
+
+  // If requested, also signal the server to clear its memory/disk trade cache and re-read from Firestore
+  if (clearServerCache) {
+    try {
+      await fetch('/api/cache/clear', { method: 'POST' }).catch(() => {});
+    } catch {}
+  }
 
   // 1. If directFirestore is requested, pull directly from Firestore collection
   if (directFirestore) {
@@ -1305,21 +1325,15 @@ export async function forceResyncTrades(directFirestore: boolean = false): Promi
       countRead('history', snap.size ?? snap.docs?.length ?? 1);
       const remote: AutomatedTradeRecord[] = [];
       snap.forEach((d) => remote.push(fromDoc(d.data())));
-      if (remote.length > 0) {
-        const sorted = sortTrades(sanitizeActiveTrades(remote));
-        safeSetLocalStorage(LOCAL_STORAGE_KEY, JSON.stringify(sorted));
-        safeSetLocalStorage(FULL_SYNC_AT_KEY, String(Date.now()));
-        safeSetLocalStorage(SYNC_CURSOR_KEY, String(Date.now()));
-        safeSetLocalStorage(SYNC_VERSION_KEY, SYNC_VERSION);
-        notifySubscribers(sorted);
-        reportFirestoreResult();
-        const closedCount = sorted.filter((t) => t.status !== 'OPEN').length;
-        // Also ping the server to trigger a background resync if reachable
-        try {
-          fetch('/api/resync', { method: 'POST' }).catch(() => {});
-        } catch {}
-        return { success: true, count: sorted.length, closedCount, source: 'firestore' };
-      }
+      const sorted = sortTrades(sanitizeActiveTrades(remote));
+      safeSetLocalStorage(LOCAL_STORAGE_KEY, JSON.stringify(sorted));
+      safeSetLocalStorage(FULL_SYNC_AT_KEY, String(Date.now()));
+      safeSetLocalStorage(SYNC_CURSOR_KEY, String(Date.now()));
+      safeSetLocalStorage(SYNC_VERSION_KEY, SYNC_VERSION);
+      notifySubscribers(sorted);
+      reportFirestoreResult();
+      const closedCount = sorted.filter((t) => t.status !== 'OPEN').length;
+      return { success: true, count: sorted.length, closedCount, source: 'firestore' };
     } catch (err: any) {
       reportFirestoreResult(err);
       console.warn('Direct Firestore fetch error:', err);
@@ -1331,7 +1345,7 @@ export async function forceResyncTrades(directFirestore: boolean = false): Promi
     const res = await fetch('/api/trades?since=0&boot=', { cache: 'no-store' });
     if (res.ok) {
       const data = await res.json();
-      if (data && Array.isArray(data.trades) && data.trades.length > 0) {
+      if (data && Array.isArray(data.trades)) {
         applyServerTrades(true, data.trades as AutomatedTradeRecord[], []);
         const local = loadLocalTrades();
         const closedCount = local.filter((t) => t.status !== 'OPEN').length;

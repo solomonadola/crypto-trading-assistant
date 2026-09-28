@@ -13,13 +13,14 @@ import {
   SetupQualityRating,
   LevelGate
 } from '../types/entryScanner';
-import { AutomatedTradeRecord } from '../types/automatedFeed';
+import { AutomatedTradeRecord, BankrollState } from '../types/automatedFeed';
 import { executeSimulatedTrade, fetchAutomatedTrades } from './automatedFeedService';
 import { calculateBankrollState } from './bankrollService';
 import { calculateCoinOrderFlow, formatOrderFlowUSD, formatCashUSD } from './orderFlowService';
 import { sideCostUSD } from '../config/costs';
 import { GEOMETRY_CONFIG, resolveGeometry, resolvePositionSizeUSD } from '../config/geometry';
 import { ENTRY_CONFIG } from '../config/entry';
+import { UNIVERSE_CONFIG } from '../config/universe';
 
 // In-Memory & LocalStorage Signal Persistence Registry (Anti-Jitter Rule #1)
 interface SignalPersistenceRecord {
@@ -147,8 +148,14 @@ export function roundPrice(price: number): number {
 }
 
 export function scanLiveMarketEntries(coins: CryptoCoin[], mode: ScannerTradingMode = 'FUTURES_1_2D'): EntrySignalResult[] {
-  // Only scan coins with genuine live exchange prices from Binance
-  const validCoins = coins.filter((coin) => coin.current_price && coin.current_price > 0);
+  // Only scan coins with genuine live exchange prices from Binance and at least $50M 24h volume
+  // to guarantee institutional depth, rapid order fills, and complete immunity to thin pump-and-dumps.
+  const minVol = UNIVERSE_CONFIG.min24hVolumeUSD || 50_000_000;
+  const validCoins = coins.filter((coin) => {
+    if (!coin.current_price || coin.current_price <= 0) return false;
+    const vol = coin.total_volume || 0;
+    return vol >= minVol;
+  });
   if (validCoins.length === 0) {
     return [];
   }
@@ -176,12 +183,21 @@ export function scanLiveMarketEntries(coins: CryptoCoin[], mode: ScannerTradingM
     // and the three together about 54 bp - both samples agreeing.
     const levelGate = ((): LevelGate => {
       if (!a) return { passed: true, measured: false, reason: 'No candle analysis; gates not applied' };
+      const pullbackStatus: 'RECLAIMED' | 'ACTIVE_FALLING' | 'LATE_JOIN' | 'NO_PULLBACK' = 
+        a.pullback.isActiveFalling ? 'ACTIVE_FALLING'
+        : a.pullback.isLateJoinCandidate ? 'LATE_JOIN'
+        : a.pullback.reclaimed ? 'RECLAIMED'
+        : 'NO_PULLBACK';
+
       const gate: LevelGate = {
         passed: true,
         measured: true,
         distToSupportAtr: a.distToSupportAtr,
         distToResistanceAtr: a.distToResistanceAtr,
         trend: a.structure.trend,
+        supportTimeframe: a.keySupportTimeframe,
+        pullbackStatus,
+        inducement: a.inducement,
       };
       if (ENTRY_CONFIG.rejectBearishTrend && a.structure.trend === 'BEARISH') {
         return { ...gate, passed: false, reason: '4h structure is in a downtrend' };
@@ -191,13 +207,23 @@ export function scanLiveMarketEntries(coins: CryptoCoin[], mode: ScannerTradingM
         return { ...gate, passed: false, reason: `Resistance ${a.distToResistanceAtr} ATR overhead (needs > ${ENTRY_CONFIG.minHeadroomToResistanceAtr})` };
       }
       if (ENTRY_CONFIG.requireSupportProximity) {
-        if (a.distToSupportAtr === null) return { ...gate, passed: false, reason: 'No support level below with enough touches' };
-        if (a.distToSupportAtr > ENTRY_CONFIG.maxDistanceToSupportAtr) {
-          return { ...gate, passed: false, reason: `${a.distToSupportAtr} ATR above support (needs <= ${ENTRY_CONFIG.maxDistanceToSupportAtr})` };
+        if (a.distToSupportAtr === null) return { ...gate, passed: false, reason: 'No key support level below with enough touches' };
+        // If pullback already reclaimed or is a late-join candidate, allow wider continuation distance
+        const maxDist = (a.pullback.reclaimed || a.pullback.isLateJoinCandidate)
+          ? (ENTRY_CONFIG.maxLateJoinDistanceAtr ?? 0.38)
+          : ENTRY_CONFIG.maxDistanceToSupportAtr;
+        if (a.distToSupportAtr > maxDist) {
+          return { ...gate, passed: false, reason: `${a.distToSupportAtr} ATR above ${a.keySupportTimeframe || '4H'} support (needs <= ${maxDist})` };
         }
       }
-      if (ENTRY_CONFIG.requireReclaim && !a.pullback.reclaimed) {
-        return { ...gate, passed: false, reason: 'Waiting for a candle to close back up (reclaim)' };
+      if (ENTRY_CONFIG.blockActivePullbacks && a.pullback.isActiveFalling) {
+        return { ...gate, passed: false, reason: `Active downward pullback in progress (-${(a.pullback.retracement * 100).toFixed(0)}% retraced). Waiting for 1H/4H reclaim candle.` };
+      }
+      if (ENTRY_CONFIG.requireReclaim && a.pullback.isPullback && !a.pullback.reclaimed && !a.pullback.isLateJoinCandidate) {
+        return { ...gate, passed: false, reason: `Pullback testing ${a.keySupportTimeframe || '4H'} support: waiting for green reclaim candle to confirm level held` };
+      }
+      if (ENTRY_CONFIG.requireInducementSweep && a.inducement && !a.inducement.isSafeToEnter) {
+        return { ...gate, passed: false, reason: a.inducement.summary };
       }
       return gate;
     })();
@@ -483,26 +509,98 @@ export function scanLiveMarketEntries(coins: CryptoCoin[], mode: ScannerTradingM
     const riskAmountUSD = +((suggestedTrancheUSD * (stopLossPct / 100))).toFixed(2);
 
     const atrMultiplierTier1 = mode === 'FUTURES_1_2D' ? 0.95 : (archetype === 'VOLATILITY_SQUEEZE' ? +Math.max(1.15, (bbWidthPct * 0.8) / atrPct).toFixed(2) : 1.15);
-    const tier1Pct = atrLadder
+    let tier1Pct = atrLadder
       ? atrLadder.tier1Pct
       : mode === 'FUTURES_1_2D'
       ? +Math.max(1.8, Math.min(3.8, atrPct * atrMultiplierTier1)).toFixed(2)
       : +Math.max(1.8, Math.min(6.5, atrPct * atrMultiplierTier1)).toFixed(2);
-    const tier1Price = direction === 'SHORT'
+    let tier1Price = direction === 'SHORT'
       ? roundPrice(price * (1 - tier1Pct / 100))
       : roundPrice(price * (1 + tier1Pct / 100));
-    const tier1RewardUSD = +((suggestedTrancheUSD * 0.33 * (tier1Pct / 100))).toFixed(2);
 
     const atrMultiplierTier2 = mode === 'FUTURES_1_2D' ? 1.85 : (archetype === 'VOLATILITY_SQUEEZE' ? 2.60 : 2.30);
-    const tier2Pct = atrLadder
+    let tier2Pct = atrLadder
       ? atrLadder.tier2Pct
       : mode === 'FUTURES_1_2D'
       ? +Math.max(3.6, Math.min(7.5, atrPct * atrMultiplierTier2)).toFixed(2)
       : +Math.max(4.2, Math.min(14.0, atrPct * atrMultiplierTier2)).toFixed(2);
-    const tier2Price = direction === 'SHORT'
+    let tier2Price = direction === 'SHORT'
       ? roundPrice(price * (1 - tier2Pct / 100))
       : roundPrice(price * (1 + tier2Pct / 100));
-    const tier2RewardUSD = +((suggestedTrancheUSD * 0.33 * (tier2Pct / 100))).toFixed(2);
+
+    // =========================================================================
+    // STRUCTURAL LEVEL-AWARE TAKE-PROFIT SNAPPING (Key Level Front-Running)
+    // Snaps targets in front of real support/resistance levels rather than
+    // blind percentages, ensuring we take profit right before institutional walls.
+    // =========================================================================
+    let isSnappedToStructuralLevel = false;
+    let snappedLevelPrice: number | undefined = undefined;
+    let snappedLevelDescription: string | undefined = undefined;
+
+    if (GEOMETRY_CONFIG.useStructuralTakeProfit && atrValue > 0) {
+      const frontRunBuffer = atrValue * GEOMETRY_CONFIG.structuralFrontRunAtrBuffer;
+      const minAllowedTier1Pct = stopLossPct * GEOMETRY_CONFIG.minStructuralTier1R;
+
+      if (direction === 'LONG') {
+        // Look for resistance overhead to front-run
+        const targetResistance = (a?.resistance && a.resistance.price > price) 
+          ? a.resistance.price 
+          : (overheadResistancePrice > price ? overheadResistancePrice : null);
+
+        if (targetResistance) {
+          const frontRunPrice = roundPrice(targetResistance - frontRunBuffer);
+          const structuralGainPct = +(((frontRunPrice - price) / price) * 100).toFixed(2);
+
+          // If resistance is closer than Tier 2 but maintains healthy R:R >= minStructuralTier1R
+          if (structuralGainPct >= minAllowedTier1Pct && structuralGainPct < tier2Pct) {
+            if (structuralGainPct < tier1Pct) {
+              // Snap Tier 1 right in front of this resistance wall
+              tier1Price = frontRunPrice;
+              tier1Pct = structuralGainPct;
+              isSnappedToStructuralLevel = true;
+              snappedLevelPrice = targetResistance;
+              snappedLevelDescription = `Tier 1 snapped to front-run resistance at $${targetResistance} (-${roundPrice(frontRunBuffer)} buffer)`;
+            } else if (structuralGainPct > tier1Pct && structuralGainPct < tier2Pct) {
+              // Snap Tier 2 right in front of this resistance wall
+              tier2Price = frontRunPrice;
+              tier2Pct = structuralGainPct;
+              isSnappedToStructuralLevel = true;
+              snappedLevelPrice = targetResistance;
+              snappedLevelDescription = `Tier 2 snapped to front-run resistance at $${targetResistance} (-${roundPrice(frontRunBuffer)} buffer)`;
+            }
+          }
+        }
+      } else {
+        // SHORT: Look for support below to front-run
+        const targetSupport = (a?.support && a.support.price < price) 
+          ? a.support.price 
+          : (low24h < price ? low24h : null);
+
+        if (targetSupport) {
+          const frontRunPrice = roundPrice(targetSupport + frontRunBuffer);
+          const structuralGainPct = +(((price - frontRunPrice) / price) * 100).toFixed(2);
+
+          if (structuralGainPct >= minAllowedTier1Pct && structuralGainPct < tier2Pct) {
+            if (structuralGainPct < tier1Pct) {
+              tier1Price = frontRunPrice;
+              tier1Pct = structuralGainPct;
+              isSnappedToStructuralLevel = true;
+              snappedLevelPrice = targetSupport;
+              snappedLevelDescription = `Tier 1 snapped to front-run support floor at $${targetSupport} (+${roundPrice(frontRunBuffer)} buffer)`;
+            } else if (structuralGainPct > tier1Pct && structuralGainPct < tier2Pct) {
+              tier2Price = frontRunPrice;
+              tier2Pct = structuralGainPct;
+              isSnappedToStructuralLevel = true;
+              snappedLevelPrice = targetSupport;
+              snappedLevelDescription = `Tier 2 snapped to front-run support floor at $${targetSupport} (+${roundPrice(frontRunBuffer)} buffer)`;
+            }
+          }
+        }
+      }
+    }
+
+    const tier1RewardUSD = +((suggestedTrancheUSD * GEOMETRY_CONFIG.tier1HarvestPct * (tier1Pct / 100))).toFixed(2);
+    const tier2RewardUSD = +((suggestedTrancheUSD * GEOMETRY_CONFIG.tier2HarvestPct * (tier2Pct / 100))).toFixed(2);
 
     const tier3Pct = atrLadder
       ? atrLadder.tier3Pct
@@ -539,19 +637,50 @@ export function scanLiveMarketEntries(coins: CryptoCoin[], mode: ScannerTradingM
     };
 
     if (direction === 'LONG') {
-      if (isBleedingKnife) {
+      const isPullbackActive = a?.pullback?.isActiveFalling;
+      const isPullbackReclaimed = a?.pullback?.reclaimed || a?.pullback?.isLateJoinCandidate;
+
+      if (isPullbackActive) {
+        microConfirmation = {
+          isGreenReversal: false,
+          consecutiveRedCandles: Math.max(1, micro.consecutiveRedHours),
+          hourlyChangePct: micro.hourlyChangePct,
+          statusSummary: `Active Pullback in Progress: Candle is falling into ${a?.keySupportTimeframe || '4H'} key support. Held in STAGING until 1H reclaim candle prints.`
+        };
+      } else if (isBleedingKnife) {
         microConfirmation = {
           isGreenReversal: false,
           consecutiveRedCandles: micro.consecutiveRedHours,
           hourlyChangePct: micro.hourlyChangePct,
           statusSummary: `Bleeding Knife Warning: ${micro.consecutiveRedHours} consecutive red 1H candles (${micro.hourlyChangePct}% this hour). Pillar 2 zeroed. Held in STAGING until green reversal candle forms.`
         };
-      } else {
+      } else if (a?.pullback?.isPullback && !isPullbackReclaimed) {
+        microConfirmation = {
+          isGreenReversal: false,
+          consecutiveRedCandles: micro.consecutiveRedHours,
+          hourlyChangePct: micro.hourlyChangePct,
+          statusSummary: `Pullback Testing Support: Waiting for 1H green reclaim candle to confirm ${a?.keySupportTimeframe || '4H'} level held.`
+        };
+      } else if (isPullbackReclaimed) {
         microConfirmation = {
           isGreenReversal: true,
           consecutiveRedCandles: 0,
           hourlyChangePct: micro.hourlyChangePct,
-          statusSummary: `Micro Reversal Confirmed: Green 1H candle (+${micro.hourlyChangePct}%) or lower wick absorption confirms active buyer defense.`
+          statusSummary: `${a?.pullback?.isLateJoinCandidate ? 'Post-Pullback Continuation' : 'Pullback Reclaimed'}: Confirmed ${a?.keySupportTimeframe || '4H'} support bounce. Green reversal verified.`
+        };
+      } else if (micro.currentHourGreen && micro.consecutiveRedHours === 0) {
+        microConfirmation = {
+          isGreenReversal: true,
+          consecutiveRedCandles: 0,
+          hourlyChangePct: micro.hourlyChangePct,
+          statusSummary: `Micro Reversal Confirmed: Green 1H candle (+${micro.hourlyChangePct}%) confirms active buyer defense.`
+        };
+      } else {
+        microConfirmation = {
+          isGreenReversal: false,
+          consecutiveRedCandles: micro.consecutiveRedHours,
+          hourlyChangePct: micro.hourlyChangePct,
+          statusSummary: `Micro Consolidation: Current 1H candle is neutral/red (${micro.hourlyChangePct}%). Waiting for green confirmation candle.`
         };
       }
     } else {
@@ -564,6 +693,21 @@ export function scanLiveMarketEntries(coins: CryptoCoin[], mode: ScannerTradingM
           ? `Bearish Momentum Active: ${micro.consecutiveRedHours} red 1H candles (${micro.hourlyChangePct}%) confirming downward distribution.`
           : `Micro Pause: Current candle is consolidating (+${micro.hourlyChangePct}%). Wait for red candle to confirm short entry.`
       };
+    }
+
+    // Funding Rate & Carry Cost Evaluation (Binance USD-M Futures 8h Rate)
+    const fundingRate = coin.funding_rate !== undefined ? coin.funding_rate : 0.01;
+    let fundingStatus: 'OPTIMAL_LOW' | 'NORMAL' | 'ELEVATED_FEE' | 'EXTREME_DRAG' = 'NORMAL';
+    if (direction === 'LONG') {
+      if (fundingRate <= 0.012) fundingStatus = 'OPTIMAL_LOW';
+      else if (fundingRate <= 0.022) fundingStatus = 'NORMAL';
+      else if (fundingRate <= 0.035) fundingStatus = 'ELEVATED_FEE';
+      else fundingStatus = 'EXTREME_DRAG';
+    } else {
+      if (fundingRate >= 0.005) fundingStatus = 'OPTIMAL_LOW';
+      else if (fundingRate >= -0.015) fundingStatus = 'NORMAL';
+      else if (fundingRate >= -0.035) fundingStatus = 'ELEVATED_FEE';
+      else fundingStatus = 'EXTREME_DRAG';
     }
 
     const checkpoints: StrategyCheckpoint[] = [];
@@ -610,23 +754,20 @@ export function scanLiveMarketEntries(coins: CryptoCoin[], mode: ScannerTradingM
             : `Price is stretched ${distToEma21Pct}% from the 4H 21 EMA ($${ema21_4h}), outside ideal structural retest tolerance.`
       });
 
-      const p2Passed = !isBleedingKnife && (micro.currentHourGreen || lowerWickAbsorptionPct >= 0.35);
-      const p2Score = (!isBleedingKnife && (micro.currentHourGreen || lowerWickAbsorptionPct >= 0.35)) ? 20 
-        : (!isBleedingKnife && lowerWickAbsorptionPct >= 0.20) ? 10 : 0;
+      const p2Passed = microConfirmation.isGreenReversal;
+      const p2Score = p2Passed ? 20 : (!isBleedingKnife && lowerWickAbsorptionPct >= 0.25) ? 6 : 0;
       checkpoints.push({
         id: 'cp-p2-micro1h',
         name: 'Micro 1H Reversal & Wick Defense',
-        requiredRule: 'Active 1H Green OR Lower Wick Absorption >= +0.35% (0 Red Hours)',
-        currentValue: isBleedingKnife 
-          ? `Bleeding: ${micro.consecutiveRedHours} Red Hours (${micro.hourlyChangePct}%)`
-          : `Green 1H (${micro.hourlyChangePct >= 0 ? '+' : ''}${micro.hourlyChangePct}%) | Wick: +${lowerWickAbsorptionPct}% | 0 Red Hours`,
+        requiredRule: 'Confirmed 1H Reclaim or Green Bounce off Support (0 Red Hours)',
+        currentValue: microConfirmation.isGreenReversal
+          ? `Confirmed: ${microConfirmation.statusSummary}`
+          : `Awaiting Reversal: ${micro.consecutiveRedHours} Red Hours (${micro.hourlyChangePct}%)`,
         passed: p2Passed,
         weight: 20,
         earnedScore: p2Score,
         pillarCategory: 'MICRO_1H',
-        explanation: p2Passed
-          ? `1H candle confirms buyer reaction with lower-wick absorption (+${lowerWickAbsorptionPct}%), preventing entry on falling knives.`
-          : `1H candle is actively red with ${micro.consecutiveRedHours} consecutive red hours. Execution trigger held in STAGING until green candle prints.`
+        explanation: microConfirmation.statusSummary,
       });
 
       const whaleNet = orderFlow.whale?.whaleNetDeltaUSD || 0;
@@ -1201,18 +1342,18 @@ export function scanLiveMarketEntries(coins: CryptoCoin[], mode: ScannerTradingM
         executionDecision = 'WAIT_CONFIRMATION';
         aiRationale = `[Short Entry Awaiting Retest] Price is above Daily MA(7) with no resistance ceiling confirmation. Waiting for retest or upper wick rejection.`;
       } else if (
-        signalScore >= 90 && 
-        passedCheckpointsCount >= 4 && 
-        (confluenceRating === 'A+' || confluenceRating === 'A') && 
-        (micro.consecutiveRedHours >= 1 || !micro.currentHourGreen || mode === 'FUTURES_1_2D' || orderFlow.sellRatioPct >= 50.0)
+        signalScore >= 80 && 
+        passedCheckpointsCount >= 3 && 
+        (confluenceRating === 'A+' || confluenceRating === 'A' || confluenceRating === 'B') && 
+        (micro.consecutiveRedHours >= 1 || !micro.currentHourGreen || mode === 'FUTURES_1_2D' || orderFlow.sellRatioPct >= 49.0)
       ) {
         status = 'TRIGGERED';
         executionDecision = 'TRADE_TRIGGERED';
-        aiRationale = `[90+ High-Conviction Short Triggered] High-conviction bearish setup (${signalScore}/100) confirmed with A-grade confluence, resistance rejection, and active seller order flow.`;
-      } else if (signalScore >= 70) {
+        aiRationale = `[High-Conviction Short Triggered] Bearish setup (${signalScore}/100) confirmed with confluence, resistance rejection, and active seller order flow.`;
+      } else if (signalScore >= 65) {
         status = 'FORMING';
         executionDecision = 'WAIT_CONFIRMATION';
-        aiRationale = `[Short Forming - Awaiting 90+ Conviction] Current setup score is ${signalScore}/100. System enforces strict 90+ conviction threshold for altcoin shorts to prevent over-shorting.`;
+        aiRationale = `[Short Forming - Awaiting Confirmation] Current setup score is ${signalScore}/100 with bearish structure.`;
       } else if (signalScore >= 45) {
         status = 'WATCHLIST';
         executionDecision = 'WATCHLIST_ONLY';
@@ -1224,8 +1365,70 @@ export function scanLiveMarketEntries(coins: CryptoCoin[], mode: ScannerTradingM
 
     const stability = getOrUpdateSignalPersistence(coin.id, signalScore);
 
+    // Direction-aware level gate:
+    // For longs: fails if in 4H downtrend, or near overhead resistance ceiling, or active falling pullback.
+    // For shorts: fails if in 4H uptrend, or sitting right on support floor below.
+    const effectiveLevelGate = ((): LevelGate => {
+      if (!a) return { passed: true, measured: false, reason: 'No candle analysis; gates not applied' };
+      if (direction === 'SHORT') {
+        const pullbackStatus: 'RECLAIMED' | 'ACTIVE_FALLING' | 'LATE_JOIN' | 'NO_PULLBACK' =
+          a.pullback.isActiveFalling ? 'ACTIVE_FALLING'
+          : a.pullback.reclaimed ? 'RECLAIMED'
+          : 'NO_PULLBACK';
+        const gate: LevelGate = {
+          passed: true,
+          measured: true,
+          distToSupportAtr: a.distToSupportAtr,
+          distToResistanceAtr: a.distToResistanceAtr,
+          trend: a.structure.trend,
+          supportTimeframe: a.keySupportTimeframe,
+          pullbackStatus,
+          inducement: a.inducement,
+        };
+        if (ENTRY_CONFIG.rejectBearishTrend && a.structure.trend === 'BULLISH') {
+          return { ...gate, passed: false, reason: '4h structure is in a bullish uptrend (adverse for short)' };
+        }
+        if (ENTRY_CONFIG.minHeadroomToResistanceAtr > 0 && a.distToSupportAtr !== null &&
+            a.distToSupportAtr <= ENTRY_CONFIG.minHeadroomToResistanceAtr) {
+          return { ...gate, passed: false, reason: `Support ${a.distToSupportAtr} ATR below (limited downside headroom)` };
+        }
+        if (ENTRY_CONFIG.requireInducementSweep && a.inducement && !a.inducement.isSafeToEnter) {
+          return { ...gate, passed: false, reason: a.inducement.summary };
+        }
+        return gate;
+      }
+      return levelGate;
+    })();
+
+    // Enforce Level Gate on final execution decision:
+    // If the coin fails the real-level gate (e.g. active pullback falling knife or overhead resistance),
+    // strictly downgrade status to STAGING_AT_SUPPORT or WATCHLIST so it cannot be triggered.
+    if (effectiveLevelGate.measured && !effectiveLevelGate.passed) {
+      if (status === 'TRIGGERED') {
+        const isPullbackGateReason = effectiveLevelGate.pullbackStatus === 'ACTIVE_FALLING' || (effectiveLevelGate.reason?.toLowerCase().includes('pullback') ?? false);
+        status = isPullbackGateReason ? 'STAGING_AT_SUPPORT' : 'WATCHLIST';
+        executionDecision = 'WAIT_CONFIRMATION';
+        disqualificationReason = effectiveLevelGate.reason;
+        aiRationale = `[Level Gate Withheld] ${effectiveLevelGate.reason}. Execution held until key level confirmation criteria are met.`;
+      }
+    }
+
+    // Low Funding Fee Gate:
+    // Protect against predatory carry fee drain and overcrowded liquidation flushes.
+    const isHighFundingDrag = direction === 'LONG' ? fundingRate > 0.030 : fundingRate < -0.030;
+    if (isHighFundingDrag) {
+      if (status === 'TRIGGERED' || status === 'STAGING_AT_SUPPORT') {
+        status = 'REJECTED';
+        executionDecision = 'WATCHLIST_ONLY';
+      }
+      disqualificationReason = direction === 'LONG'
+        ? `Elevated funding fee (+${fundingRate.toFixed(4)}%/8h). Overcrowded long positioning creates high fee drag and liquidation vulnerability.`
+        : `Negative funding fee (${fundingRate.toFixed(4)}%/8h). Shorts pay heavy carry fees.`;
+      aiRationale = `[FUNDING GATE REJECTED] ${disqualificationReason} Coin disqualified from scalping.`;
+    }
+
     return {
-      levelGate,
+      levelGate: effectiveLevelGate,
       id: `signal-${coin.id}`,
       coinId: coin.id,
       symbol: coin.symbol.toUpperCase(),
@@ -1234,6 +1437,8 @@ export function scanLiveMarketEntries(coins: CryptoCoin[], mode: ScannerTradingM
       currentPrice: price,
       priceChange24hPct: change24h,
       volume24hUSD: volume,
+      fundingRatePct: fundingRate,
+      fundingStatus,
       direction,
       archetype,
       archetypeName,
@@ -1332,10 +1537,14 @@ export function scanLiveMarketEntries(coins: CryptoCoin[], mode: ScannerTradingM
         atrMultiplierTier1,
         atrMultiplierTier2,
         volatilityRating,
+        isSnappedToStructuralLevel,
+        snappedLevelPrice,
+        snappedLevelDescription,
       },
       checkpoints,
       aiRationale,
       recommendedAction,
+      inducement: a?.inducement,
     };
   });
 
@@ -1366,6 +1575,15 @@ export function calculateTradeQualityScore(signal: EntrySignalResult): {
 } {
   const highlights: string[] = [];
   let score = signal.score * 10;
+
+  // SMC Inducement Liquidity Grab bonus
+  if (signal.inducement?.status === 'IDM_SWEPT') {
+    score += 60;
+    highlights.push('SMC Liquidity Grab: Inducement swept & reclaimed');
+  } else if (signal.inducement?.status === 'DIRECT_STRUCTURAL_TOUCH') {
+    score += 30;
+    highlights.push('Direct Structural Level Touch (No Inducement)');
+  }
 
   if (signal.status === 'TRIGGERED') {
     score += 120;
@@ -1528,6 +1746,28 @@ export function calculateTradeQualityScore(signal: EntrySignalResult): {
     highlights.push(`+${signal.priceAction.lowerWickAbsorptionPct.toFixed(1)}% Wick Absorption`);
   }
 
+  // Low Funding Fee Bonus & Scalping Highlights
+  if (signal.fundingRatePct !== undefined) {
+    const fr = signal.fundingRatePct;
+    if (signal.direction === 'LONG') {
+      if (fr <= 0.010) {
+        score += 40;
+        highlights.push(`Low Funding Fee (${fr >= 0 ? '+' : ''}${fr.toFixed(3)}%/8h)`);
+      } else if (fr <= 0.018) {
+        score += 20;
+      } else if (fr > 0.025) {
+        score -= 60;
+      }
+    } else {
+      if (fr >= 0.005) {
+        score += 40;
+        highlights.push(`Positive Funding Yield (+${fr.toFixed(3)}%/8h)`);
+      } else if (fr < -0.025) {
+        score -= 60;
+      }
+    }
+  }
+
   return {
     qualityScore: Math.round(score),
     highlights: highlights.slice(0, 4),
@@ -1671,6 +1911,27 @@ export async function deploySignalToAutomatedFeed(
   }
 
   const bankroll = calculateBankrollState(currentTrades);
+  const trancheUSD = resolveDeployTrancheUSD(signal, bankroll, customTrancheUSD);
+  const tradeRecord = buildTradeRecord(signal, trancheUSD);
+
+  const executed = await executeSimulatedTrade(tradeRecord);
+  if (!executed.ok) {
+    // The guard's own reason, not a guess. See executeSimulatedTrade.
+    throw new Error(executed.reason || `${signal.symbol} was not opened: a bankroll guard refused it.`);
+  }
+  return tradeRecord;
+}
+
+/**
+ * Position size for a deploy: the tranche, capped by cash, then sized for
+ * constant dollar risk. Throws when the cash floor refuses the trade. Shared by
+ * the live deploy and tools/backtest.mjs so both size a trade the same way.
+ */
+export function resolveDeployTrancheUSD(
+  signal: EntrySignalResult,
+  bankroll: BankrollState,
+  customTrancheUSD?: number
+): number {
   const minRequiredCash = Math.max(1.00, +(bankroll.totalPortfolioValueUSD * 0.07).toFixed(2));
   if (bankroll.liquidCashUSD < minRequiredCash) {
     throw new Error(
@@ -1692,12 +1953,24 @@ export async function deploySignalToAutomatedFeed(
   );
   const trancheUSD = Math.min(sizedUSD, bankroll.liquidCashUSD);
 
+  return trancheUSD;
+}
+
+/**
+ * The trade record a deploy opens. Pure: no I/O, and `now` stands in for the
+ * clock, so the backtest opens exactly the record the live deploy would.
+ */
+export function buildTradeRecord(
+  signal: EntrySignalResult,
+  trancheUSD: number,
+  now: number = Date.now()
+): AutomatedTradeRecord {
   const currentP = signal.currentPrice;
   const units = currentP > 0 ? +(trancheUSD / currentP).toFixed(currentP < 0.01 ? 2 : 6) : 0.1;
   const plan = signal.tradePlan;
 
   const tradeRecord: AutomatedTradeRecord = {
-    id: `trade-scan-${signal.coinId}-${Date.now()}`,
+    id: `trade-scan-${signal.coinId}-${now}`,
     category: 'investment',
     type: signal.archetype === 'MEAN_REVERSION_DIP' ? 'MEAN_REVERSION_DIP' 
       : signal.archetype === 'VOLATILITY_SQUEEZE' ? 'VOLATILITY_EXPANSION_1W' 
@@ -1713,7 +1986,7 @@ export async function deploySignalToAutomatedFeed(
     entryPrice: currentP,
     currentPrice: currentP,
     entryDate: 'Just now (Live Scan Entry)',
-    openedAtTimestamp: Date.now(),
+    openedAtTimestamp: now,
     sessionHighPrice: currentP,
     sessionLowPrice: currentP,
     mfePct: 0,
@@ -1744,21 +2017,28 @@ export async function deploySignalToAutomatedFeed(
     takeProfitPct: plan.tier3Pct,
     stopLossPrice: plan.stopLossPrice,
     stopLossPct: -plan.stopLossPct,
+    structuralResistance: signal.futuresContext?.overheadResistancePrice,
+    structuralSupport: signal.priceAction?.low24h,
+    snappedTakeProfitReason: plan.isSnappedToStructuralLevel ? plan.snappedLevelDescription : undefined,
     harvestTiers: {
       tier1: {
-        percent: 33,
+        percent: Math.round(GEOMETRY_CONFIG.tier1HarvestPct * 100),
         targetPct: plan.tier1Pct,
         targetPrice: plan.tier1Price,
-        status: 'PENDING'
+        status: 'PENDING',
+        snappedLevel: plan.isSnappedToStructuralLevel && plan.snappedLevelPrice ? plan.snappedLevelPrice : undefined,
+        note: plan.isSnappedToStructuralLevel ? plan.snappedLevelDescription : undefined
       },
       tier2: {
-        percent: 33,
+        percent: Math.round(GEOMETRY_CONFIG.tier2HarvestPct * 100),
         targetPct: plan.tier2Pct,
         targetPrice: plan.tier2Price,
-        status: 'PENDING'
+        status: 'PENDING',
+        snappedLevel: plan.isSnappedToStructuralLevel && plan.snappedLevelPrice ? plan.snappedLevelPrice : undefined,
+        note: plan.isSnappedToStructuralLevel ? plan.snappedLevelDescription : undefined
       },
       tier3: {
-        percent: 34,
+        percent: Math.round(GEOMETRY_CONFIG.tier3HarvestPct * 100),
         targetPct: plan.tier3Pct,
         targetPrice: plan.tier3TargetPrice,
         status: 'PENDING'
@@ -1801,11 +2081,5 @@ export async function deploySignalToAutomatedFeed(
       { date: 'Now', price: currentP, sentiment: Math.round(signal.indicators.rsi14), volume: Math.round(signal.indicators.volumeSurgeRatio * 50), sma50: roundPrice(currentP * 0.975) },
     ]
   };
-
-  const executed = await executeSimulatedTrade(tradeRecord);
-  if (!executed.ok) {
-    // The guard's own reason, not a guess. See executeSimulatedTrade.
-    throw new Error(executed.reason || `${signal.symbol} was not opened: a bankroll guard refused it.`);
-  }
   return tradeRecord;
 }

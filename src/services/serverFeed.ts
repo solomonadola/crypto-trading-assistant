@@ -30,6 +30,8 @@ async function getJson(path: string, timeoutMs: number): Promise<any | null> {
 export interface ServerStatus {
   /** A worker that completed a tick in the last two minutes. */
   active: boolean;
+  /** Whether the HTTP API server is reachable to accept actions (close, deploy, exclude) */
+  serverOnline: boolean;
   lastTickAt: number | null;
   /** Which server process answered (changes on restart). */
   instanceId: string | null;
@@ -41,6 +43,10 @@ export interface ServerStatus {
   firestoreStatus?: string | null;
   /** Background worker auto-pilot enabled state */
   isAutoPilot?: boolean;
+  /** Whether the auto-pilot is allowed to deploy short positions */
+  allowShorts?: boolean;
+  /** The exit profile the server opens trades with */
+  strategyProfile?: string;
 }
 
 // Instance ids seen recently. Two alternating within minutes means more than
@@ -79,10 +85,23 @@ export async function fetchServerStatus(): Promise<ServerStatus> {
   }
   const firestoreStatus = typeof w?.sync?.firestore === 'string' ? w.sync.firestore : null;
   const isAutoPilot = typeof w?.isAutoPilot === 'boolean' ? w.isAutoPilot : undefined;
-  if (w?.workerRunning && typeof w.tickAgeMs === 'number' && w.tickAgeMs < 120_000) {
-    return { active: true, lastTickAt: Date.now() - w.tickAgeMs, instanceId, buildId, warning, firestoreStatus, isAutoPilot };
-  }
-  return { active: false, lastTickAt: null, instanceId, buildId, warning, firestoreStatus, isAutoPilot };
+  const allowShorts = typeof w?.allowShorts === 'boolean' ? w.allowShorts : undefined;
+  const strategyProfile = typeof w?.strategyProfile === 'string' ? w.strategyProfile : undefined;
+  const serverOnline = Boolean(data?.serverActive);
+  const workerActive = Boolean(w?.workerRunning && typeof w.tickAgeMs === 'number' && w.tickAgeMs < 120_000);
+
+  return {
+    active: workerActive,
+    serverOnline,
+    lastTickAt: typeof w?.tickAgeMs === 'number' ? Date.now() - w.tickAgeMs : null,
+    instanceId,
+    buildId,
+    warning,
+    firestoreStatus,
+    isAutoPilot,
+    allowShorts,
+    strategyProfile,
+  };
 }
 
 let cursor = { boot: '', version: 0 };

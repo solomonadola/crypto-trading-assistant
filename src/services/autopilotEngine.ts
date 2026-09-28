@@ -10,11 +10,13 @@ import {
 } from '../types/entryScanner';
 import { AUTOPILOT_CONFIG } from '../config/autopilot';
 import { LEVEL_GATES_ACTIVE } from '../config/entry';
+import { getActiveStrategyProfile } from '../config/geometry';
 import {
   AutoPilotPacingInfo,
   evaluateBtcMacroRegime,
   evaluateMarketActivityRadar,
   evaluateRecentLossCircuitBreaker,
+  evaluateMonthlyRiskBudget,
   getAutoPilotPacingInfo,
 } from './marketRegimeService';
 
@@ -52,8 +54,11 @@ export function computePacing(
   coins: CryptoCoin[],
   trades: AutomatedTradeRecord[],
   isAutoPilot: boolean,
-  totalSlots: number
+  totalSlots: number,
+  /** The account's equity: the monthly loss cap is a percentage of it. */
+  equityUSD: number
 ): AutoPilotPacingInfo {
+  const profile = getActiveStrategyProfile();
   return getAutoPilotPacingInfo(
     isAutoPilot,
     trades.filter((t) => t.status === 'OPEN').length,
@@ -61,6 +66,7 @@ export function computePacing(
     evaluateBtcMacroRegime(coins),
     evaluateRecentLossCircuitBreaker(trades),
     evaluateMarketActivityRadar(coins),
+    evaluateMonthlyRiskBudget(trades, equityUSD, profile.monthlyRiskCapPct)
   );
 }
 
@@ -137,11 +143,52 @@ export function selectAutoPilotCandidate(i: AutoPilotInputs): AutoPilotDecision 
       if (isMajor && openMajorCount >= MAX_MAJOR_COIN_SLOTS) return false;
       if (isMeme && openMemeCount >= MAX_MEME_COIN_SLOTS) return false;
 
-      // Short side disabled. Measured forward returns were negative in both
-      // samples: in-sample t = -2.02 at 5m, and out-of-sample the short leg
-      // collapsed from -38 bps (t = -4.08) to -6.65 bps (t = -1.16), i.e. it
-      // was six months of alts trending, not an edge. See STUDY_A_RESULTS.md.
-      if (!AUTOPILOT_CONFIG.allowShorts && s.direction === 'SHORT') return false;
+      // Directional balance: prevent holding more than 5 positions in the exact same direction.
+      // Protects against total portfolio correlation drawdown when market swings against a directional bias.
+      const sameDirectionCount = openTrades.filter((t) => t.direction === s.direction).length;
+      if (sameDirectionCount >= 5) return false;
+
+      // Directional Market Alignment Guard (Short or Long only when the market strictly aligns):
+      // 1. Bitcoin Macro Regime check:
+      // When BTC is surging/bullish expansion, Shorts are locked to prevent short squeezes.
+      // When BTC is dumping, Longs are locked to prevent knife catching.
+      const btcRegime = pacingInfo.btcRegime;
+
+      // Short side check:
+      // Shorts require allowShorts enabled and macro alignment (allowNewShorts === true):
+      if (s.direction === 'SHORT') {
+        if (!AUTOPILOT_CONFIG.allowShorts) return false;
+        if (!btcRegime.allowNewShorts) return false;
+      }
+
+      if (s.direction === 'LONG' && !btcRegime.allowNewLongs) return false;
+      if (s.direction === 'SHORT' && !btcRegime.allowNewShorts) return false;
+
+      // 2. Individual Coin Order Flow & Structure Alignment:
+      // For SHORTS:
+      // - Must not short when buyers are aggressively absorbing orders or net delta is positive
+      // - Must pass level gate (must have breakdown headroom, not sitting on key support)
+      if (s.direction === 'SHORT') {
+        if (s.orderFlow && (s.orderFlow.netDeltaUSD > 10000 || s.orderFlow.orderFlowState === 'HEAVY_ACCUMULATION')) {
+          return false;
+        }
+      }
+
+      // For LONGS:
+      // - Must not long when aggressive sellers are dumping into the bid
+      // - Must pass level gate (must have room above, not hitting resistance ceiling)
+      // - Must NEVER enter while a pullback is actively falling or unconfirmed
+      if (s.direction === 'LONG') {
+        if (s.orderFlow && (s.orderFlow.netDeltaUSD < -50000 && s.orderFlow.orderFlowState === 'HEAVY_DISTRIBUTION')) {
+          return false;
+        }
+        if (s.levelGate?.pullbackStatus === 'ACTIVE_FALLING') {
+          return false;
+        }
+        if (s.microConfirmation && !s.microConfirmation.isGreenReversal) {
+          return false;
+        }
+      }
 
       // Real-level gates (config/entry.ts): no entry under resistance, in a 4h
       // downtrend, or far from a support that has held - and no entry in a coin
@@ -152,19 +199,43 @@ export function selectAutoPilotCandidate(i: AutoPilotInputs): AutoPilotDecision 
         return false;
       }
 
+      // Smart Money Concept (SMC) Inducement Trap Protection:
+      // Never deploy into premature bounces above unswept internal inducement lows.
+      if (s.inducement && !s.inducement.isSafeToEnter) return false;
+
       // Multi-timeframe confluence guard: reject disqualified or weak C-grade setups.
       const confluence = s.timeframeConfluence?.confluenceRating;
       const alignedCount = s.timeframeConfluence?.alignedCount ?? 3;
       if (confluence === 'DISQUALIFIED' || confluence === 'C' || alignedCount < 2) return false;
 
-      // 1. High conviction triggered setups
-      if (s.status === 'TRIGGERED' && s.score >= AUTOPILOT_CONFIG.minScore) return true;
-      // 2. Strong constructive setups with at least 3 checkpoints confirmed and not blocked
-      if (s.status === 'FORMING' && s.score >= AUTOPILOT_CONFIG.minScore && !s.disqualificationReason) {
-        return s.checkpoints.filter((c) => c.passed).length >= 3;
+      // Dynamic conviction floor based on market regime:
+      // During BTC defensive pullbacks or quiet chop doldrums, require strict A+ conviction (score >= 85).
+      const isHighCaution = pacingInfo.state === 'BTC_PULLBACK_CAUTION' || pacingInfo.state === 'QUIET_CHOP_PATIENT';
+      const effectiveMinScore = isHighCaution ? Math.max(85, AUTOPILOT_CONFIG.minScore) : AUTOPILOT_CONFIG.minScore;
+      if (s.score < effectiveMinScore) return false;
+
+      // Scalping Volatility Filter:
+      // A true scalp resolves in hours. If a coin's 24h change is flat (< 2.0%) and volume is small,
+      // it takes days to reach target. Require active dynamic movement.
+      const change24h = Math.abs(s.priceChange24hPct || 0);
+      // For slow majors like BTC/ETH, require at least 2.5% 24h range to ensure they aren't trapped in dead sideways chop
+      if (isMajor && change24h < 2.5) {
+        return false;
       }
-      // 3. Staging at support with green reversal
-      if (s.status === 'STAGING_AT_SUPPORT' && s.score >= AUTOPILOT_CONFIG.minScore && s.microConfirmation?.isGreenReversal) {
+
+      // Low Funding Fee Scalping Gate:
+      // High funding rates cause heavy carry fee drag and precede brutal liquidation flushes.
+      // Filter out long candidates with elevated funding (>0.022%), and shorts with negative funding (<-0.022%).
+      if (s.fundingRatePct !== undefined) {
+        if (s.direction === 'LONG' && s.fundingRatePct > 0.022) return false;
+        if (s.direction === 'SHORT' && s.fundingRatePct < -0.022) return false;
+      }
+
+      // Strict entry validation:
+      // 1. High conviction confirmed triggered setups (Price touched level and triggered)
+      if (s.status === 'TRIGGERED') return true;
+      // 2. High-probability staging at key support with verified green micro-reversal and at least 4 checkpoints
+      if (s.status === 'STAGING_AT_SUPPORT' && s.microConfirmation?.isGreenReversal && s.checkpoints.filter((c) => c.passed).length >= 4) {
         return true;
       }
       return false;
@@ -178,15 +249,33 @@ export function selectAutoPilotCandidate(i: AutoPilotInputs): AutoPilotDecision 
       const confRankB = b.timeframeConfluence?.confluenceRating === 'A+' ? 2 : b.timeframeConfluence?.confluenceRating === 'A' ? 1 : 0;
       if (confRankB !== confRankA) return confRankB - confRankA;
 
-      // Majors moving less than 2.5% in 24h rank below alts and moving majors.
-      const aIsStallingMajor = isMajorA && Math.abs(a.priceChange24hPct || 0) < 2.5;
-      const bIsStallingMajor = isMajorB && Math.abs(b.priceChange24hPct || 0) < 2.5;
+      // Volatility Momentum Scalping Advantage:
+      // Active high-beta altcoins/memes with > 4.0% 24h expansion rank ABOVE slow majors
+      const changeA = Math.abs(a.priceChange24hPct || 0);
+      const changeB = Math.abs(b.priceChange24hPct || 0);
+      const isDynamicRunnerA = !isMajorA && changeA >= 4.0;
+      const isDynamicRunnerB = !isMajorB && changeB >= 4.0;
+      if (isDynamicRunnerA && !isDynamicRunnerB) return -1;
+      if (!isDynamicRunnerA && isDynamicRunnerB) return 1;
+
+      // Majors moving less than 2.5% in 24h rank strictly at the bottom
+      const aIsStallingMajor = isMajorA && changeA < 2.5;
+      const bIsStallingMajor = isMajorB && changeB < 2.5;
       if (!aIsStallingMajor && bIsStallingMajor) return -1;
       if (aIsStallingMajor && !bIsStallingMajor) return 1;
 
       // Triggered setups first, then higher score.
       if (a.status === 'TRIGGERED' && b.status !== 'TRIGGERED') return -1;
       if (b.status === 'TRIGGERED' && a.status !== 'TRIGGERED') return 1;
+
+      // Low Funding Fee Priority:
+      // Prefer setups with low carry fees over expensive ones
+      const frA = Math.abs(a.fundingRatePct ?? 0.01);
+      const frB = Math.abs(b.fundingRatePct ?? 0.01);
+      if (Math.abs(frA - frB) >= 0.005) {
+        return frA - frB; // Lower funding rate ranks higher
+      }
+
       return b.score - a.score;
     });
 

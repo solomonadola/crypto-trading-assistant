@@ -13,13 +13,15 @@ import {
   BarChart3, 
   Target,
   Bot,
-  History
+  History,
+  FlaskConical,
 } from 'lucide-react';
 import { AutomatedTradeRecord, BankrollState } from '../types/automatedFeed';
 import { calculateStrategyVerification } from '../services/bankrollService';
 import { formatCashUSD } from '../services/orderFlowService';
+import { getActiveStrategyProfile } from '../config/geometry';
 
-export type ActiveTab = 'scanner' | 'bankroll' | 'history' | 'metrics' | 'orderflow' | 'lessons' | 'firebase';
+export type ActiveTab = 'scanner' | 'bankroll' | 'history' | 'metrics' | 'backtest' | 'orderflow' | 'lessons' | 'firebase';
 
 interface HeaderProps {
   activeTab: ActiveTab;
@@ -115,7 +117,7 @@ export const Header: React.FC<HeaderProps> = ({
               <span className="font-semibold text-emerald-400">${bankroll.liquidCashUSD.toFixed(2)}</span>
             </div>
             <span className="text-stone-700">|</span>
-            <div className="flex items-center gap-1" title="Open trade slots (maximum 10 trades at $10 each)">
+            <div className="flex items-center gap-1" title={`Open trade slots (${bankroll.totalSlots} high-conviction trades at $${bankroll.trancheSizeUSD.toFixed(0)} each)`}>
               <span className="text-stone-400">Open Slots:</span>
               <span className={`font-semibold ${bankroll.availableSlots > 0 ? 'text-amber-400' : 'text-stone-500'}`}>
                 {bankroll.activeTradesCount}/{bankroll.totalSlots}
@@ -125,6 +127,15 @@ export const Header: React.FC<HeaderProps> = ({
 
           {/* Quick Actions & Live Trigger */}
           <div className="flex items-center gap-2">
+            {/* Active Strategy Profile Badge */}
+            <div 
+              title={getActiveStrategyProfile().description}
+              className="hidden lg:flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs font-semibold cursor-help"
+            >
+              <Target className="w-3.5 h-3.5 text-amber-400" />
+              <span>{getActiveStrategyProfile().shortName}</span>
+            </div>
+
             {onToggleAutoPilot && (
               <button
                 id="header-autopilot-btn"
@@ -234,6 +245,20 @@ export const Header: React.FC<HeaderProps> = ({
             <span className="px-1.5 py-0.2 rounded-full text-[10px] font-bold bg-emerald-500/20 text-emerald-300">
               {verification.winRatePct}% Win Rate
             </span>
+          </button>
+
+          <button
+            id="tab-backtest"
+            onClick={() => setActiveTab('backtest')}
+            title="Replay the auto-pilot over historical Binance candles"
+            className={`inline-flex items-center gap-2 px-3 py-1.5 text-xs font-medium rounded-lg whitespace-nowrap transition-colors ${
+              activeTab === 'backtest'
+                ? 'bg-amber-500/15 text-amber-400 border border-amber-500/30'
+                : 'text-stone-400 hover:text-stone-200 hover:bg-stone-900/60'
+            }`}
+          >
+            <FlaskConical className="w-4 h-4" />
+            <span>Backtest Lab</span>
           </button>
 
           <button

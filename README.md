@@ -357,6 +357,41 @@ the rate of loss but do not make it profitable. Details:
 
 ---
 
+## Backtest Lab — `src/backtest/`, `tools/backtest.mjs`
+
+Replays the auto-pilot over the Binance 5-minute candles in `data/klines2024/`
+and `data/klines/` with the app's **own** code at every step: the coin built
+from a 24h ticker (`coinFromTicker`), the candle analysis, the scanner, the
+entry decision and regime gates, sizing and the trade record
+(`buildTradeRecord`), the exit ladder and the stale-trade recycle. Only the
+clock and the prices are simulated. A change to the strategy is therefore
+backtested by running it, with no second copy of the rules to keep in step.
+
+```bash
+node tools/backtest.mjs                                  # live config, 2024-09-01 .. 2026-09-01
+node tools/backtest.mjs --profile DYNAMIC_SCALP --shorts
+node tools/backtest.mjs --from 2025-06-01 --to 2025-12-01 --capital 1000
+node tools/backtest.mjs --no-stale                       # what-if: stale-trade recycle off
+node tools/test-backtest.mjs                             # invariants: books balance, limits hold, costs paid
+```
+
+Results are written to `data/backtests/` and shown in the app's **Backtest
+Lab** tab: equity against holding BTC, drawdown, monthly returns, exits,
+coins, why the auto-pilot did not deploy, and every trade. The tab can start
+runs too (`POST /api/backtests/run`, one at a time) where the candles exist;
+a hosted server without them says so.
+
+How it stays honest:
+- Decisions at each 5-minute close, from candles that have closed. The 24h
+  ticker is a rolling window, the 1h/4h/1d candles include the one still
+  forming, and the analysis refreshes every 10 minutes, as live.
+- Within a candle the stop is tested before any target (the catch-up order).
+- Every fill pays 15 bps; open positions left at the end are closed with the
+  exit cost.
+- Each result lists what history cannot reproduce: funding rates (the app
+  default is used), the live coin list, and any month missing from the data
+  (January and February 2026 are not downloaded).
+
 ## Research tools — `tools/`
 
 These run the app's real scanner and exit logic offline against historical
@@ -377,7 +412,6 @@ node tools/test-network.mjs                  # a stalled Binance response cannot
 node tools/test-trading-worker.mjs           # 24/7 worker: no blind trading, restart replay, Firestore merge
 node tools/test-universe.mjs                 # volume-ranked coin list
 node tools/test-indicators.mjs               # EMA/RSI/ATR, swing levels, pullbacks, candle cache
-node tools/test-entry-gates.mjs              # the level gates, including a coin whose levels cannot be measured
 npm run build && node tools/test-server-e2e.mjs  # the real server over HTTP: open/close from the web, saves, restart
 node tools/diagnose-trades.mjs trades.json   # find corrupt records in an exported feed
 ```

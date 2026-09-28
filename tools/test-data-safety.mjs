@@ -28,6 +28,7 @@ const FAKE_FIRESTORE = `
   export const getDocsFromServer = async () => ({ empty: true, docs: [], forEach() {}, docChanges: () => [] });
   export const serverTimestamp = () => ({ serverTs: true });
   export const Timestamp = { fromMillis: (ms) => ({ ms }) };
+  export const writeBatch = () => ({ delete() {}, set() {}, update() {}, commit: async () => {} });
 `;
 
 async function load(writesOff) {
@@ -164,7 +165,7 @@ console.log('\n5. Excluding a record from statistics never frees its slot');
   const b = calculateBankrollState(shown);
   check('the slot count matches what is shown', b.activeTradesCount === 10, String(b.activeTradesCount));
   check('a new trade is refused', b.canOpenNewTrade === false);
-  check('the reason names the real number', /10\/10/.test(b.blockReason || ''), b.blockReason);
+  check('the reason names the real number', (b.blockReason || '').includes(`10/${b.totalSlots}`), b.blockReason);
   check('the excluded closed record is out of the P&L', Math.abs(b.realizedProfitUSD) < 90,
         String(b.realizedProfitUSD));
 }

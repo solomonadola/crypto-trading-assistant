@@ -93,7 +93,7 @@ export const BankrollView: React.FC<BankrollViewProps> = ({
               My Trades & Money Management
             </h2>
             <p className="text-xs sm:text-sm text-stone-400 mt-1 max-w-2xl">
-              Trades are allocated using <strong>Capital ÷ 10 compounding</strong> (${bankroll.trancheSizeUSD.toFixed(2)} per slot, with flexible entry down to 7% remaining balance). When a trade makes +4%, it takes partial profit and moves the stop loss to breakeven, preserving gains to compound future trades.
+              Trades are allocated using <strong>Capital ÷ {bankroll.totalSlots} compounding</strong> (${bankroll.trancheSizeUSD.toFixed(2)} per slot, with flexible entry down to 7% remaining balance). When a trade makes initial profit, it takes partial profit and moves the stop loss to a breakeven buffer, preserving gains to compound future trades.
             </p>
           </div>
 
@@ -157,19 +157,19 @@ export const BankrollView: React.FC<BankrollViewProps> = ({
         </div>
       </div>
 
-      {/* 10-Slot Visualizer */}
+      {/* Slot Visualizer */}
       <div className="rounded-xl bg-stone-900 border border-stone-800 p-4">
         <h3 className="text-xs font-semibold uppercase tracking-wider text-stone-400 mb-3 flex items-center justify-between flex-wrap gap-2">
           <div className="flex items-center gap-2">
-            <span>Active Trade Slots (10 Slots • Compounding)</span>
+            <span>Active Trade Slots ({bankroll.totalSlots} Slots • High Conviction Compounding)</span>
             <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/10 text-amber-300 border border-amber-500/30">
-              ${bankroll.trancheSizeUSD.toFixed(2)} / Tranche (Capital ÷ 10)
+              ${bankroll.trancheSizeUSD.toFixed(2)} / Tranche (Capital ÷ {bankroll.totalSlots})
             </span>
           </div>
-          <span className="text-amber-400 font-bold">{bankroll.activeTradesCount} / 10 Occupied</span>
+          <span className="text-amber-400 font-bold">{bankroll.activeTradesCount} / {bankroll.totalSlots} Occupied</span>
         </h3>
 
-        <div className="grid grid-cols-5 sm:grid-cols-10 gap-2">
+        <div className={`grid gap-2.5 ${bankroll.totalSlots <= 5 ? 'grid-cols-2 sm:grid-cols-5' : 'grid-cols-5 sm:grid-cols-10'}`}>
           {bankroll.slots.map((slot) => {
             const isFilled = slot.status === 'FILLED';
             const trade = slot.trade;
@@ -333,7 +333,7 @@ export const BankrollView: React.FC<BankrollViewProps> = ({
                           title={zombie.reason}
                         >
                           <RefreshCw className="w-3 h-3" />
-                          Recycle Flat Slot ($10)
+                          Recycle Flat Slot (${trade.positionSizeUSD?.toFixed(0) || bankroll.trancheSizeUSD.toFixed(0)})
                         </button>
                       )}
 
@@ -341,7 +341,7 @@ export const BankrollView: React.FC<BankrollViewProps> = ({
                         <button
                           onClick={() => onCloseTrade(trade, 'BREAKEVEN_EXIT')}
                           className="px-2.5 py-1.5 rounded-lg text-xs font-semibold text-stone-300 hover:text-stone-100 bg-stone-800 hover:bg-stone-700 border border-stone-700 transition-colors cursor-pointer flex items-center gap-1"
-                          title="Exit position around breakeven to free up this $10 slot for a fresh setup"
+                          title={`Exit position around breakeven to free up this $${trade.positionSizeUSD?.toFixed(0) || bankroll.trancheSizeUSD.toFixed(0)} slot for a fresh setup`}
                         >
                           Exit Breakeven
                         </button>
@@ -388,7 +388,10 @@ export const BankrollView: React.FC<BankrollViewProps> = ({
                         <span className="font-bold text-[11px]">Step 1 (Sell 33%)</span>
                       </div>
                       <span className="text-xs font-bold block mt-0.5">${trade.harvestTiers?.tier1.targetPrice}</span>
-                      <span className="text-[10px] text-stone-500">+{trade.harvestTiers?.tier1.targetPct}% • Locks Zero Risk</span>
+                      <span className="text-[10px] text-stone-500">
+                        +{trade.harvestTiers?.tier1.targetPct}% • Locks Zero Risk
+                        {trade.harvestTiers?.tier1.snappedLevel ? ' (Snapped Key Level)' : ''}
+                      </span>
                     </div>
 
                     {/* Tier 2 */}
@@ -402,7 +405,10 @@ export const BankrollView: React.FC<BankrollViewProps> = ({
                         <span className="font-bold text-[11px]">Step 2 (Sell 33%)</span>
                       </div>
                       <span className="text-xs font-bold block mt-0.5">${trade.harvestTiers?.tier2.targetPrice}</span>
-                      <span className="text-[10px] text-stone-500">+{trade.harvestTiers?.tier2.targetPct}% • Banks Cash</span>
+                      <span className="text-[10px] text-stone-500">
+                        +{trade.harvestTiers?.tier2.targetPct}% • Banks Cash
+                        {trade.harvestTiers?.tier2.snappedLevel ? ' (Snapped Key Level)' : ''}
+                      </span>
                     </div>
 
                     {/* Tier 3 */}

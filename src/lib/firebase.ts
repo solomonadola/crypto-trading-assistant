@@ -159,6 +159,20 @@ export function isFirebaseInitialized(): boolean {
 // Connection test per Firebase integration skill
 export async function testFirestoreConnection(): Promise<{ success: boolean; latencyMs?: number; error?: string }> {
   const start = Date.now();
+  // 1. If server /api/status is reachable, use its authoritative Firestore health check (zero direct reads)
+  try {
+    const res = await fetch('/api/status', { cache: 'no-store' });
+    if (res.ok) {
+      const data = await res.json();
+      const fsStatus = data?.worker?.sync?.firestore;
+      if (fsStatus === 'ok') {
+        reportFirestoreResult();
+        return { success: true, latencyMs: Math.max(1, Date.now() - start) };
+      }
+    }
+  } catch {}
+
+  // 2. Direct probe fallback only if server status endpoint is unreachable
   try {
     await getDocFromServer(doc(db, 'crypto_automated_trades', '_connection_probe'));
     return { success: true, latencyMs: Date.now() - start };

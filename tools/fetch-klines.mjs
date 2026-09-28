@@ -1,11 +1,12 @@
-// Downloads Binance monthly 5m kline dumps for the app's TOP_ASSETS universe.
+// Downloads Binance monthly 5m kline dumps (spot) for a list of coins.
 //
 // Uses data.binance.vision monthly ZIPs (no rate limits, ~1MB/symbol/month)
 // rather than the REST API. Resumable: existing CSVs are skipped, so an
 // interrupted run costs nothing.
 //
-//   node tools/fetch-klines.mjs [--months 6]
-//   node tools/fetch-klines.mjs --from 2024-01 --to 2025-12 --out data/klines2024
+//   node tools/fetch-klines.mjs --symbols BTC,ETH [--months 6]
+//   node tools/fetch-klines.mjs --from 2024-01 --to 2025-12 --out data/klines2024 --symbols BTC,ETH,SOL
+//   node tools/fetch-klines.mjs --from 2024-01 --to 2026-08 --out data/klines-wide --symbols-file coins.txt
 //
 // CSV columns (Binance kline format):
 //   0 openTime  1 open  2 high  3 low  4 close  5 volume
@@ -21,8 +22,16 @@ const TO       = arg('to', null);        // 'YYYY-MM' inclusive
 const OUT      = arg('out', 'data/klines');
 const CONCURRENCY = parseInt(arg('concurrency', '8'), 10);
 
-const SYMBOLS = [...readFileSync('src/services/binanceService.ts', 'utf8')
-  .matchAll(/symbol: '([A-Z0-9]+)'/g)].map(m => m[1]);
+// --symbols BTC,ETH,... or --symbols-file list.txt (one per line) picks the coins.
+const SYMBOLS = arg('symbols-file', null)
+  ? readFileSync(arg('symbols-file'), 'utf8').split(/\s+/).map((s) => s.trim().toUpperCase()).filter(Boolean)
+  : arg('symbols', null)
+  ? arg('symbols').split(',').map((s) => s.trim().toUpperCase()).filter(Boolean)
+  : null;
+if (!SYMBOLS) {
+  console.error('Name the coins: --symbols BTC,ETH,... or --symbols-file list.txt');
+  process.exit(1);
+}
 
 // Explicit --from/--to range, else the last N complete months.
 const months = [];

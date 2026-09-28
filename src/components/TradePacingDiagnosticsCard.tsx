@@ -107,6 +107,8 @@ export const TradePacingDiagnosticsCard: React.FC<TradePacingDiagnosticsCardProp
             ? 'bg-rose-950/30 border-rose-800/60 text-rose-200 shadow-[0_0_15px_rgba(244,63,94,0.1)]'
             : pacingInfo.state === 'CONSOLIDATION_LOCK'
             ? 'bg-blue-950/30 border-blue-800/60 text-blue-200 shadow-[0_0_15px_rgba(59,130,246,0.1)]'
+            : pacingInfo.state === 'DEAD_ZONE_PAUSE'
+            ? 'bg-amber-950/30 border-amber-800/60 text-amber-200 shadow-[0_0_15px_rgba(245,158,11,0.1)]'
             : pacingInfo.state === 'SLOTS_FULL'
             ? 'bg-amber-950/25 border-amber-800/50 text-amber-200'
             : pacingInfo.state === 'BTC_ARMOR_PAUSE'
@@ -119,6 +121,8 @@ export const TradePacingDiagnosticsCard: React.FC<TradePacingDiagnosticsCardProp
                 <ShieldAlert className="w-5 h-5 text-rose-400 animate-pulse" />
               ) : pacingInfo.state === 'CONSOLIDATION_LOCK' ? (
                 <Lock className="w-5 h-5 text-blue-400" />
+              ) : pacingInfo.state === 'DEAD_ZONE_PAUSE' ? (
+                <Clock className="w-5 h-5 text-amber-400" />
               ) : pacingInfo.state === 'SLOTS_FULL' ? (
                 <Layers className="w-5 h-5 text-amber-400" />
               ) : pacingInfo.state === 'BTC_ARMOR_PAUSE' ? (

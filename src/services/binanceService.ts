@@ -22,6 +22,65 @@ const CACHE_TTL_MS = 15000;
 let lastFetchTime = 0;
 let cachedTickers: Map<string, BinanceFuturesTicker> = new Map();
 
+let lastFundingFetchTime = 0;
+let cachedFundingRates: Map<string, number> = new Map();
+const FUNDING_CACHE_TTL_MS = 30000;
+
+interface BinancePremiumIndexItem {
+  symbol: string;
+  lastFundingRate: string;
+  nextFundingTime?: number;
+}
+
+/**
+ * Fetches live Binance USD-M Futures funding rates.
+ * Returns map of uppercase symbol / base (e.g. 'BTCUSDT' or 'BTC') to 8h funding rate in % (e.g. 0.010 = 0.01%).
+ */
+export async function fetchBinanceFundingRates(): Promise<Map<string, number>> {
+  const now = Date.now();
+  if (now - lastFundingFetchTime < FUNDING_CACHE_TTL_MS && cachedFundingRates.size > 0) {
+    return cachedFundingRates;
+  }
+
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 6000);
+    try {
+      const response = await fetch('https://fapi.binance.com/fapi/v1/premiumIndex', {
+        signal: controller.signal
+      });
+      if (response.ok) {
+        const data = await response.json();
+        if (Array.isArray(data) && data.length > 0) {
+          const map = new Map<string, number>();
+          for (const item of data as BinancePremiumIndexItem[]) {
+            if (!item.symbol) continue;
+            const ratePct = parseFloat(item.lastFundingRate) * 100;
+            if (Number.isFinite(ratePct)) {
+              map.set(item.symbol, ratePct);
+              if (item.symbol.endsWith('USDT')) {
+                const base = item.symbol.slice(0, -4);
+                map.set(base, ratePct);
+              }
+            }
+          }
+          if (map.size > 0) {
+            cachedFundingRates = map;
+            lastFundingFetchTime = now;
+            return map;
+          }
+        }
+      }
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  } catch (err) {
+    console.warn('[Binance] Failed to fetch live funding rates, using cache/fallback', err);
+  }
+
+  return cachedFundingRates;
+}
+
 // Binance global spot only. data-api.binance.vision is Binance's public
 // market-data mirror of the same market as api.binance.com.
 //
@@ -175,8 +234,16 @@ function isStableLike(t: BinanceFuturesTicker): boolean {
  * $1 price that does not move) and pairs with no trades. Pure; tested in
  * tools/test-universe.mjs.
  */
-export function selectUniverse(tickers: Map<string, BinanceFuturesTicker>, size: number = UNIVERSE_CONFIG.size): string[] {
-  const candidates: Array<{ base: string; volume: number }> = [];
+export function selectUniverse(
+  tickers: Map<string, BinanceFuturesTicker>,
+  size: number = UNIVERSE_CONFIG.size,
+  fundingRates?: Map<string, number>
+): string[] {
+  const candidates: Array<{ base: string; volume: number; rangePct: number; fundingRate: number }> = [];
+  const minVol = UNIVERSE_CONFIG.min24hVolumeUSD || 50_000_000;
+  const minRange = UNIVERSE_CONFIG.min24hRangePct || 3.5;
+  const maxFunding = UNIVERSE_CONFIG.maxFundingRatePct || 0.025;
+
   tickers.forEach((t, pair) => {
     if (!pair.endsWith('USDT')) return;
     const base = pair.slice(0, -4);
@@ -185,19 +252,62 @@ export function selectUniverse(tickers: Map<string, BinanceFuturesTicker>, size:
     const price = parseFloat(t.lastPrice);
     const volume = parseFloat(t.quoteVolume);
     if (!(price > 0) || !(volume > 0) || isStableLike(t)) return;
-    candidates.push({ base, volume });
+
+    const high = parseFloat(t.highPrice);
+    const low = parseFloat(t.lowPrice);
+    const rangePct = low > 0 ? ((high - low) / low) * 100 : 0;
+
+    // Filter out coins below the minimum volume threshold ($50M floor)
+    if (volume < minVol) return;
+
+    const fundingRate = fundingRates?.get(pair) ?? fundingRates?.get(base) ?? 0.01;
+
+    // Strict Funding Fee Filter:
+    // Completely exclude coins with extreme predatory funding rates (e.g. |funding| > 0.035%)
+    // that drain positions or indicate imminent liquidation spirals
+    if (Math.abs(fundingRate) > (maxFunding * 1.4)) return;
+
+    candidates.push({ base, volume, rangePct, fundingRate });
   });
-  return candidates.sort((a, b) => b.volume - a.volume).slice(0, size).map((c) => c.base);
+
+  // Prioritize active runners with healthy/low funding fees
+  // 1. High-momentum coins (>= 3.5% range) with low funding rate (<= 0.025%) get highest rank
+  const optimalVolatile = candidates.filter((c) => c.rangePct >= minRange && Math.abs(c.fundingRate) <= maxFunding);
+  const otherVolatile = candidates.filter((c) => c.rangePct >= minRange && Math.abs(c.fundingRate) > maxFunding);
+  const remaining = candidates.filter((c) => c.rangePct < minRange);
+
+  optimalVolatile.sort((a, b) => b.volume - a.volume);
+  otherVolatile.sort((a, b) => b.volume - a.volume);
+  remaining.sort((a, b) => b.volume - a.volume);
+
+  const combined = [...optimalVolatile, ...otherVolatile, ...remaining];
+  return combined.slice(0, size).map((c) => c.base);
 }
 
-let universe: { symbols: string[]; at: number } | null = null;
+let universe: { symbols: string[]; at: number; config?: string } | null = null;
+
+/**
+ * What the list was chosen under: size, filters and exclusions. A saved list
+ * chosen under a different signature is stale at once. Comparing list lengths
+ * instead misfired once the volume floor came in: with fewer qualifying coins
+ * than `size`, one coin crossing the floor changed the length and re-chose the
+ * list on every scan.
+ */
+function universeSignature(): string {
+  const { size, min24hVolumeUSD, min24hRangePct, maxFundingRatePct } = UNIVERSE_CONFIG;
+  return JSON.stringify([size, min24hVolumeUSD, min24hRangePct, maxFundingRatePct, [...UNIVERSE_EXCLUDED].sort()]);
+}
 
 /**
  * The coins to scan now. 'fixed': TOP_ASSETS. 'volume': the volume list,
  * chosen once and kept for UNIVERSE_CONFIG.refreshHours (saved, so a reload or
  * restart keeps the same list), re-chosen after that.
  */
-export function currentUniverse(tickers: Map<string, BinanceFuturesTicker>, now: number = Date.now()): string[] {
+export function currentUniverse(
+  tickers: Map<string, BinanceFuturesTicker>,
+  now: number = Date.now(),
+  fundingRates?: Map<string, number>
+): string[] {
   if (UNIVERSE_CONFIG.mode === 'fixed') return TOP_ASSETS.map((a) => a.symbol);
   if (!universe) {
     try {
@@ -211,11 +321,12 @@ export function currentUniverse(tickers: Map<string, BinanceFuturesTicker>, now:
   // UNIVERSE_EXCLUDED, is stale the moment the new build starts, not a day
   // later: without this the first day after a deploy still scans the old 40
   // and can still open a position in a coin that was just excluded. A
-  // reshuffle in volume ranking is NOT a reason to re-choose - that is what
-  // keeping the list is for.
-  const fresh = tickers.size > 0 ? selectUniverse(tickers) : [];
+  // reshuffle in volume ranking, or a coin crossing the volume floor, is NOT
+  // a reason to re-choose - that is what keeping the list is for.
+  const fresh = tickers.size > 0 ? selectUniverse(tickers, UNIVERSE_CONFIG.size, fundingRates) : [];
+  const signature = universeSignature();
   const configChanged = !!universe && fresh.length > 0 && (
-    fresh.length !== universe.symbols.length ||
+    universe.config !== signature ||
     universe.symbols.some((s) => UNIVERSE_EXCLUDED.has(s))
   );
   const stale = !universe || !universe.symbols.length || configChanged ||
@@ -226,9 +337,9 @@ export function currentUniverse(tickers: Map<string, BinanceFuturesTicker>, now:
       const before = new Set(universe?.symbols || []);
       const added = symbols.filter((x) => !before.has(x));
       const dropped = (universe?.symbols || []).filter((x) => !symbols.includes(x));
-      universe = { symbols, at: now };
+      universe = { symbols, at: now, config: signature };
       try { localStorage.setItem(UNIVERSE_KEY, JSON.stringify(universe)); } catch {}
-      console.info(`[Universe] Top ${symbols.length} Binance USDT pairs by 24h volume` +
+      console.info(`[Universe] Top ${symbols.length} Binance USDT pairs by 24h volume & low funding` +
         (before.size ? ` (added ${added.join(', ') || 'none'}; dropped ${dropped.join(', ') || 'none'})` : `: ${symbols.join(', ')}`));
     }
   }
@@ -244,7 +355,7 @@ function badge(symbol: string): string {
   return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
 }
 
-function assetFor(symbol: string): AssetDefinition {
+export function assetFor(symbol: string): AssetDefinition {
   return KNOWN_ASSETS.get(symbol) ?? {
     id: symbol.toLowerCase(),
     symbol,
@@ -262,10 +373,67 @@ function assetFor(symbol: string): AssetDefinition {
  * Assets without a live ticker are excluded rather than falling back to a
  * hardcoded price - a frozen price produces signals that can never resolve.
  */
+/**
+ * One coin as the scanner sees it, from its 24h ticker. Pure, and shared with
+ * tools/backtest.mjs, which feeds it tickers rebuilt from historical candles so
+ * the scanner reads exactly the fields it reads live. Null when the ticker has
+ * no usable price.
+ */
+export function coinFromTicker(
+  asset: AssetDefinition,
+  ticker: Pick<BinanceFuturesTicker, 'lastPrice' | 'priceChangePercent' | 'highPrice' | 'lowPrice' | 'quoteVolume' | 'priceChange'>,
+  fundingRate: number,
+  rank: number
+): CryptoCoin | null {
+  const livePrice = parseFloat(ticker.lastPrice);
+  const change24h = parseFloat(ticker.priceChangePercent);
+  const high24h = parseFloat(ticker.highPrice);
+  const low24h = parseFloat(ticker.lowPrice);
+  const totalVolume = parseFloat(ticker.quoteVolume);
+  const priceChange = parseFloat(ticker.priceChange);
+
+  if (!(livePrice > 0) || !Number.isFinite(change24h)) return null;
+
+  return {
+    id: asset.id,
+    symbol: asset.symbol.toLowerCase(),
+    name: asset.name,
+    image: asset.image,
+    current_price: livePrice,
+    funding_rate: fundingRate,
+    market_cap: totalVolume * 15,
+    market_cap_rank: rank,
+    fully_diluted_valuation: totalVolume * 18,
+    total_volume: totalVolume,
+    high_24h: high24h,
+    low_24h: low24h,
+    price_change_24h: priceChange,
+    price_change_percentage_24h: change24h,
+    circulating_supply: +(totalVolume / livePrice).toFixed(0),
+    total_supply: null,
+    max_supply: null,
+    ath: high24h * 1.5,
+    ath_change_percentage: -25,
+    ath_date: new Date().toISOString(),
+    atl: low24h * 0.5,
+    category: asset.category,
+    consensus: asset.consensus,
+    launch_year: asset.launch_year,
+    description: asset.description,
+    whitepaper_summary: `${asset.name} operates on a decentralized architecture for institutional and retail liquidity.`,
+    use_cases: ['Medium of Exchange', 'Liquidity Layer', 'Staking & Consensus'],
+    key_risks: ['Market Volatility', 'Systemic Beta Drag', 'Regulatory Scrutiny'],
+    tokenomics_summary: `Live supply traded on Binance with $${(totalVolume / 1e6).toFixed(1)}M 24h turnover.`
+  };
+}
+
 export async function fetchLiveMarketCoins(): Promise<CryptoCoin[]> {
-  const tickers = await fetchBinanceTickers();
+  const [tickers, fundingRates] = await Promise.all([
+    fetchBinanceTickers(),
+    fetchBinanceFundingRates()
+  ]);
   const coins: CryptoCoin[] = [];
-  const symbols = currentUniverse(tickers);
+  const symbols = currentUniverse(tickers, Date.now(), fundingRates);
 
   for (let i = 0; i < symbols.length; i++) {
     const asset = assetFor(symbols[i]);
@@ -283,47 +451,9 @@ export async function fetchLiveMarketCoins(): Promise<CryptoCoin[]> {
       continue;
     }
 
-    const livePrice = parseFloat(ticker.lastPrice);
-    const change24h = parseFloat(ticker.priceChangePercent);
-    const high24h = parseFloat(ticker.highPrice);
-    const low24h = parseFloat(ticker.lowPrice);
-    const totalVolume = parseFloat(ticker.quoteVolume);
-    const priceChange = parseFloat(ticker.priceChange);
-
-    if (!(livePrice > 0) || !Number.isFinite(change24h)) {
-      continue;
-    }
-
-    coins.push({
-      id: asset.id,
-      symbol: asset.symbol.toLowerCase(),
-      name: asset.name,
-      image: asset.image,
-      current_price: livePrice,
-      market_cap: totalVolume * 15,
-      market_cap_rank: i + 1,
-      fully_diluted_valuation: totalVolume * 18,
-      total_volume: totalVolume,
-      high_24h: high24h,
-      low_24h: low24h,
-      price_change_24h: priceChange,
-      price_change_percentage_24h: change24h,
-      circulating_supply: +(totalVolume / livePrice).toFixed(0),
-      total_supply: null,
-      max_supply: null,
-      ath: high24h * 1.5,
-      ath_change_percentage: -25,
-      ath_date: new Date().toISOString(),
-      atl: low24h * 0.5,
-      category: asset.category,
-      consensus: asset.consensus,
-      launch_year: asset.launch_year,
-      description: asset.description,
-      whitepaper_summary: `${asset.name} operates on a decentralized architecture for institutional and retail liquidity.`,
-      use_cases: ['Medium of Exchange', 'Liquidity Layer', 'Staking & Consensus'],
-      key_risks: ['Market Volatility', 'Systemic Beta Drag', 'Regulatory Scrutiny'],
-      tokenomics_summary: `Live supply traded on Binance with $${(totalVolume / 1e6).toFixed(1)}M 24h turnover.`
-    });
+    const fundingRate = fundingRates.get(binancePair) ?? fundingRates.get(asset.symbol) ?? 0.01;
+    const coin = coinFromTicker(asset, ticker, fundingRate, i + 1);
+    if (coin) coins.push(coin);
   }
 
   // Real candle-derived analysis for each coin (cached; a refresh usually costs

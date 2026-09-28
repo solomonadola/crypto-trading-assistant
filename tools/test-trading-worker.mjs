@@ -53,6 +53,7 @@ const FAKE_FIRESTORE = `
   export const query = (c, ...filters) => ({ ...c, filters });
   export const serverTimestamp = () => ({ serverTs: true });
   export const Timestamp = { fromMillis: (ms) => ({ ms }) };
+  export const writeBatch = () => ({ delete() {}, set() {}, update() {}, commit: async () => {} });
   export const getDocsFromServer = async (q) => {
     if (globalThis.__fsQuotaSpent) throw new Error('resource-exhausted: Quota exceeded');
     if (globalThis.__fsHold) await globalThis.__fsHold;
@@ -699,7 +700,9 @@ console.log('\n11. Firebase quota spent: the server trades on from its saved fil
     crypto_automated_trades_full_sync_at: String(NOW - 3600_000),
     crypto_automated_trades_sync_cursor: String(NOW - 3600_000),
     firebase_quota_blocked_until: String(NOW + 2 * 3600_000),
-    crypto_automated_trades_sync_version: '3',
+    // The current SYNC_VERSION, read from the source: a file saved under an
+    // older one belongs to the old database and is rightly not traded on.
+    crypto_automated_trades_sync_version: readFileSync('src/services/automatedFeedService.ts', 'utf8').match(/const SYNC_VERSION = '(\d+)'/)[1],
   };
   const { result, file, stderr } = runChild(saved);
   check('tick ran on the saved list', result?.r?.success === true, result ? (result.r.reason || result.r.error || '') : stderr.slice(-300));
@@ -710,7 +713,7 @@ console.log('\n11. Firebase quota spent: the server trades on from its saved fil
   check('state file holds the close', savedSol?.status === 'STOPPED');
   check('state file holds the queue', Object.keys(JSON.parse(after.crypto_automated_trades_pending_writes || '{}')).includes('sol'));
 
-  // A state file from before the fresh start (no version 3) is not trusted:
+  // A state file from before the fresh start (no version) is not trusted:
   // with Firebase unreadable the server waits rather than trade the old list.
   const { crypto_automated_trades_sync_version: _v, ...oldFile } = saved;
   const old = runChild(oldFile);

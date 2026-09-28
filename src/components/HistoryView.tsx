@@ -36,6 +36,7 @@ import { formatCashUSD } from '../services/orderFlowService';
 interface HistoryViewProps {
   onSwitchToScanner?: () => void;
   onSwitchToBankroll?: () => void;
+  onResetTrades?: () => void;
 }
 
 type OutcomeFilter = 'ALL' | 'WINS' | 'LOSSES' | 'BREAKEVEN';
@@ -154,6 +155,7 @@ export function formatDuration(openMs?: number, closeMs?: number): string {
 export const HistoryView: React.FC<HistoryViewProps> = ({
   onSwitchToScanner,
   onSwitchToBankroll,
+  onResetTrades,
 }) => {
   const [completedTrades, setCompletedTrades] = useState<AutomatedTradeRecord[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
@@ -181,11 +183,11 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
     }
   }, []);
 
-  // Force re-synchronize from Firebase Firestore or trading server
+  // Force re-synchronize from Firebase Firestore or trading server (clearing both browser & server caches)
   const handleForceSync = useCallback(async (directFirestore: boolean = false) => {
     setIsRefreshing(true);
     try {
-      const res = await forceResyncTrades(directFirestore);
+      const res = await forceResyncTrades(directFirestore, true);
       // loadCompletedTrades reads the saved list the resync just refreshed:
       // no second trip to Firestore.
       const closed = await loadCompletedTrades();
@@ -194,7 +196,9 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
         const sourceName = res.source === 'firestore' ? 'Firebase Firestore' : '24/7 Cloud Trading Server';
         setSyncBanner({
           type: 'success',
-          text: `Successfully synced ${res.closedCount} completed trades (${res.count} total records) directly from ${sourceName}!`,
+          text: directFirestore
+            ? `Successfully cleared browser & server trade caches and synced ${res.closedCount} completed trades (${res.count} total records) directly from ${sourceName}!`
+            : `Successfully synced ${res.closedCount} completed trades (${res.count} total records) from ${sourceName}!`,
         });
       } else {
         setSyncBanner({
@@ -215,7 +219,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
     }
   }, []);
 
-  // Hard reset local browser cache (especially for Edge or stale iframes) and pull fresh from Firebase
+  // Hard reset browser and server caches and pull fresh directly from Firebase Firestore
   const handleClearCacheAndSync = useCallback(async () => {
     try {
       const keysToClear = [
@@ -229,6 +233,9 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
       for (const k of keysToClear) {
         try { localStorage.removeItem(k); } catch {}
       }
+      try {
+        await fetch('/api/cache/clear', { method: 'POST' }).catch(() => {});
+      } catch {}
     } catch {}
     await handleForceSync(true);
   }, [handleForceSync]);
@@ -396,10 +403,10 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
               onClick={() => handleForceSync(true)}
               disabled={isRefreshing}
               className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 transition-colors disabled:opacity-50"
-              title="Bypass all browser caches and pull latest records directly from Firebase Firestore"
+              title="Wipes browser and server working trade caches and pulls fresh records directly from Firebase Firestore"
             >
               <Database className="w-3.5 h-3.5 text-amber-400" />
-              <span>Force Firebase Sync</span>
+              <span>Clear Caches &amp; Sync</span>
             </button>
 
             <button
@@ -434,6 +441,18 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
               <Download className="w-3.5 h-3.5" />
               <span className="hidden sm:inline">JSON</span>
             </button>
+
+            {onResetTrades && (
+              <button
+                id="history-reset-all-btn"
+                onClick={onResetTrades}
+                className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 transition-colors"
+                title="Permanently clear all data on Firebase and reset to a clean fresh balance"
+              >
+                <X className="w-3.5 h-3.5 text-rose-400" />
+                <span>Reset All Data</span>
+              </button>
+            )}
           </div>
         </div>
 

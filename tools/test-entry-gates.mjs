@@ -41,7 +41,7 @@ const bankroll = {
   totalSlots: 10, canOpenNewTrade: true, liquidCashUSD: 100, trancheSizeUSD: 10,
   deployedCapitalUSD: 0, totalPortfolioValueUSD: 100, blockReason: undefined,
 };
-const inputs = (signals) => ({ signals, trades: [], bankroll, pacingInfo: { isDeployingAllowed: true }, now: Date.now(), lastDeployAt: 0 });
+const inputs = (signals) => ({ signals, trades: [], bankroll, pacingInfo: { isDeployingAllowed: true, state: 'ACTIVE', btcRegime: { allowNewLongs: true, allowNewShorts: true } }, now: Date.now(), lastDeployAt: 0 });
 
 console.log('\n1. Gates on: measured and passing is allowed, measured and failing is not');
 {

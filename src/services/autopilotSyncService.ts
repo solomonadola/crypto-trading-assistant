@@ -1,4 +1,4 @@
-import { doc, getDoc, setDoc, onSnapshot } from 'firebase/firestore';
+import { doc, setDoc } from 'firebase/firestore';
 import { db, FIRESTORE_WRITES_ENABLED } from '../lib/firebase';
 import { serverApiUrl } from './serverFeed';
 
@@ -64,35 +64,13 @@ function applyAutoPilotState(enabled: boolean, broadcast = true): void {
 /**
  * Subscribes to synchronized auto-pilot state changes across all browser tabs,
  * other browsers, and the backend server.
+ * Uses BroadcastChannel, localStorage, and /api/status polling from the server
+ * with ZERO Firestore reads on the client.
  */
 export function subscribeToAutoPilot(callback: AutoPilotSubscriber): () => void {
   subscribers.add(callback);
   // Immediately call with current known state
   callback(currentAutoPilotState);
-
-  // Initialize Firestore real-time listener once
-  if (!isInitialized && typeof window !== 'undefined') {
-    isInitialized = true;
-    try {
-      const configRef = doc(db, CONFIG_COLLECTION, AUTOPILOT_DOC_ID);
-      onSnapshot(
-        configRef,
-        (snap) => {
-          if (snap.exists()) {
-            const data = snap.data() as AutoPilotConfigDoc;
-            if (typeof data?.enabled === 'boolean') {
-              applyAutoPilotState(data.enabled, true);
-            }
-          }
-        },
-        (err) => {
-          console.warn('[AutoPilotSync] Firestore listener warning:', err?.message || err);
-        }
-      );
-    } catch (err) {
-      console.warn('[AutoPilotSync] Setup Firestore listener failed:', err);
-    }
-  }
 
   return () => {
     subscribers.delete(callback);
@@ -114,9 +92,9 @@ export async function setGlobalAutoPilot(enabled: boolean): Promise<boolean> {
   // 1. Immediately apply locally and broadcast to local tabs
   applyAutoPilotState(enabled, true);
 
-  // 2. Notify the 24/7 server process immediately
+  // 2. Notify the 24/7 server process immediately (the server authoritatively updates memory & Firestore)
   try {
-    fetch(serverApiUrl('/api/autopilot'), {
+    await fetch(serverApiUrl('/api/autopilot'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ enabled }),
@@ -124,20 +102,6 @@ export async function setGlobalAutoPilot(enabled: boolean): Promise<boolean> {
       console.warn('[AutoPilotSync] /api/autopilot notification failed:', err);
     });
   } catch {}
-
-  // 3. Persist to Firestore so all other open browsers/devices update via onSnapshot
-  if (FIRESTORE_WRITES_ENABLED) {
-    try {
-      const configRef = doc(db, CONFIG_COLLECTION, AUTOPILOT_DOC_ID);
-      await setDoc(configRef, {
-        enabled,
-        updatedAt: Date.now(),
-        updatedBy: 'browser',
-      }, { merge: true });
-    } catch (err) {
-      console.warn('[AutoPilotSync] Failed to persist to Firestore:', err);
-    }
-  }
 
   return enabled;
 }

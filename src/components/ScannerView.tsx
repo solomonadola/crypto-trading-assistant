@@ -16,7 +16,8 @@ import {
   CheckCircle2,
   Lock,
   Compass,
-  Bot
+  Bot,
+  Sparkles
 } from 'lucide-react';
 import { EntrySignalResult, ScannerTradingMode, EntryStrategyArchetype, EntrySignalStatus, MAJOR_COINS, MAX_MAJOR_COIN_SLOTS, MEME_COINS, MAX_MEME_COIN_SLOTS, COIN_REENTRY_COOLDOWN_MS } from '../types/entryScanner';
 import { BankrollState, AutomatedTradeRecord } from '../types/automatedFeed';
@@ -29,6 +30,7 @@ import {
   RecentLossCircuitBreaker,
   AutoPilotPacingInfo
 } from '../services/marketRegimeService';
+import { manualDeployBlockReason } from '../services/autopilotEngine';
 import { formatCashUSD, formatOrderFlowUSD } from '../services/orderFlowService';
 
 interface ScannerViewProps {
@@ -40,6 +42,8 @@ interface ScannerViewProps {
   onDeploySignal: (signal: EntrySignalResult) => void;
   isAutoPilot?: boolean;
   onToggleAutoPilot?: () => void;
+  allowShorts?: boolean;
+  onToggleAllowShorts?: () => void;
   btcRegime?: BtcMacroRegime;
   categoryExposure?: Record<string, number>;
   topCandidates?: AutoPilotCandidateRank[];
@@ -58,6 +62,8 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
   onDeploySignal,
   isAutoPilot = false,
   onToggleAutoPilot,
+  allowShorts = true,
+  onToggleAllowShorts,
   btcRegime,
   categoryExposure = {},
   topCandidates = [],
@@ -170,7 +176,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
               Top Crypto Trade Opportunities
             </h2>
             <p className="text-xs sm:text-sm text-stone-400 mt-1 max-w-2xl">
-              Scans Binance coins every 30 seconds using 5 checks (trend, estimated buy pressure, price structure, reward-to-risk). Scores rank signals; they are not guarantees.
+              High-velocity volatility scanner: filters Binance for coins with deep institutional liquidity (&gt;$50M 24h volume), active momentum, and low funding carry fees (&le;0.025%/8h) to trigger rapid scalps designed to resolve in hours, not days.
             </p>
           </div>
 
@@ -185,7 +191,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
                     ? 'bg-emerald-950/60 border-emerald-500/50 text-emerald-300 shadow-[0_0_12px_rgba(16,185,129,0.2)]'
                     : 'bg-stone-950 border-stone-800 text-stone-400 hover:text-stone-200'
                 }`}
-                title={isAutoPilot ? 'Auto-Pilot is ON: Automatically enters top trades with $10' : 'Click to enable Auto-Pilot (hands-free trading)'}
+                title={isAutoPilot ? `Auto-Pilot is ON: Automatically enters top high-conviction trades with $${bankroll.trancheSizeUSD.toFixed(0)}` : 'Click to enable Auto-Pilot (hands-free trading)'}
               >
                 <Bot className={`w-3.5 h-3.5 ${isAutoPilot ? 'text-emerald-400 animate-pulse' : 'text-stone-500'}`} />
                 <span>Auto-Pilot:</span>
@@ -264,6 +270,8 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
         <AutoPilotMonitorHUD
           isAutoPilot={isAutoPilot}
           onToggleAutoPilot={onToggleAutoPilot || (() => {})}
+          allowShorts={allowShorts}
+          onToggleAllowShorts={onToggleAllowShorts}
           bankroll={bankroll}
           btcRegime={btcRegime}
           categoryExposure={derivedCategoryExposure}
@@ -409,6 +417,21 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
                         </span>
                       ) : null}
 
+                      {sig.fundingRatePct !== undefined && (
+                        <span
+                          className={`px-1.5 py-0.5 rounded text-[9px] font-bold border ${
+                            Math.abs(sig.fundingRatePct) <= 0.012
+                              ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
+                              : Math.abs(sig.fundingRatePct) <= 0.022
+                              ? 'bg-stone-800 text-stone-300 border-stone-700'
+                              : 'bg-rose-500/20 text-rose-300 border-rose-500/30'
+                          }`}
+                          title={`Binance 8h Funding Rate: ${sig.fundingRatePct >= 0 ? '+' : ''}${sig.fundingRatePct.toFixed(4)}% | Low carry fee scalping criterion`}
+                        >
+                          FR {sig.fundingRatePct >= 0 ? '+' : ''}{sig.fundingRatePct.toFixed(3)}%
+                        </span>
+                      )}
+
                       {sig.timeframeConfluence && (
                         <span 
                           className={`px-1.5 py-0.5 rounded text-[9px] font-extrabold border ${
@@ -425,6 +448,45 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
                           MTF {sig.timeframeConfluence.confluenceRating}
                         </span>
                       )}
+
+                      {sig.levelGate?.supportTimeframe && (
+                        <span 
+                          className="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-stone-800 text-stone-300 border border-stone-700" 
+                          title={`Anchored to ${sig.levelGate.supportTimeframe} Key Level`}
+                        >
+                          {sig.levelGate.supportTimeframe} Level
+                        </span>
+                      )}
+
+                      {sig.inducement?.status === 'IDM_SWEPT' ? (
+                        <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-purple-500/20 text-purple-300 border border-purple-500/30 flex items-center gap-1" title={sig.inducement.summary}>
+                          <Sparkles className="w-2.5 h-2.5 text-purple-400" />
+                          <span>IDM Swept</span>
+                        </span>
+                      ) : sig.inducement?.status === 'IDM_ACTIVE_TRAP' ? (
+                        <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-rose-500/20 text-rose-300 border border-rose-500/30 flex items-center gap-1" title={sig.inducement.summary}>
+                          <AlertTriangle className="w-2.5 h-2.5 text-rose-400" />
+                          <span>IDM Trap</span>
+                        </span>
+                      ) : sig.inducement?.status === 'DIRECT_STRUCTURAL_TOUCH' ? (
+                        <span className="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-blue-500/20 text-blue-300 border border-blue-500/30" title={sig.inducement.summary}>
+                          Major Level
+                        </span>
+                      ) : null}
+
+                      {sig.levelGate?.pullbackStatus === 'RECLAIMED' ? (
+                        <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30" title="Pullback testing support has completed with a confirmed green reclaim candle">
+                          Reclaimed
+                        </span>
+                      ) : sig.levelGate?.pullbackStatus === 'LATE_JOIN' ? (
+                        <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/30" title="Pullback completed on prior candle; holding support in continuation zone">
+                          Late Join
+                        </span>
+                      ) : sig.levelGate?.pullbackStatus === 'ACTIVE_FALLING' ? (
+                        <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30" title="Price is actively falling in a pullback; waiting for reclaim before triggering">
+                          Pullback
+                        </span>
+                      ) : null}
 
                       {cooldownMins !== undefined && cooldownMins > 0 ? (
                         <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 flex items-center gap-0.5" title="Auto-Pilot is cooling down for 20m post-exit to prevent immediate re-entry churn">
@@ -526,10 +588,15 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
                     </span>
                   </div>
 
-                  <div className="flex items-center justify-between" title="First price where 33% profit is locked into cash and risk becomes zero">
+                  <div className="flex items-center justify-between" title={plan.isSnappedToStructuralLevel ? plan.snappedLevelDescription : "First price where 33% profit is locked into cash and risk becomes zero"}>
                     <span>First Profit Target:</span>
-                    <span className="font-semibold text-emerald-400">
+                    <span className="font-semibold text-emerald-400 flex items-center gap-1">
                       ${plan.tier1Price} (+{plan.tier1Pct}%)
+                      {plan.isSnappedToStructuralLevel && (
+                        <span className="text-[9px] px-1 py-0.2 rounded bg-amber-500/20 text-amber-300 font-bold border border-amber-500/30">
+                          KEY LEVEL
+                        </span>
+                      )}
                     </span>
                   </div>
                 </div>
@@ -559,20 +626,42 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
                   <button
                     disabled
                     className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-stone-800/80 text-stone-500 border border-stone-700/50 cursor-not-allowed"
-                    title="Major coins (BTC, ETH, BNB, SOL) are capped at 3 simultaneous slots to reserve room for dynamic altcoins."
+                    title={`Major coins (BTC, ETH, BNB, SOL) are capped at ${MAX_MAJOR_COIN_SLOTS} simultaneous slots to reserve room for dynamic altcoins.`}
                   >
                     <Lock className="w-3 h-3 text-purple-400/60" />
-                    <span>Majors Capped (3/3)</span>
+                    <span>Majors Capped ({MAX_MAJOR_COIN_SLOTS}/{MAX_MAJOR_COIN_SLOTS})</span>
                   </button>
                 ) : isMemeCapped ? (
                   <button
                     disabled
                     className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-stone-800/80 text-stone-500 border border-stone-700/50 cursor-not-allowed"
-                    title="Meme coins are capped at 2 simultaneous slots to protect against sector flush."
+                    title={`Meme coins are capped at ${MAX_MEME_COIN_SLOTS} simultaneous slots to protect against sector flush.`}
                   >
                     <Lock className="w-3 h-3 text-pink-400/60" />
-                    <span>Memes Capped (2/2)</span>
+                    <span>Memes Capped ({MAX_MEME_COIN_SLOTS}/{MAX_MEME_COIN_SLOTS})</span>
                   </button>
+                ) : (sig.levelGate && sig.levelGate.measured && !sig.levelGate.passed) ? (
+                  sig.levelGate.pullbackStatus === 'ACTIVE_FALLING' ? (
+                    <button
+                      id={`deploy-tranche-${sig.coinId}-btn`}
+                      disabled
+                      title={`Active downward pullback in progress. Waiting for 1H green reclaim candle before entering near ${sig.levelGate.supportTimeframe || '4H'} key support.`}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-amber-950/70 text-amber-400/90 border border-amber-600/40 cursor-not-allowed"
+                    >
+                      <Clock className="w-3 h-3 text-amber-400" />
+                      <span>Wait Reclaim</span>
+                    </button>
+                  ) : (
+                    <button
+                      id={`deploy-tranche-${sig.coinId}-btn`}
+                      disabled
+                      title={`Level Gate: ${sig.levelGate.reason}`}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-stone-800 text-stone-400 border border-stone-700/60 cursor-not-allowed"
+                    >
+                      <Lock className="w-3 h-3 text-amber-400/80" />
+                      <span>Not at Key Level</span>
+                    </button>
+                  )
                 ) : cooldownMins !== undefined && cooldownMins > 0 ? (
                   <button
                     id={`deploy-tranche-${sig.coinId}-btn`}
@@ -625,21 +714,8 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
           onDeploySignal(sig);
           setSelectedSignal(null);
         }}
-        canDeploy={
-          bankroll.canOpenNewTrade &&
-          !(selectedSignal && openTradeSymbols.has(selectedSignal.symbol.toUpperCase())) &&
-          !(selectedSignal && MAJOR_COINS.has(selectedSignal.symbol.toUpperCase()) && openMajorCount >= MAX_MAJOR_COIN_SLOTS) &&
-          !(selectedSignal && MEME_COINS.has(selectedSignal.symbol.toUpperCase()) && openMemeCount >= MAX_MEME_COIN_SLOTS)
-        }
-        deployBlockReason={
-          selectedSignal && openTradeSymbols.has(selectedSignal.symbol.toUpperCase())
-            ? `${selectedSignal.symbol} already occupies an active position. 10 bankroll slots are strictly dedicated to 10 distinct coins.`
-            : selectedSignal && MAJOR_COINS.has(selectedSignal.symbol.toUpperCase()) && openMajorCount >= MAX_MAJOR_COIN_SLOTS
-            ? `Major coins (BTC, ETH, BNB, SOL) are capped at 3 simultaneous slots to reserve room for dynamic altcoins and memes.`
-            : selectedSignal && MEME_COINS.has(selectedSignal.symbol.toUpperCase()) && openMemeCount >= MAX_MEME_COIN_SLOTS
-            ? `Meme coins (${Array.from(MEME_COINS).slice(0, 5).join(', ')}...) are capped at ${MAX_MEME_COIN_SLOTS} slots to prevent sector flush while capturing explosive upside.`
-            : bankroll.blockReason
-        }
+        canDeploy={selectedSignal ? !manualDeployBlockReason(selectedSignal, trades, bankroll) : false}
+        deployBlockReason={selectedSignal ? (manualDeployBlockReason(selectedSignal, trades, bankroll) ?? undefined) : undefined}
         isAlreadyOpen={
           selectedSignal ? openTradeSymbols.has(selectedSignal.symbol.toUpperCase()) : false
         }

@@ -3,16 +3,16 @@ import { netPnlUSD, safeRatio, closeTime, isCounted, BREAKEVEN_BAND_USD } from '
 
 export const DEFAULT_ZOMBIE_CONFIG: ZombieTradeConfig = {
   enabled: true,
-  maxStaleHours: 24,
+  maxStaleHours: 2.5, // 2.5h maximum stale window for true scalping (fast rotation if flat)
   maxStaleMovementPct: 0.8,
   autoRecycleToCash: true,
 };
 
 export const DEFAULT_BANKROLL_CONFIG: BankrollConfig = {
   totalBudgetUSD: 100.00,
-  trancheSizeUSD: 10.00,
+  trancheSizeUSD: 20.00,
   compoundProfits: true,
-  maxSlots: 10,
+  maxSlots: 5,
   zombieTradeRecycle: DEFAULT_ZOMBIE_CONFIG,
 };
 
@@ -28,11 +28,14 @@ export function getBankrollConfig(): BankrollConfig {
     if (stored) {
       const parsed = JSON.parse(stored);
       const zombieRecycle = parsed.zombieTradeRecycle || {};
+      const maxSlots = typeof parsed.maxSlots === 'number' && parsed.maxSlots > 0 ? parsed.maxSlots : 5;
+      const totalBudget = typeof parsed.totalBudgetUSD === 'number' && parsed.totalBudgetUSD > 0 ? parsed.totalBudgetUSD : 100.00;
+      const defaultTranche = +(totalBudget / maxSlots).toFixed(2);
       return {
-        totalBudgetUSD: typeof parsed.totalBudgetUSD === 'number' && parsed.totalBudgetUSD > 0 ? parsed.totalBudgetUSD : 100.00,
-        trancheSizeUSD: typeof parsed.trancheSizeUSD === 'number' && parsed.trancheSizeUSD > 0 ? parsed.trancheSizeUSD : 10.00,
+        totalBudgetUSD: totalBudget,
+        trancheSizeUSD: typeof parsed.trancheSizeUSD === 'number' && parsed.trancheSizeUSD > 0 ? parsed.trancheSizeUSD : defaultTranche,
         compoundProfits: typeof parsed.compoundProfits === 'boolean' ? parsed.compoundProfits : true,
-        maxSlots: typeof parsed.maxSlots === 'number' && parsed.maxSlots > 0 ? parsed.maxSlots : 10,
+        maxSlots,
         zombieTradeRecycle: {
           enabled: typeof zombieRecycle.enabled === 'boolean' ? zombieRecycle.enabled : DEFAULT_ZOMBIE_CONFIG.enabled,
           maxStaleHours: typeof zombieRecycle.maxStaleHours === 'number' ? zombieRecycle.maxStaleHours : DEFAULT_ZOMBIE_CONFIG.maxStaleHours,
@@ -74,12 +77,12 @@ export function isTradeZombieStale(
     (trade.holdingPeriodDays && trade.holdingPeriodDays <= 2) ||
     !trade.holdingPeriodDays // Default to 1-2 day futures micro-tranche pacing
   );
-  const thresholdHours = customConfig?.maxStaleHours 
-    ? customConfig.maxStaleHours 
-    : (isFutures ? 6 : (config.maxStaleHours || 24));
+  const thresholdHours = isFutures 
+    ? Math.min(6, customConfig?.maxStaleHours || 6)
+    : (customConfig?.maxStaleHours || config.maxStaleHours || 24);
   const thresholdMovementPct = customConfig?.maxStaleMovementPct 
     ? customConfig.maxStaleMovementPct 
-    : (config.maxStaleMovementPct || 0.7);
+    : (config.maxStaleMovementPct || 0.8);
 
   if (trade.status !== 'OPEN') {
     return {
@@ -116,18 +119,27 @@ export function isTradeZombieStale(
   }
 
   const currentP = livePriceOverride || trade.currentPrice || trade.entryPrice;
-  const movementPct = trade.entryPrice > 0 ? +(((currentP - trade.entryPrice) / trade.entryPrice) * 100).toFixed(2) : 0;
+  const isShort = trade.direction === 'SHORT';
+  const movementPct = trade.entryPrice > 0
+    ? (isShort ? +(((trade.entryPrice - currentP) / trade.entryPrice) * 100).toFixed(2) : +(((currentP - trade.entryPrice) / trade.entryPrice) * 100).toFixed(2))
+    : 0;
   const absMovementPct = Math.abs(movementPct);
 
   const isTimeExceeded = hoursElapsed >= thresholdHours;
   const isMovementFlat = absMovementPct <= thresholdMovementPct;
-  const isStale = isTimeExceeded && isMovementFlat;
+  // A trade open for >= thresholdHours (e.g. 6h) that is underwater (< -0.8%) with no upward traction has an expired thesis
+  const isNegativeBleed = hoursElapsed >= thresholdHours && movementPct < -0.8;
+  const isStale = isTimeExceeded && (isMovementFlat || isNegativeBleed);
 
   let reason = '';
   if (isStale) {
-    reason = `Open for ${Math.round(hoursElapsed)}h with only ${movementPct >= 0 ? '+' : ''}${movementPct}% movement (within  ${thresholdMovementPct}% stagnant range). Slot eligible for auto-recycling.`;
+    if (isNegativeBleed) {
+      reason = `Open for ${Math.round(hoursElapsed)}h with expired momentum (${movementPct}%). Recycled to prevent stop-out bleed.`;
+    } else {
+      reason = `Open for ${Math.round(hoursElapsed)}h with only ${movementPct >= 0 ? '+' : ''}${movementPct}% movement (within ±${thresholdMovementPct}% stagnant range). Slot eligible for auto-recycling.`;
+    }
   } else if (isTimeExceeded) {
-    reason = `Open for ${Math.round(hoursElapsed)}h, but price has expanded ${movementPct >= 0 ? '+' : ''}${movementPct}% (outside flat range).`;
+    reason = `Open for ${Math.round(hoursElapsed)}h, price has developed ${movementPct >= 0 ? '+' : ''}${movementPct}% (active progression).`;
   } else {
     reason = `Active for ${hoursElapsed.toFixed(1)}h of ${thresholdHours}h stale window.`;
   }
@@ -153,7 +165,7 @@ export function saveBankrollConfig(config: BankrollConfig): void {
   }
 }
 
-export const MAX_CONCURRENT_TRADES = 10;
+export const MAX_CONCURRENT_TRADES = 5;
 
 /**
  * Mathematically evaluates the entire Bankroll Treasury state from raw trade records
@@ -300,7 +312,7 @@ export function calculateBankrollState(
   let blockReason: string | undefined;
   if (!canOpenNewTrade) {
     if (activeTradesCount >= totalSlots) {
-      blockReason = `Maximum 10 concurrent active trades reached (${activeTradesCount}/10 slots filled). Waiting for a position to exit.`;
+      blockReason = `Maximum ${totalSlots} concurrent active trades reached (${activeTradesCount}/${totalSlots} slots filled). Waiting for a position to exit.`;
     } else if (!hasSufficientCash) {
       blockReason = `Remaining balance ($${liquidCashUSD.toFixed(2)}) is below the 7% minimum ($${minRequiredCash.toFixed(2)} = 7% of $${totalPortfolioValueUSD.toFixed(2)}).`;
     } else if (!withinBalanceLimit) {

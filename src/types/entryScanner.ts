@@ -17,7 +17,7 @@ export const MEME_COINS = new Set([
   'TRUMP', 'PENGU', 'MUBARAK', 'PNUT', 'TURBO', 'PEOPLE', 'ACT', 'DOGS', 'NOT', '1000SATS', '1MBABYDOGE', 'BROCCOLI714', 'TST',
 ]);
 export const MAX_MEME_COIN_SLOTS = 2;
-export const COIN_REENTRY_COOLDOWN_MS = 20 * 60 * 1000; // 20 minutes cooldown
+export const COIN_REENTRY_COOLDOWN_MS = 120 * 60 * 1000; // 2 hours cooldown to prevent consecutive stop-out churn
 
 export type ScannerTradingMode = 'FUTURES_1_2D' | 'MACRO_1_2W' | 'SPOT_1_2W';
 
@@ -70,6 +70,8 @@ export interface PillarScores {
   tradeGeometry: number;  // max 20 pts
 }
 
+import { InducementState } from '../services/indicators';
+
 /** Why a real-level gate rejected an entry, and the measurements behind it. */
 export interface LevelGate {
   passed: boolean;
@@ -77,13 +79,18 @@ export interface LevelGate {
   distToSupportAtr?: number | null;
   distToResistanceAtr?: number | null;
   trend?: string;
+  supportTimeframe?: '4H' | '1H';
+  pullbackStatus?: 'RECLAIMED' | 'ACTIVE_FALLING' | 'LATE_JOIN' | 'NO_PULLBACK';
   /** False when no candle analysis was available, so the gates could not run. */
   measured: boolean;
+  inducement?: InducementState;
 }
 
 export interface EntrySignalResult {
   /** Real-level gate: whether price is at a level worth entering (config/entry.ts). */
   levelGate?: LevelGate;
+  /** Smart Money Concept (SMC) Inducement & Liquidity Sweep analysis. */
+  inducement?: InducementState;
   id: string;
   coinId: string;
   symbol: string;
@@ -92,6 +99,10 @@ export interface EntrySignalResult {
   currentPrice: number;
   priceChange24hPct: number;
   volume24hUSD: number;
+  
+  // Binance Futures Funding Rate & Carrying Cost Metrics
+  fundingRatePct?: number; // 8-hour funding rate in percent (e.g. 0.010 = 0.01%)
+  fundingStatus?: 'OPTIMAL_LOW' | 'NORMAL' | 'ELEVATED_FEE' | 'EXTREME_DRAG';
   
   // Trade Direction: LONG or SHORT
   direction: 'LONG' | 'SHORT';
@@ -212,6 +223,9 @@ export interface EntrySignalResult {
     atrMultiplierTier1: number; // e.g. 1.15x ATR
     atrMultiplierTier2: number; // e.g. 2.30x ATR
     volatilityRating: string;
+    isSnappedToStructuralLevel?: boolean;
+    snappedLevelPrice?: number;
+    snappedLevelDescription?: string;
   };
 
   // Checkpoints Breakdown

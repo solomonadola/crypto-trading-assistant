@@ -75,6 +75,8 @@ export interface HarvestTierInfo {
   targetPct: number; // e.g. 4.0
   status: 'HARVESTED' | 'PENDING' | 'TRIGGERED';
   realizedUSD?: number;
+  snappedLevel?: number; // Structural key level (resistance or support) front-run by this tier
+  note?: string; // Descriptive tag (e.g., "Front-running 4H Resistance $120.50")
 }
 
 export interface BreakevenRatchetInfo {
@@ -249,6 +251,9 @@ export interface AutomatedTradeRecord {
   stopLossPrice: number;
   stopLossPct: number;
   trailingStopPrice?: number;
+  structuralResistance?: number;
+  structuralSupport?: number;
+  snappedTakeProfitReason?: string;
 
   // Exact Indicator Triggers at Entry
   entrySignals: {

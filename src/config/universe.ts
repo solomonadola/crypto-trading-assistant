@@ -15,8 +15,12 @@
  */
 export const UNIVERSE_CONFIG = {
   mode: 'volume' as 'volume' | 'fixed',
-  size: 80,
-  refreshHours: 24,
+  size: 60, // Top 60 institutional volume pairs
+  refreshHours: 6, // Refresh every 6h so high-momentum coins entering >$50M volume are promptly caught
+  min24hVolumeUSD: 50_000_000, // Capped at $50M minimum 24h volume: eliminates pump-and-dump illiquidity traps
+  min24hRangePct: 3.5, // At least 3.5% 24h high-low range for rapid scalping momentum
+  maxFundingRatePct: 0.025, // Maximum 0.025% per 8h funding rate (prevents heavy carry fee drag and long squeeze traps)
+  preferredMaxFundingRatePct: 0.015, // Optimal low-fee threshold (0.015% or lower per 8h)
 };
 
 /**

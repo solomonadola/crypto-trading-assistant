@@ -50,12 +50,30 @@ export const ENTRY_CONFIG = {
   minLevelTouches: 2,
 
   /**
-   * Also require the lower timeframe to have closed back up (the reclaim
-   * candle). Stronger per trade (+92.6 bp out of sample against +54.3) but it
-   * keeps only a quarter as many entries, so it is off until the live results
-   * say the trade count can afford it.
+   * Require the lower timeframe to have closed back up (the reclaim candle)
+   * after testing 4H or 1H key support, strictly preventing entries on falling knives.
    */
-  requireReclaim: false,
+  requireReclaim: GATES_ON,
+
+  /**
+   * Block entries if price is currently in an active falling pullback into support
+   * (e.g. red hourly candle or dropping momentum) before a reclaim candle forms.
+   */
+  blockActivePullbacks: GATES_ON,
+
+  /**
+   * Late-Join Buffer: If we came late and the pullback reclaim candle already completed,
+   * allow entry as long as price has not moved more than this distance away from key support
+   * (maintaining healthy Reward-to-Risk).
+   */
+  maxLateJoinDistanceAtr: 0.38,
+
+  /**
+   * Smart Money Concept (SMC) Inducement Sweep Gate:
+   * Rejects premature entries where price bounces off an internal minor swing low/high
+   * before the resting liquidity has been swept.
+   */
+  requireInducementSweep: GATES_ON,
 };
 
 /**

@@ -27,15 +27,17 @@ import {
 } from './services/automatedFeedService';
 import { scanLiveMarketEntries, deploySignalToAutomatedFeed } from './services/entryScannerService';
 import { catchUpOpenTrades } from './services/catchUpService';
-import { selectAutoPilotCandidate, manualDeployBlockReason } from './services/autopilotEngine';
-import { fetchServerStatus, pullServerTrades, resetServerFeed, serverApiUrl, serverAction } from './services/serverFeed';
+import { BacktestLabView } from './components/BacktestLabView';
+import { computePacing, selectAutoPilotCandidate, manualDeployBlockReason } from './services/autopilotEngine';
+import { fetchServerStatus, pullServerTrades, resetServerFeed, serverApiUrl, serverAction, ServerStatus } from './services/serverFeed';
 import { closeTradeAt } from './services/cycleEngineService';
 import { StatusStrip, CatchUpStatus } from './components/StatusStrip';
 import { DataHealthPanel } from './components/DataHealthPanel';
 import { checkDataHealth } from './services/dataHealth';
 import { visibleTrades } from './services/metrics';
 import { calculateBankrollState } from './services/bankrollService';
-import { AUTOPILOT_CONFIG } from './config/autopilot';
+import { AUTOPILOT_CONFIG, setAllowShorts } from './config/autopilot';
+import { STRATEGY_PROFILES, STRATEGY_PROFILE_EVENT, StrategyProfileId, getActiveStrategyProfile, setActiveStrategyProfile } from './config/geometry';
 import {
   evaluateBtcMacroRegime,
   evaluateMarketActivityRadar,
@@ -115,29 +117,38 @@ export default function App() {
     }
   });
 
+  const [allowShorts, setAllowShortsState] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('cryptostudy_autopilot_shorts') === 'true';
+    } catch {
+      return false;
+    }
+  });
+
   // Is a 24/7 server worker trading right now? Only a worker that has
   // completed a tick in the last two minutes counts. A server that answers but
   // is not ticking (Cloud Run throttles CPU between requests, a crashed loop,
   // no Firestore) must not silence the browser, or nothing trades at all.
-  const [serverState, setServerState] = useState<{ active: boolean; lastTickAt?: number | null; warning?: string | null; firestoreStatus?: string | null; isAutoPilot?: boolean }>({ active: false });
-  const serverActiveRef = useRef(false);
-  serverActiveRef.current = serverState.active;
+  const [serverState, setServerState] = useState<ServerStatus>({ active: true, serverOnline: true, lastTickAt: null, instanceId: null, buildId: null, warning: null });
+  const serverActiveRef = useRef(true);
+  serverActiveRef.current = serverState.active || serverState.serverOnline;
 
   useEffect(() => {
     let mounted = true;
     const checkServer = async () => {
       const next = await fetchServerStatus();
       if (!mounted) return;
-      // While the server trades, its list is what every copy shows (and no
+      // While the server trades or is online, its list is what every copy shows (and no
       // Firestore reads are made here); if it stops, back to Firestore.
-      if (next.active !== serverActiveRef.current) {
-        serverActiveRef.current = next.active;
-        setServerFeedActive(next.active);
-        if (next.active) {
+      const isFeedSource = next.active || next.serverOnline;
+      if (isFeedSource !== serverActiveRef.current) {
+        serverActiveRef.current = isFeedSource;
+        setServerFeedActive(isFeedSource);
+        if (isFeedSource) {
           resetServerFeed();
         }
       }
-      if (next.active) {
+      if (isFeedSource) {
         await pullServerTrades().catch(() => {});
       }
       // Sync auto-pilot toggle state from server across all devices in real time
@@ -151,6 +162,23 @@ export default function App() {
           }
           return curr;
         });
+      }
+      if (typeof next.allowShorts === 'boolean') {
+        setAllowShortsState((curr) => {
+          if (curr !== next.allowShorts) {
+            try {
+              localStorage.setItem('cryptostudy_autopilot_shorts', String(next.allowShorts));
+            } catch {}
+            setAllowShorts(next.allowShorts!);
+            return next.allowShorts!;
+          }
+          return curr;
+        });
+      }
+      if (next.strategyProfile && next.strategyProfile in STRATEGY_PROFILES &&
+          next.strategyProfile !== getActiveStrategyProfile().id) {
+        setActiveStrategyProfile(next.strategyProfile as StrategyProfileId);
+        window.dispatchEvent(new Event(STRATEGY_PROFILE_EVENT));
       }
       setServerState(next);
     };
@@ -225,6 +253,30 @@ export default function App() {
     });
   }, [serverState.active, showNotification]);
 
+  const handleToggleAllowShorts = useCallback(() => {
+    setAllowShortsState((prev) => {
+      const nextVal = !prev;
+      try {
+        localStorage.setItem('cryptostudy_autopilot_shorts', String(nextVal));
+      } catch (e) {
+        console.warn('Failed to save allowShorts setting:', e);
+      }
+      setAllowShorts(nextVal);
+      fetch(serverApiUrl('/api/autopilot/shorts'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ allowShorts: nextVal }),
+      }).catch(() => {});
+      showNotification(
+        nextVal
+          ? '📉 Shorting Enabled: Auto-pilot will take both Long & Short opportunities'
+          : '📈 Long-Only Mode: Auto-pilot will only take Long trades',
+        'info'
+      );
+      return nextVal;
+    });
+  }, [showNotification]);
+
   // Subscribe to trade feed (Firestore or LocalStorage)
   useEffect(() => {
     const unsubscribe = subscribeToAutomatedTrades((loadedTrades) => {
@@ -264,14 +316,12 @@ export default function App() {
   const btcRegime = useMemo(() => evaluateBtcMacroRegime(coins), [coins]);
   const activityRadar = useMemo(() => evaluateMarketActivityRadar(coins), [coins]);
   const lossCircuitBreaker = useMemo(() => evaluateRecentLossCircuitBreaker(trades), [trades]);
-  const pacingInfo = useMemo(() => getAutoPilotPacingInfo(
-    isAutoPilot,
-    trades.filter((t) => t.status === 'OPEN').length,
-    bankroll.totalSlots,
-    btcRegime,
-    lossCircuitBreaker,
-    activityRadar,
-  ), [isAutoPilot, trades, bankroll.totalSlots, btcRegime, lossCircuitBreaker, activityRadar]);
+  // The shared computation, so the monthly loss cap applies here as it does on
+  // the server, measured on this account's equity.
+  const pacingInfo = useMemo(
+    () => computePacing(coins, trades, isAutoPilot, bankroll.totalSlots, bankroll.totalPortfolioValueUSD),
+    [coins, trades, isAutoPilot, bankroll.totalSlots, bankroll.totalPortfolioValueUSD]
+  );
 
   const tradesRef = useRef(trades);
   tradesRef.current = trades;
@@ -527,102 +577,73 @@ export default function App() {
   }, [isAutoPilot, serverState.active, autoPilotScanTick, bankroll.canOpenNewTrade, bankroll.activeTradesCount, bankroll.liquidCashUSD, bankroll.trancheSizeUSD, bankroll.deployedCapitalUSD, bankroll.totalPortfolioValueUSD, signals, trades, pacingInfo, showNotification]);
 
 
-  // Exclude a trade from statistics (or include it again). The record is kept;
-  // it just stops counting toward P&L, win rate and the other figures.
+  // Exclude a trade from statistics (or include it again).
   const handleSetExcluded = async (trade: AutomatedTradeRecord, excluded: boolean) => {
-    if (serverActiveRef.current) {
-      const r = await serverAction(`/api/trades/${encodeURIComponent(trade.id)}/exclude`, { excluded });
-      if (r.ok) {
-        showNotification(excluded ? `${trade.symbol} trade excluded from statistics.` : `${trade.symbol} trade counted in statistics again.`, 'info');
-        return;
+    const r = await serverAction(`/api/trades/${encodeURIComponent(trade.id)}/exclude`, { excluded });
+    if (r.ok) {
+      if (r.result) {
+        setAllTrades((prev) => prev.map((t) => (t.id === trade.id ? r.result : t)));
       }
-      if (!r.unreachable) {
-        // The server answered and refused, or may have carried it out: doing
-        // it here as well could overwrite its version of the trade.
-        showNotification(r.error || 'The server refused the change.', 'warn');
-        return;
-      }
+      showNotification(excluded ? `${trade.symbol} trade excluded from statistics.` : `${trade.symbol} trade counted in statistics again.`, 'info');
+      return;
     }
-    try {
-      const updated: AutomatedTradeRecord = {
-        ...trade,
-        excludedFromStats: excluded,
-        // Firestore rejects undefined field values, so clear with '' rather than undefined.
-        excludedReason: excluded ? 'Excluded from statistics in the Data Health panel' : '',
-      };
-      await updateTradeRecord(updated, true);
-      setAllTrades((prev) => prev.map((t) => (t.id === trade.id ? updated : t)));
-      showNotification(
-        excluded ? `${trade.symbol} trade excluded from statistics.` : `${trade.symbol} trade counted in statistics again.`,
-        'info'
-      );
-    } catch (e: any) {
-      showNotification('Failed to update trade: ' + (e?.message || String(e)), 'warn');
-    }
+    showNotification(r.error || (r.unreachable ? 'Trading server is reconnecting. Please retry in a few moments.' : 'The server refused the change.'), 'warn');
   };
 
   // Close trade manually
   const handleCloseTrade = async (trade: AutomatedTradeRecord, reason: string) => {
-    if (serverActiveRef.current) {
-      const r = await serverAction(`/api/trades/${encodeURIComponent(trade.id)}/close`, { reason: 'manual' });
-      if (r.ok) {
-        showNotification(`Closed position for ${trade.symbol}. Slot freed and cash returned to bankroll.`, 'info');
-        return;
+    const r = await serverAction(`/api/trades/${encodeURIComponent(trade.id)}/close`, { reason: 'manual' });
+    if (r.ok) {
+      if (r.result) {
+        setAllTrades((prev) => prev.map((t) => (t.id === trade.id ? r.result : t)));
       }
-      if (!r.unreachable) {
-        // The server answered and refused, or may have carried it out: doing
-        // it here as well could overwrite its version of the trade.
-        showNotification(r.error || 'The server refused the close.', 'warn');
-        return;
-      }
-    }
-    // Direct close fallback (persists to Firestore and local state immediately)
-    try {
-      const updated = closeTradeAt(trade, trade.currentPrice || trade.entryPrice, 'CLOSED_MANUAL');
-      await updateTradeRecord(updated, true);
-      setAllTrades((prev) => prev.map((t) => (t.id === trade.id ? updated : t)));
       showNotification(`Closed position for ${trade.symbol}. Slot freed and cash returned to bankroll.`, 'info');
-    } catch (e: any) {
-      showNotification('Failed to close position: ' + (e?.message || String(e)), 'warn');
+      return;
     }
+    showNotification(r.error || (r.unreachable ? 'Trading server is reconnecting. Please retry in a few moments.' : 'The server refused the close.'), 'warn');
   };
 
   // Recycle zombie trade
   const handleRecycleZombieTrade = async (trade: AutomatedTradeRecord) => {
-    if (serverActiveRef.current) {
-      const r = await serverAction(`/api/trades/${encodeURIComponent(trade.id)}/close`, { reason: 'time_decay' });
-      if (r.ok) {
-        showNotification(`Recycled stagnant trade ${trade.symbol} to liquid treasury cash!`, 'success');
-        return;
+    const r = await serverAction(`/api/trades/${encodeURIComponent(trade.id)}/close`, { reason: 'time_decay' });
+    if (r.ok) {
+      if (r.result) {
+        setAllTrades((prev) => prev.map((t) => (t.id === trade.id ? r.result : t)));
       }
-      if (!r.unreachable) {
-        // The server answered and refused, or may have carried it out: doing
-        // it here as well could overwrite its version of the trade.
-        showNotification(r.error || 'The server refused the close.', 'warn');
-        return;
-      }
-    }
-    try {
-      const updated = closeTradeAt(trade, trade.currentPrice || trade.entryPrice, 'CLOSED_TIME_DECAY');
-      await updateTradeRecord(updated, true);
-      setAllTrades((prev) => prev.map((t) => (t.id === trade.id ? updated : t)));
       showNotification(`Recycled stagnant trade ${trade.symbol} to liquid treasury cash!`, 'success');
-    } catch (e: any) {
-      showNotification('Failed to recycle trade: ' + (e?.message || String(e)), 'warn');
-    }
-  };
-
-  // Reset trades
-  const handleResetTrades = async () => {
-    if (serverActiveRef.current) {
-      // The server would write its own copy straight back, leaving a half-wiped
-      // history. Stop the server first if a reset is really wanted.
-      showNotification('Reset is not available while the 24/7 server holds the trade history.', 'warn');
       return;
     }
-    if (window.confirm('Reset all trades back to the default quantitative demonstration dataset?')) {
+    showNotification(r.error || (r.unreachable ? 'Trading server is reconnecting. Please retry in a few moments.' : 'The server refused the recycle.'), 'warn');
+  };
+
+  // Reset trades: wipes Firebase and server memory to start completely fresh
+  const handleResetTrades = async () => {
+    if (!window.confirm('Reset all trades and start completely fresh? This will permanently delete all trade records from Firebase and reset your balance to $100.')) {
+      return;
+    }
+    showNotification('Clearing all Firebase data and resetting engine...', 'info');
+    try {
+      const r = await serverAction('/api/reset', {});
+      if (r.ok) {
+        setAllTrades([]);
+        try {
+          localStorage.removeItem('crypto_automated_trades_local_fallback');
+          localStorage.removeItem('crypto_automated_trades_pending_writes');
+          localStorage.removeItem('crypto_automated_trades_sync_cursor');
+          localStorage.removeItem('crypto_automated_trades_full_sync_at');
+        } catch {}
+        showNotification('All data cleared from Firebase! Fresh $100 bankroll started.', 'success');
+        return;
+      }
+      // If serverAction returned non-ok, fall back to direct client-side Firestore wipe
       await resetTradesToDefault();
-      showNotification('Trades reset to default demonstration dataset.', 'info');
+      setAllTrades([]);
+      showNotification('Trades and Firebase data reset to clean fresh state.', 'success');
+    } catch (err: any) {
+      console.warn('Reset error, falling back to direct wipe:', err);
+      await resetTradesToDefault();
+      setAllTrades([]);
+      showNotification('Reset completed directly against Firebase.', 'success');
     }
   };
 
@@ -687,6 +708,8 @@ export default function App() {
             onDeploySignal={handleDeploySignal}
             isAutoPilot={isAutoPilot}
             onToggleAutoPilot={handleToggleAutoPilot}
+            allowShorts={allowShorts}
+            onToggleAllowShorts={handleToggleAllowShorts}
             btcRegime={btcRegime}
             activityRadar={activityRadar}
             lossCircuitBreaker={lossCircuitBreaker}
@@ -708,6 +731,7 @@ export default function App() {
           <HistoryView
             onSwitchToScanner={() => setActiveTab('scanner')}
             onSwitchToBankroll={() => setActiveTab('bankroll')}
+            onResetTrades={handleResetTrades}
           />
         )}
 
@@ -722,6 +746,10 @@ export default function App() {
             onRecycleZombieTrade={handleRecycleZombieTrade}
             onResetTrades={handleResetTrades}
           />
+        )}
+
+        {activeTab === 'backtest' && (
+          <BacktestLabView />
         )}
 
         {activeTab === 'orderflow' && (

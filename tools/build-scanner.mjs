@@ -10,10 +10,7 @@
 //
 // Re-run after any change to entryScannerService.ts.
 import { readFileSync, writeFileSync, unlinkSync } from 'node:fs';
-import { createRequire } from 'node:module';
-
-const require = createRequire(import.meta.url);
-const esbuild = require('./_gen/vendor/node_modules/esbuild');
+import esbuild from 'esbuild';
 
 const SRC = 'src/services/entryScannerService.ts';
 const TMP = 'src/services/.replay-tmp.ts';
@@ -36,12 +33,13 @@ for (const [pattern, replacement] of rewrites) {
   src = src.replace(pattern, replacement);
 }
 
-// Guard: only the two import lines may differ. If anything else changed,
-// the bundle would no longer be a faithful copy - refuse rather than mislead.
+src = src + "\nexport { analyzeFromCandles } from './marketAnalysisService';\n";
+
+// Guard: only the rewritten imports and the added export line should change.
 const a = original.split('\n'), b = src.split('\n');
 const changed = a.map((l, i) => [i + 1, l !== b[i]]).filter(([, d]) => d).map(([n]) => n);
-if (changed.length !== 2) {
-  throw new Error(`Expected exactly 2 changed lines, got ${changed.length}: ${changed}. Refusing to generate.`);
+if (changed.length !== 2 && changed.length !== 3) {
+  throw new Error(`Expected 2 or 3 changed lines, got ${changed.length}: ${changed}. Refusing to generate.`);
 }
 
 writeFileSync(TMP, src);

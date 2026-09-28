@@ -54,7 +54,7 @@ export const StrategyMetricsScorecard: React.FC<StrategyMetricsScorecardProps> =
           <div className="flex items-center gap-2">
             <span className="text-[11px] text-stone-400 font-medium">Slot Structure:</span>
             <span className="px-2 py-0.5 rounded text-xs font-bold bg-stone-800 text-amber-400 border border-stone-700">
-              10 × $10.00 Micro-Slots (100 USDT Treasury)
+              {bankroll.totalSlots} × ${bankroll.trancheSizeUSD.toFixed(2)} High-Conviction Slots (${bankroll.initialBudgetUSD.toFixed(0)} USDT Base)
             </span>
           </div>
         </div>
