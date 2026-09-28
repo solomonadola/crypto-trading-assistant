@@ -6,7 +6,7 @@ import {
   AreaSeries, CandlestickSeries, ColorType, CrosshairMode, LineSeries, LineStyle, createChart, createSeriesMarkers,
   type IChartApi, type ISeriesApi, type SeriesMarker, type Time, type UTCTimestamp,
 } from 'lightweight-charts';
-import type { Candle, ClosedTradeView, EquityPoint, PositionViewLike, Zone } from './chartTypes';
+import type { Candle, ClosedTradeView, EquityPoint, PositionViewLike, TradeIdea, Zone } from './chartTypes';
 import { price as fmtPrice, usd, dateTime } from '../lib/format';
 
 const css = (name: string) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -76,7 +76,7 @@ function ema(values: number[], n: number): (number | null)[] {
   });
 }
 
-export function CandleChart({ candles, zones, trades, positions, tfMs }: { candles: Candle[]; zones: Zone[]; trades: ClosedTradeView[]; positions: PositionViewLike[]; tfMs: number }) {
+export function CandleChart({ candles, zones, trades, positions, tfMs, idea }: { candles: Candle[]; zones: Zone[]; trades: ClosedTradeView[]; positions: PositionViewLike[]; tfMs: number; idea?: TradeIdea | null }) {
   const el = useRef<HTMLDivElement>(null);
   const [hover, setHover] = useState<Candle | null>(null);
   const byTime = useRef(new Map<number, Candle>());
@@ -112,6 +112,29 @@ export function CandleChart({ candles, zones, trades, positions, tfMs }: { candl
       s.createPriceLine({ price: p.stop, color: bad, lineWidth: 1, lineStyle: LineStyle.Dashed, title: 'stop' });
       if (p.target !== null) s.createPriceLine({ price: p.target, color: good, lineWidth: 1, lineStyle: LineStyle.Dashed, title: 'target' });
     }
+    // Suggested plan and the strongest key levels near the price.
+    if (idea) {
+      const plan = idea.plan;
+      if (plan && plan.entryLow !== null && plan.entryHigh !== null && plan.stop !== null) {
+        const accent = css('--color-accent');
+        s.createPriceLine({ price: plan.entryHigh, color: accent, lineWidth: 2, lineStyle: LineStyle.Solid, title: `plan ${plan.direction} entry` });
+        s.createPriceLine({ price: plan.entryLow, color: accent, lineWidth: 2, lineStyle: LineStyle.Solid, title: '' , axisLabelVisible: false });
+        s.createPriceLine({ price: plan.stop, color: bad, lineWidth: 2, lineStyle: LineStyle.Dotted, title: 'plan stop' });
+        for (const t of plan.targets) s.createPriceLine({ price: t.price, color: good, lineWidth: 2, lineStyle: LineStyle.Dotted, title: `${t.label} ${t.r.toFixed(1)}R` });
+      }
+      const planned = new Set([plan?.entryHigh, plan?.entryLow, plan?.stop, ...(plan?.targets ?? []).map((t) => t.price)]);
+      const near = idea.levels
+        .filter((l) => Math.abs(l.distancePct) <= 8 && l.strength >= 2 && !planned.has(l.price))
+        .sort((a, b) => b.strength - a.strength)
+        .slice(0, 6);
+      for (const l of near) {
+        s.createPriceLine({
+          price: l.price, color: l.kind === 'support' ? css('--color-demand') : css('--color-supply'), lineWidth: 1, lineStyle: LineStyle.SparseDotted,
+          axisLabelVisible: true, title: `${l.kind} ${l.strength}`,
+        });
+      }
+    }
+
     // Trades: arrows at entry and exit.
     const first = candles[0]?.openTime ?? 0;
     const markers: SeriesMarker<Time>[] = trades
@@ -126,7 +149,7 @@ export function CandleChart({ candles, zones, trades, positions, tfMs }: { candl
     c.subscribeCrosshairMove((p) => setHover(p.time ? byTime.current.get(p.time as number) ?? null : null));
     c.timeScale().fitContent();
     return () => c.remove();
-  }, [candles, zones, trades, positions, tfMs]);
+  }, [candles, zones, trades, positions, tfMs, idea]);
 
   const k = hover ?? candles[candles.length - 1];
   return (

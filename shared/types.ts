@@ -165,6 +165,54 @@ export interface ClosedTradeView {
   session: string | null;
 }
 
+/** A price level where several sources agree. */
+export interface KeyLevel {
+  price: number;
+  kind: 'support' | 'resistance';
+  /** What the level is made of: zones, swing points, VWAP, EMAs, fib, ... */
+  sources: string[];
+  /** Sum of source weights: zones and 4h levels count more. */
+  strength: number;
+  /** Distance from the current price, percent (negative below). */
+  distancePct: number;
+}
+
+export interface TradeIdeaTarget {
+  label: string;
+  price: number;
+  sources: string[];
+  /** Reward in multiples of the risk, after fees and slippage. */
+  r: number;
+}
+
+/** Advisory: key levels and a suggested plan for one coin. Separate from the engine's own entries. */
+export interface TradeIdea {
+  symbol: string;
+  asOf: number;
+  price: number;
+  atr1h: number;
+  bias: Direction | 'none';
+  biasReason: string;
+  trend: Record<'4h' | '1h' | '15m', string | null>;
+  longState: string;
+  shortState: string;
+  levels: KeyLevel[];
+  plan: null | {
+    direction: Direction;
+    /** armed: the engine waits for confirmation; in_zone: price is in the entry area; wait: not there yet; no_level: nothing to enter from. */
+    status: 'armed' | 'in_zone' | 'wait' | 'no_level';
+    entryLow: number | null;
+    entryHigh: number | null;
+    entry: number | null;
+    stop: number | null;
+    riskPct: number | null;
+    targets: TradeIdeaTarget[];
+    /** Whether the plan fits the engine's stop and reward/risk limits. */
+    meetsRules: boolean;
+    note: string;
+  };
+}
+
 export type FeedState = 'starting' | 'backfilling' | 'live' | 'stalled' | 'stopped';
 
 export interface FeedStatus {

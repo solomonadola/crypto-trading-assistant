@@ -1,7 +1,7 @@
 // Dashboard shell: navigation, live status, controls, and the pages.
 import { useEffect, useState } from 'react';
 import type { User } from 'firebase/auth';
-import { CandlestickChart, Crosshair, FlaskConical, History, LayoutDashboard, LogIn, LogOut, Pause, Play, Power, Radio, RotateCcw, Zap } from 'lucide-react';
+import { CandlestickChart, Compass, Crosshair, FlaskConical, History, LayoutDashboard, LogIn, LogOut, Pause, Play, Power, Radio, RotateCcw, Zap } from 'lucide-react';
 import { get, post, usePoll, type Status } from './lib/api';
 import { signIn, signOutUser, watchUser } from './lib/auth';
 import { hhmm, words } from './lib/format';
@@ -12,9 +12,11 @@ import { ChartPage } from './pages/ChartPage';
 import { Signals } from './pages/Signals';
 import { Trades } from './pages/Trades';
 import { FilterLab } from './pages/FilterLab';
+import { Ideas } from './pages/Ideas';
 
 const PAGES = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
+  { id: 'ideas', label: 'Ideas', icon: Compass },
   { id: 'market', label: 'Market', icon: Crosshair },
   { id: 'chart', label: 'Chart', icon: CandlestickChart },
   { id: 'signals', label: 'Signals', icon: Radio },
@@ -150,6 +152,7 @@ function Dashboard({ user }: { user: User | null }) {
 
         <main className="flex-1 px-4 py-5 md:px-6">
           {route.page === 'overview' && <Overview go={go} />}
+          {route.page === 'ideas' && <Ideas go={go} />}
           {route.page === 'market' && <Market go={go} />}
           {route.page === 'chart' && <ChartPage symbol={route.symbol} setSymbol={(s) => go('chart', s)} />}
           {route.page === 'signals' && <Signals go={go} />}

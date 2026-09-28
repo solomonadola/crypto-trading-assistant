@@ -1,4 +1,4 @@
-export type { Candle, ClosedTradeView } from '../../shared/types';
+export type { Candle, ClosedTradeView, TradeIdea } from '../../shared/types';
 export type { EquityPoint, Zone } from '../lib/api';
 
 export interface PositionViewLike {

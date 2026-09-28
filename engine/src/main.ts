@@ -355,6 +355,20 @@ app.get('/api/market', (_req, res) => {
     };
   }));
 });
+app.get('/api/ideas/:symbol', (req, res) => {
+  const idea = engine.tradeIdea(req.params.symbol.toUpperCase());
+  if (!idea) {
+    res.status(404).json({ error: `Not enough history for ${req.params.symbol} yet` });
+    return;
+  }
+  res.json(idea);
+});
+app.get('/api/ideas', (_req, res) => {
+  const ideas = universe.map((s) => engine.tradeIdea(s)).filter((x): x is NonNullable<typeof x> => x !== null);
+  const rank = { armed: 0, in_zone: 1, wait: 2, no_level: 3 } as const;
+  ideas.sort((a, b) => (a.plan ? rank[a.plan.status] : 4) - (b.plan ? rank[b.plan.status] : 4));
+  res.json(ideas);
+});
 app.get('/api/scanner', (_req, res) => {
   res.json({ universe, lastScan });
 });

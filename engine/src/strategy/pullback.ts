@@ -85,7 +85,7 @@ export function tryArm(ctx: Context, dir: Direction): Armed | null {
 }
 
 /** The last completed impulse leg: for a long, the last 1h swing high and the swing low before it. */
-function impulseLeg(pivots: Pivot[], dir: Direction): { from: Pivot; to: Pivot } | null {
+export function impulseLeg(pivots: Pivot[], dir: Direction): { from: Pivot; to: Pivot } | null {
   const toType = dir === 'long' ? 'high' : 'low';
   const to = [...pivots].reverse().find((x) => x.type === toType);
   if (!to) return null;
@@ -94,7 +94,7 @@ function impulseLeg(pivots: Pivot[], dir: Direction): { from: Pivot; to: Pivot }
 }
 
 /** Earlier 1h swing highs (long) that price has since closed above: old resistance that may now be support. */
-function flippedLevels(ctx: Context, dir: Direction): number[] {
+export function flippedLevels(ctx: Context, dir: Direction): number[] {
   const type = dir === 'long' ? 'high' : 'low';
   const s = sign(dir);
   const swings = ctx.pivots1h.filter((x) => x.type === type);

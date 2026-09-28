@@ -4,6 +4,8 @@ import { usePoll, type AccountSummary, type Analysis, type Candle, type ClosedTr
 import { coin, price } from '../lib/format';
 import { Badge, Card, StateBadge, TrendChip } from '../components/ui';
 import { CandleChart } from '../components/charts';
+import { TradePlanCard } from '../components/TradePlan';
+import type { TradeIdea } from '../../shared/types';
 
 const TFS = [['15m', 900_000], ['1h', 3_600_000], ['4h', 14_400_000], ['1m', 60_000]] as const;
 
@@ -14,6 +16,8 @@ export function ChartPage({ symbol, setSymbol }: { symbol: string; setSymbol: (s
   const { data: analysis } = usePoll<Analysis>(`/api/analysis/${symbol}`, 30_000);
   const { data: trades } = usePoll<ClosedTradeView[]>('/api/trades?limit=2000', 60_000);
   const { data: acct } = usePoll<AccountSummary>('/api/account', 10_000);
+  const { data: idea } = usePoll<TradeIdea>(`/api/ideas/${symbol}`, 30_000);
+  const [showPlan, setShowPlan] = useState(true);
 
   const symbols = useMemo(() => [...new Set([symbol, 'BTCUSDT', ...(market ?? []).map((r) => r.symbol)])], [market, symbol]);
   const mine = useMemo(() => (trades ?? []).filter((t) => t.symbol === symbol), [trades, symbol]);
@@ -28,6 +32,10 @@ export function ChartPage({ symbol, setSymbol }: { symbol: string; setSymbol: (s
         icon={<CandlestickChart size={16} />}
         right={
           <div className="flex items-center gap-2">
+            <label className="flex items-center gap-1.5 text-xs text-ink-2">
+              <input type="checkbox" checked={showPlan} onChange={(e) => setShowPlan(e.target.checked)} className="accent-[var(--color-accent)]" />
+              plan &amp; levels
+            </label>
             <select value={symbol} onChange={(e) => setSymbol(e.target.value)} className="rounded-lg border border-line bg-card-2 px-2 py-1 text-xs">
               {symbols.map((s) => <option key={s} value={s}>{coin(s)}</option>)}
             </select>
@@ -40,7 +48,7 @@ export function ChartPage({ symbol, setSymbol }: { symbol: string; setSymbol: (s
         }
       >
         {candles?.length ? (
-          <CandleChart candles={candles} zones={tf === '1m' ? [] : zones} trades={mine} positions={open} tfMs={tfMs} />
+          <CandleChart candles={candles} zones={tf === '1m' ? [] : zones} trades={mine} positions={open} tfMs={tfMs} idea={showPlan ? idea : null} />
         ) : <div className="grid h-[520px] place-items-center text-sm text-ink-3">Loading candles…</div>}
         <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-ink-3">
           <span className="flex items-center gap-1"><span className="h-0.5 w-4 bg-accent" />EMA20</span>
@@ -48,8 +56,11 @@ export function ChartPage({ symbol, setSymbol }: { symbol: string; setSymbol: (s
           <span className="flex items-center gap-1"><span className="h-0.5 w-4 bg-demand" />demand zone</span>
           <span className="flex items-center gap-1"><span className="h-0.5 w-4 bg-supply" />supply zone</span>
           <span>solid = fresh, dashed = tested</span>
+          {showPlan && <><span className="flex items-center gap-1"><span className="h-0.5 w-4 bg-accent" />plan entry</span><span className="flex items-center gap-1"><span className="h-0.5 w-4 bg-critical" />plan stop</span><span className="flex items-center gap-1"><span className="h-0.5 w-4 bg-good" />targets</span><span>dotted = key level (strength)</span></>}
         </div>
       </Card>
+
+      {idea && <TradePlanCard idea={idea} />}
 
       {analysis && (
         <div className="grid gap-5 lg:grid-cols-3">

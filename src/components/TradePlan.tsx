@@ -1,0 +1,99 @@
+// The suggested plan and key levels for one coin. Advisory: it is not what the
+// engine trades on (that needs the full pullback setup, filters and risk rules).
+import { AlertTriangle, CheckCircle2, Compass } from 'lucide-react';
+import type { TradeIdea } from '../../shared/types';
+import { price as fmt, pct } from '../lib/format';
+import { Badge, Card, SideBadge, TrendChip } from './ui';
+
+const STATUS: Record<string, { tone: string; label: string }> = {
+  armed: { tone: 'london', label: 'armed by the engine' },
+  in_zone: { tone: 'good', label: 'price in entry area' },
+  wait: { tone: 'muted', label: 'waiting for price' },
+  no_level: { tone: 'warning', label: 'no entry level' },
+};
+
+export function PlanStatus({ idea }: { idea: TradeIdea }) {
+  if (!idea.plan) return <Badge>no trend · wait</Badge>;
+  const s = STATUS[idea.plan.status];
+  return <Badge tone={s.tone}>{s.label}</Badge>;
+}
+
+export function TradePlanCard({ idea, compact = false }: { idea: TradeIdea; compact?: boolean }) {
+  const plan = idea.plan;
+  return (
+    <Card
+      title={compact ? undefined : 'Trade plan'}
+      icon={compact ? undefined : <Compass size={16} />}
+      right={compact ? undefined : <PlanStatus idea={idea} />}
+      className="h-full"
+    >
+      <div className="space-y-3 text-sm">
+        <div className="flex flex-wrap items-center gap-2">
+          {idea.bias === 'none' ? <Badge>no bias</Badge> : <SideBadge side={idea.bias} />}
+          {(['4h', '1h', '15m'] as const).map((tf) => <TrendChip key={tf} tf={tf} trend={idea.trend[tf]} />)}
+          {compact && <PlanStatus idea={idea} />}
+        </div>
+        <p className="text-ink-2">{idea.biasReason}.</p>
+
+        {plan && plan.entry !== null && plan.stop !== null && plan.entryLow !== null && plan.entryHigh !== null ? (
+          <>
+            <div className="grid grid-cols-3 gap-2 tabular">
+              <Level label="Entry area" value={`${fmt(plan.entryLow)} – ${fmt(plan.entryHigh)}`} sub={`mid ${fmt(plan.entry)}`} tone="accent" />
+              <Level label="Stop" value={fmt(plan.stop)} sub={`${pct(plan.riskPct, 2)} risk`} tone="critical" />
+              <Level label="Now" value={fmt(idea.price)} sub={`1h ATR ${fmt(idea.atr1h)}`} />
+            </div>
+            <div className="space-y-1">
+              {plan.targets.map((t) => (
+                <div key={t.label} className="flex items-center justify-between gap-2 rounded-lg bg-card-2 px-3 py-1.5" title={t.sources.join(', ')}>
+                  <span className="font-semibold text-good">{t.label}</span>
+                  <span className="tabular">{fmt(t.price)}</span>
+                  <span className="truncate text-xs text-ink-3">{t.sources.slice(0, 2).join(' · ')}</span>
+                  <span className={`tabular font-semibold ${t.r >= 2 ? 'text-good' : t.r >= 1 ? 'text-ink' : 'text-warning'}`}>{t.r.toFixed(2)}R</span>
+                </div>
+              ))}
+            </div>
+            <p className={`flex items-start gap-1.5 text-xs ${plan.meetsRules ? 'text-ink-2' : 'text-warning'}`}>
+              {plan.meetsRules ? <CheckCircle2 size={14} className="mt-0.5 shrink-0 text-good" aria-label="fits the rules" /> : <AlertTriangle size={14} className="mt-0.5 shrink-0" aria-label="breaks a rule" />}
+              {plan.note}
+            </p>
+          </>
+        ) : plan ? (
+          <p className="text-xs text-warning">{plan.note}</p>
+        ) : (
+          <p className="text-xs text-ink-3">No plan while neither side has a trend. Key levels below still show where price may react.</p>
+        )}
+
+        {!compact && (
+          <div>
+            <h3 className="mb-1 text-xs uppercase tracking-wider text-ink-3">Key levels near price</h3>
+            <ul className="space-y-1">
+              {idea.levels.filter((l) => Math.abs(l.distancePct) <= 10).map((l) => (
+                <li key={l.price} className="flex items-center gap-2 text-xs" title={l.sources.join(', ')}>
+                  <span className={`w-16 font-medium ${l.kind === 'support' ? 'text-demand' : 'text-supply'}`}>{l.kind}</span>
+                  <span className="w-24 tabular">{fmt(l.price)}</span>
+                  <span className="w-14 tabular text-ink-3">{pct(l.distancePct, 1, true)}</span>
+                  <span className="flex gap-0.5" aria-label={`strength ${l.strength}`}>
+                    {Array.from({ length: Math.min(6, l.strength) }, (_, i) => <span key={i} className={`h-2 w-1.5 rounded-sm ${l.kind === 'support' ? 'bg-demand' : 'bg-supply'}`} />)}
+                  </span>
+                  <span className="truncate text-ink-3">{l.sources.join(' · ')}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+        <p className="text-[11px] text-ink-3">Suggested from the analysis, for reading the chart. Not financial advice; the engine only trades setups that pass all its rules.</p>
+      </div>
+    </Card>
+  );
+}
+
+function Level({ label, value, sub, tone }: { label: string; value: string; sub?: string; tone?: 'accent' | 'critical' }) {
+  const color = tone === 'accent' ? 'text-accent' : tone === 'critical' ? 'text-critical' : 'text-ink';
+  return (
+    <div className="rounded-lg bg-card-2 px-3 py-2">
+      <p className="text-[11px] uppercase tracking-wider text-ink-3">{label}</p>
+      <p className={`font-semibold ${color}`}>{value}</p>
+      {sub && <p className="text-[11px] text-ink-3">{sub}</p>}
+    </div>
+  );
+}

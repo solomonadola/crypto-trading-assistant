@@ -10,7 +10,7 @@
 // pullback setup). The 1m candle that ends at a 15m close happened before
 // that close, so it is settled first.
 import type {
-  AccountSummary, Candle, ClosedTradeView, Direction, ShadowResult, SignalRecord, TradeEvent, TradeEventType,
+  AccountSummary, Candle, ClosedTradeView, Direction, ShadowResult, SignalRecord, TradeEvent, TradeEventType, TradeIdea,
 } from '../../../shared/types';
 import { TIMEFRAME_MS } from '../../../shared/types';
 import type { EngineConfig } from '../config';
@@ -24,6 +24,7 @@ import { scoreSignal } from '../scoring';
 import { decideEntry, equityOf, riskAtStop, unrealized, type SymbolRules } from '../risk';
 import { manage } from '../exits';
 import { fee, grossPnl, liquidationPrice, marketFill, roundQty, stopFill, targetFill } from '../sim/broker';
+import { tradeIdea } from '../analysis/levels';
 
 const DIRECTIONS: Direction[] = ['long', 'short'];
 /** Entry-window blocks that end an armed setup; a funding pause only delays it. */
@@ -142,6 +143,15 @@ export class Engine {
 
   armedSetups(): Armed[] {
     return [...this.armed.values()];
+  }
+
+  /** Key levels and a suggested plan for a coin, as of its last 15m close. Null without enough history. */
+  tradeIdea(symbol: string): TradeIdea | null {
+    const last15 = this.market.recent(symbol, this.cfg.timeframes.trigger, 1)[0];
+    if (!last15) return null;
+    const ctx = buildContext(this.market, symbol, last15.closeTime, this.cfg, this.funding.get(symbol) ?? null);
+    if (!ctx) return null;
+    return tradeIdea(ctx, this.armedSetups().filter((a) => a.symbol === symbol).map((a) => a.direction));
   }
 
   sessionInfo(): SessionInfo {
