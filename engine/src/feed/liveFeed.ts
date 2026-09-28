@@ -16,12 +16,21 @@ import type { EngineConfig } from '../config';
 
 type Listener = (candles: Candle[]) => void;
 
+/** How far back a restored engine may catch up. */
+const MAX_RESUME_MS = 3 * 86_400_000;
+
 export interface LiveFeedDeps {
   client: BinancePublic;
   store: CandleStore;
   config: EngineConfig['feed'];
   /** Symbols to feed; called on every poll so the scanner can change it. */
   symbols: () => string[];
+  /**
+   * The engine's clock. A symbol with no stored candles but an engine that has
+   * already run (a restored database) gets history back to this time, and the
+   * candles after it are handed on to be processed, not treated as warm-up.
+   */
+  resumeFrom?: () => number;
   /** Wall clock; injected for tests. */
   now?: () => number;
   log?: (msg: string) => void;
@@ -123,16 +132,22 @@ export class LiveFeed {
 
     const warmUp = stored === null;
     if (warmUp) this.st.state = 'backfilling';
-    const from = warmUp ? lastClosedOpen - (this.deps.config.history[tf] - 1) * tfMs : stored + tfMs;
+    const resume = warmUp ? this.deps.resumeFrom?.() ?? 0 : 0;
+    let from = warmUp ? lastClosedOpen - (this.deps.config.history[tf] - 1) * tfMs : stored + tfMs;
+    // Back to the engine's clock, at most MAX_RESUME_MS ago.
+    if (resume > 0) from = Math.min(from, Math.max(resume - tfMs, now - MAX_RESUME_MS));
     const candles = (await this.deps.client.klinesRange(symbol, tf, from, lastClosedOpen))
       // Never a candle still forming, whatever the server sent.
       .filter((c) => c.closeTime <= now && (stored === null || c.openTime > stored));
     this.deps.store.save(candles);
     if (warmUp) {
-      if (tf === '1m' && candles.length) this.st.lastCloseTime[symbol] = candles[candles.length - 1].closeTime;
-      this.log(`${symbol} ${tf}: ${candles.length} candles of history`);
-      if (candles.length) for (const l of this.historyListeners) l(candles);
-      return [];
+      const history = resume > 0 ? candles.filter((c) => c.closeTime <= resume) : candles;
+      const missed = resume > 0 ? candles.filter((c) => c.closeTime > resume) : [];
+      const lastHist = history[history.length - 1];
+      if (tf === '1m' && lastHist) this.st.lastCloseTime[symbol] = lastHist.closeTime;
+      this.log(`${symbol} ${tf}: ${history.length} candles of history${missed.length ? `, ${missed.length} missed since the engine last ran` : ''}`);
+      if (history.length) for (const l of this.historyListeners) l(history);
+      return missed;
     }
     if (candles.length > 1) this.log(`${symbol} ${tf}: caught up ${candles.length} candles`);
     return candles;

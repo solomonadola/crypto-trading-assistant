@@ -1,0 +1,99 @@
+// Talking to the engine: typed GETs, control POSTs, and a polling hook.
+import { useCallback, useEffect, useRef, useState } from 'react';
+import type { AccountSummary, Candle, ClosedTradeView, FeedStatus, ShadowResult, SignalRecord } from '../../shared/types';
+
+export type { AccountSummary, Candle, ClosedTradeView, ShadowResult, SignalRecord };
+
+export interface SessionInstance { name: string; openTime: number; closeTime: number; localDate: string }
+export interface SessionInfo {
+  time: number;
+  active: SessionInstance[];
+  owner: SessionInstance | null;
+  entryBlock: string | null;
+  next: SessionInstance | null;
+}
+
+export interface Status {
+  engineVersion: string;
+  configHash: string;
+  engineClock: number;
+  feed: FeedStatus;
+  session: SessionInfo | null;
+  openPositions: number;
+  halted: { reason: string; at: number } | null;
+}
+
+export interface Direction { state: string; emaAligned: boolean; tradable: boolean }
+export interface MarketRow {
+  symbol: string;
+  price: number | null;
+  changePct: number | null;
+  quoteVolume: number | null;
+  atrPct1h: number | null;
+  long: Direction | null;
+  short: Direction | null;
+  trend: Record<'4h' | '1h' | '15m', string | null> | null;
+  zones: number;
+  armed: string[];
+}
+
+export interface Zone { id: string; type: 'demand' | 'supply'; low: number; high: number; status: string; touches: number; createdAt: number }
+export interface Analysis {
+  symbol: string;
+  asOf: number;
+  structure: Record<'4h' | '1h' | '15m', { trend: string; broken: string | null; protectedLow: number | null; protectedHigh: number | null } | null>;
+  ema4h: { fast: number | null; slow: number | null; close: number | null };
+  long: Direction;
+  short: Direction;
+  zones: Zone[];
+}
+
+export interface Armed {
+  id: string; symbol: string; direction: 'long' | 'short'; armedAt: number; expiresAt: number; price: number;
+  factors: { name: string; level: number; detail: string }[]; areaLow: number; areaHigh: number;
+}
+
+export interface Scanner {
+  universe: string[];
+  lastScan: { time: number; selected: { symbol: string; quoteVolume: number; changePct: number; atrPct1h: number }[]; dropped: Record<string, number> } | null;
+}
+
+export interface EquityPoint { time: number; balance: number; equity: number; openPositions: number }
+export interface ShadowStats { group: string; count: number; winRate: number; avgR: number; totalR: number }
+
+export async function get<T>(url: string): Promise<T> {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`${url}: ${res.status}`);
+  return res.json();
+}
+
+export async function post<T = unknown>(url: string, body?: unknown): Promise<T> {
+  const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error ?? `${url}: ${res.status}`);
+  return data;
+}
+
+/** Fetches `url` now and every `ms`; `reload` refetches immediately. Keeps the last good value on errors. */
+export function usePoll<T>(url: string | null, ms: number): { data: T | null; error: string | null; reload: () => void } {
+  const [data, setData] = useState<T | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const alive = useRef(true);
+  const load = useCallback(async () => {
+    if (!url) return;
+    try {
+      const d = await get<T>(url);
+      if (alive.current) { setData(d); setError(null); }
+    } catch (e) {
+      if (alive.current) setError(e instanceof Error ? e.message : String(e));
+    }
+  }, [url]);
+  useEffect(() => {
+    alive.current = true;
+    setData(null);
+    void load();
+    const timer = setInterval(load, ms);
+    return () => { alive.current = false; clearInterval(timer); };
+  }, [load, ms]);
+  return { data, error, reload: load };
+}

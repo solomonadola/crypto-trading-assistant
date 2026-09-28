@@ -98,7 +98,7 @@ if (savedClock) {
   console.log(`[engine] restored ${engine.positions().length} open positions; replayed ${replayed} stored candles; clock ${new Date(engine.now()).toISOString()}`);
 }
 
-const feed = new LiveFeed({ client, store, config: config.feed, symbols });
+const feed = new LiveFeed({ client, store, config: config.feed, symbols, resumeFrom: () => engine.now() });
 feed.onCandles(process_);
 feed.onHistory((candles) => engine.seedHistory(candles));
 
@@ -199,6 +199,30 @@ app.post('/api/control/pause', control(() => ({ type: 'pause', reason: 'paused f
 app.post('/api/control/resume', control(() => ({ type: 'resume' })));
 app.post('/api/control/reset', control((req) => ({ type: 'reset_balance', balance: Number(req.body?.balance) || undefined })));
 
+app.get('/api/sessions/today', (_req, res) => {
+  const t = engine.now() || Date.now();
+  const dayStart = Math.floor(t / 86_400_000) * 86_400_000;
+  res.json({ dayStart, sessions: engine.sessions.between(dayStart, dayStart + 86_400_000), info: engine.sessions.info(t) });
+});
+app.get('/api/market', (_req, res) => {
+  const rows = new Map((lastScan?.selected ?? []).map((r) => [r.symbol, r]));
+  res.json(universe.map((symbol) => {
+    const a = engine.analysis(symbol);
+    const last = store.latest(symbol, '1m', 1)[0];
+    return {
+      symbol,
+      price: last?.close ?? null,
+      changePct: rows.get(symbol)?.changePct ?? null,
+      quoteVolume: rows.get(symbol)?.quoteVolume ?? null,
+      atrPct1h: rows.get(symbol)?.atrPct1h ?? null,
+      long: a?.long ?? null,
+      short: a?.short ?? null,
+      trend: a ? { '4h': a.structure['4h']?.trend ?? null, '1h': a.structure['1h']?.trend ?? null, '15m': a.structure['15m']?.trend ?? null } : null,
+      zones: a?.zones.length ?? 0,
+      armed: engine.armedSetups().filter((x) => x.symbol === symbol).map((x) => x.direction),
+    };
+  }));
+});
 app.get('/api/scanner', (_req, res) => {
   res.json({ universe, lastScan });
 });

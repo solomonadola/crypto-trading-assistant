@@ -129,3 +129,13 @@ describe('entry window', () => {
     expect(c.ownerAt(u('2026-07-15T13:00Z'))).toBeNull();
   });
 });
+
+describe('sessions in a period', () => {
+  it('lists every session overlapping a UTC day, including one that opened the day before', () => {
+    const c = cal({ list: [...base.list, { name: 'late', tz: 'UTC', open: '22:00', close: '02:00' }] });
+    const day = c.between(u('2026-07-15T00:00Z'), u('2026-07-16T00:00Z'));
+    expect(day.map((s) => `${s.name} ${iso(s.openTime)}`)).toEqual([
+      'late 2026-07-14T22:00Z', 'asian 2026-07-15T00:00Z', 'london 2026-07-15T07:00Z', 'newyork 2026-07-15T12:00Z', 'late 2026-07-15T22:00Z',
+    ]);
+  });
+});

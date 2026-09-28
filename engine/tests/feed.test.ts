@@ -142,6 +142,21 @@ describe('live feed', () => {
     expect(new Set(minutes).size).toBe(300);
   });
 
+  it('a restored engine with no stored candles gets the minutes since its clock handed on, not swallowed as history', async () => {
+    const config = loadConfig('engine/config/config.yaml').feed;
+    const clock = { now: T0 + 3_000 };
+    const store = new CandleStore(openDb(':memory:'));
+    const ex = fakeExchange(clock);
+    const history: Candle[] = [];
+    const feed = new LiveFeed({ client: ex.api, store, config, symbols: () => ['BTCUSDT'], now: () => clock.now, log: () => {}, resumeFrom: () => T0 - 30 * 60_000 });
+    feed.onHistory((c) => history.push(...c));
+    const missed = await feed.poll();
+    expect(missed.filter((c) => c.tf === '1m')).toHaveLength(30);
+    expect(missed.filter((c) => c.tf === '15m').map((c) => c.closeTime)).toEqual([T0 - 900_000, T0]);
+    expect(history.every((c) => c.closeTime <= T0 - 30 * 60_000)).toBe(true);
+    expect(history.filter((c) => c.tf === '1m').length).toBeGreaterThan(0);
+  });
+
   it('uses Binance time when the local clock is off', async () => {
     const { feed, clock, store } = setup(['BTCUSDT']);
     // Local clock 5 minutes fast: without the offset it would expect candles that do not exist yet.

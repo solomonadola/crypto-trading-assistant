@@ -162,6 +162,7 @@ export interface ClosedTradeView {
   qty: number;
   pnl: number;
   reason: string;
+  session: string | null;
 }
 
 export type FeedState = 'starting' | 'backfilling' | 'live' | 'stalled' | 'stopped';

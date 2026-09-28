@@ -95,6 +95,7 @@ export interface ClosedTrade {
   /** Net: gross profit minus all fees plus funding. */
   pnl: number;
   reason: CloseReason;
+  session: string | null;
 }
 
 const day = (t: number) => Math.floor(t / 86_400_000);
@@ -190,6 +191,7 @@ export class Portfolio {
           id: pos.id, symbol: pos.symbol, side: pos.side, openedAt: pos.openedAt, closedAt: e.time,
           entryPrice: pos.entryPrice, exitPrice: Number(p.price), qty: pos.initialQty, pnl: net,
           reason: (e.type === 'liquidated' ? 'liquidation' : p.reason) as CloseReason,
+          session: pos.session?.name ?? null,
         });
         this.dayPnl.set(day(e.time), (this.dayPnl.get(day(e.time)) ?? 0) + net);
         if (net < 0) {

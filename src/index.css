@@ -1,1 +1,50 @@
 @import "tailwindcss";
+
+/*
+ * Dashboard tokens. Components use these roles, never raw hex.
+ * Session colors are the first three categorical slots (validated all-pairs on
+ * the dark surface). good/critical/warning are status colors: reserved for
+ * profit, loss and alerts, always shown with a sign, arrow or label.
+ */
+@theme {
+  --color-page: #0b0d12;
+  --color-card: #141821;
+  --color-card-2: #1b2130;
+  --color-line: #262d3b;
+  --color-ink: #f4f5f7;
+  --color-ink-2: #b4bac6;
+  --color-ink-3: #7c8494;
+
+  --color-asian: #d95926;
+  --color-london: #3987e5;
+  --color-newyork: #199e70;
+
+  --color-good: #22c55e;
+  --color-critical: #ef5350;
+  --color-warning: #fab219;
+
+  --color-accent: #9085e9;
+  --color-demand: #3987e5;
+  --color-supply: #d95926;
+
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  background: var(--color-page);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: var(--color-line); border-radius: 4px; }

@@ -102,6 +102,17 @@ export class SessionCalendar {
     return this.defs.flatMap((def) => shifts.map((s) => this.instance(def, t, s)));
   }
 
+  /** Every session instance that overlaps [from, to), by open time. */
+  between(from: number, to: number): SessionInstance[] {
+    const days = Math.ceil((to - from) / 86_400_000) + 1;
+    const shifts = Array.from({ length: days + 2 }, (_, i) => i - 1);
+    const seen = new Set<string>();
+    return this.candidates(from, shifts)
+      .filter((s) => s.openTime < to && s.closeTime > from)
+      .filter((s) => { const k = `${s.name}|${s.openTime}`; if (seen.has(k)) return false; seen.add(k); return true; })
+      .sort((a, b) => a.openTime - b.openTime);
+  }
+
   /** Sessions open at `t` (openTime <= t < closeTime), oldest first. */
   activeAt(t: number): SessionInstance[] {
     return this.candidates(t, [-1, 0])
