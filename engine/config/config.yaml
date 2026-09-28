@@ -1,0 +1,164 @@
+# Engine configuration. Validated on load by engine/config/schema.ts.
+# Percentages are written as percent (2.5 means 2.5%).
+# Numbers are plain digits: YAML reads 50_000_000 as text, not a number.
+
+market: futures                 # USDT-margined perpetuals
+leverage: 3                     # margin only; risk per trade is set by allocation.max_loss_per_trade_pct
+starting_balance_usdt: 1000
+quote: USDT
+
+feed:
+  rest_base: https://fapi.binance.com
+  timeframes: [1m, 15m, 1h, 4h]
+  # Candles fetched when a symbol is first seen: enough for EMA200 on 4h and
+  # 200-candle zone lookback on 1h to settle.
+  history:
+    1m: 240
+    15m: 500
+    1h: 500
+    4h: 500
+  # Coins fed before the scanner exists (Phase 4). BTC is always fed: filters use it.
+  watch_symbols: [BTCUSDT, ETHUSDT, SOLUSDT]
+  poll_delay_ms: 3000           # wait after each minute closes before asking Binance for it
+  stall_after_sec: 120          # no new 1m candle for this long = feed stalled, no new entries
+  request_timeout_ms: 10000
+  max_retries: 4
+  clock_sync_min: 10            # re-measure the offset to Binance server time this often
+
+storage:
+  path: data/engine/engine.db   # ENGINE_DB_PATH overrides
+  candle_retention_days:
+    1m: 3
+    15m: 30
+    1h: 120
+    4h: 400
+
+backup:
+  target: firestore             # firestore (AI Studio) | file (VPS/local)
+  namespace: hosted             # local runs default to "local" so they never touch hosted data
+  events_flush_sec: 30
+  snapshot_every_min: 5
+  lock_lease_sec: 90
+
+scanner:
+  min_quote_volume_24h: 50000000
+  min_atr_pct_1h: 2.0
+  max_change_24h_pct: 30
+  # Stablecoins, wrapped/staked copies, tokenised gold and tokenised shares:
+  # they rank high on volume but do not move like crypto.
+  exclude: [USDC, FDUSD, TUSD, USDP, DAI, BUSD, USDS, USDE, USD1, PYUSD, RLUSD, BFUSD, XUSD,
+            EUR, EURI, AEUR, WBTC, WBETH, WETH, BETH, STETH, WSTETH, BNSOL, PAXG, XAUT,
+            CRCLB, SNDKB, NVDAB, MSTRB, SOXLB, SPCXB, QQQB]
+  blacklist: []
+  rescan_interval_sec: 300
+  max_symbols: 30
+
+sessions:
+  enabled: true
+  weekdays_only: false
+  list:
+    - { name: asian,   tz: Asia/Tokyo,       open: "09:00", close: "18:00" }
+    - { name: london,  tz: Europe/London,    open: "08:00", close: "17:00" }
+    - { name: newyork, tz: America/New_York, open: "08:00", close: "17:00" }
+  entry_delay_min: 0
+  no_entry_before_end_min: 60
+  exit_at_session_end: true
+  skip_minutes_around_funding: 10   # 00:00, 08:00, 16:00 UTC
+
+timeframes: { bias: 4h, setup: 1h, trigger: 15m, exits: 1m }
+
+trend:
+  swing_lookback: 3
+  ema_fast: 50
+  ema_slow: 200
+  use_protected_low: true
+  allowed_states: [strong, pullback]
+
+zones:
+  base_max_candles: 4
+  base_body_max_atr: 0.5
+  impulse_body_min_atr: 1.5
+  impulse_min_rvol: 1.5
+  max_touches: 2
+  lookback_candles: 200
+  max_zone_width_pct: 3.0
+
+pullback: { ema_levels: [20, 50], fib_min: 0.5, fib_max: 0.618, min_confluence: 2, armed_expiry_hours: 6 }
+
+breakout:
+  enabled: false                # added in Phase 9, after the pullback path is proven
+  lookback_high_candles: 16
+  min_rvol: 3.0
+  rsi_min: 55
+  rsi_max: 75
+  min_range_candles_1h: 8
+
+trigger: { confirmations_min: 1, rsi_period: 14 }   # the 15m CHoCH close is always required
+
+filters:                        # every filter can be switched off individually
+  chop:       { enabled: true, adx_min_1h: 20, choppiness_max_1h: 61.8, ema_cross_max_1h: 2, ema20_slope_min_atr: 0.1, range_lookback_1h: 12, range_min_pct: 3.0 }
+  squeeze:    { enabled: true, bb_width_percentile_min: 20 }
+  stagnation: { enabled: true, volume_vs_7d_min: 0.7, atr_vs_avg_min: 0.7 }
+  fakeout:    { enabled: true, close_beyond_atr: 0.2, min_close_position: 0.7, max_upper_wick_ratio: 0.4, min_rvol: 2.0, failed_breakout_candles: 3 }
+  extension:  { enabled: true, max_distance_ema20_atr_15m: 3.0 }
+  wicks:      { enabled: true, max_avg_wick_body_ratio_1h: 2.5 }
+  room:       { enabled: true, htf_room_min_pct: 2.5 }
+  funding:    { enabled: true, max_against_pct_8h: 0.05 }
+  btc:        { enabled: true, block_longs_if_btc_1h_below_pct: -1.5, block_shorts_if_btc_1h_above_pct: 1.5 }
+
+scoring: { min_score: 4 }
+
+allocation:
+  sizing: flat                  # flat | tiers (tiers only after data shows score predicts results)
+  flat_capital_pct: 10
+  tiers:
+    - { min_score: 4, capital_pct: 10 }
+    - { min_score: 5, capital_pct: 20 }
+    - { min_score: 6, capital_pct: 30 }
+    - { min_score: 7, capital_pct: 40 }
+  max_open_trades: 5
+  max_total_exposure_pct: 100
+  max_loss_per_trade_pct: 1.0
+  max_open_risk_pct: 3.0
+  max_correlated_trades: 2
+  correlation_groups:
+    memes: [DOGE, SHIB, PEPE, WIF, BONK, FLOKI]
+  max_pct_of_1h_volume: 1.0
+
+exits:
+  mode: partial_ladder          # fixed | partial_ladder | ladder
+  fixed_target_pct: 5.0
+  partial_at_pct: 5.0
+  partial_close_pct: 50
+  stop_buffer_atr: 0.3
+  max_stop_pct: 2.5
+  min_rr: 2.0
+  breakeven_fee_buffer_pct: 0.2
+  ladder:
+    - { trigger_pct: 3,  lock_pct: 0.2 }
+    - { trigger_pct: 5,  lock_pct: 2 }
+    - { trigger_pct: 7,  lock_pct: 4 }
+    - { trigger_pct: 10, lock_pct: 7 }
+  beyond_last_step: { lock_fraction_of_peak: 0.7, or_swing_15m: true }
+  step_on: close_15m
+  min_gap_atr_15m: 1.0
+  time_stop_hours: 3
+  time_stop_min_progress_pct: 2.0
+  early_exit:
+    on_15m_counter_choch: tighten   # tighten | close_half | ignore
+    on_1h_protected_level_break: close
+    on_4h_state_change: close
+    on_btc_move_1h_pct: 2.0
+    on_btc_move_action: tighten     # tighten | close
+
+risk:
+  max_trades_per_symbol_per_day: 2
+  daily_loss_limit_pct: 3.0
+  max_drawdown_kill_pct: 15.0
+  cooldown_after_loss_min: 30
+  losing_streak_size_cut: { after_losses: 3, size_mult: 0.5, reset_after_wins: 2 }
+
+sim:                            # simulated execution
+  taker_fee_pct: 0.05           # every fill is a market or stop order
+  slippage_pct: 0.05            # applied to every fill, against the trade
+  charge_funding: true
