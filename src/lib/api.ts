@@ -1,6 +1,7 @@
 // Talking to the engine: typed GETs, control POSTs, and a polling hook.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AccountSummary, Candle, ClosedTradeView, FeedStatus, ShadowResult, SignalRecord } from '../../shared/types';
+import { idToken } from './auth';
 
 export type { AccountSummary, Candle, ClosedTradeView, ShadowResult, SignalRecord };
 
@@ -21,6 +22,8 @@ export interface Status {
   session: SessionInfo | null;
   openPositions: number;
   halted: { reason: string; at: number } | null;
+  backup: { target: string; namespace: string; ok: boolean; error: string | null; standby: boolean; lastPush: number };
+  signInRequired: boolean;
 }
 
 export interface Direction { state: string; emaAligned: boolean; tradable: boolean }
@@ -61,14 +64,29 @@ export interface Scanner {
 export interface EquityPoint { time: number; balance: number; equity: number; openPositions: number }
 export interface ShadowStats { group: string; count: number; winRate: number; avgR: number; totalR: number }
 
+/** Sign-in header when signed in; the server ignores it when sign-in is off. */
+async function authHeaders(): Promise<Record<string, string>> {
+  const token = await idToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+export class HttpError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+  }
+}
+
 export async function get<T>(url: string): Promise<T> {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`${url}: ${res.status}`);
+  const res = await fetch(url, { headers: await authHeaders() });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new HttpError(data.error ?? `${url}: ${res.status}`, res.status);
+  }
   return res.json();
 }
 
 export async function post<T = unknown>(url: string, body?: unknown): Promise<T> {
-  const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+  const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(await authHeaders()) }, body: body ? JSON.stringify(body) : undefined });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error ?? `${url}: ${res.status}`);
   return data;

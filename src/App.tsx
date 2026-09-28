@@ -1,7 +1,9 @@
 // Dashboard shell: navigation, live status, controls, and the pages.
 import { useEffect, useState } from 'react';
-import { CandlestickChart, Crosshair, FlaskConical, History, LayoutDashboard, Pause, Play, Power, Radio, RotateCcw, Zap } from 'lucide-react';
-import { post, usePoll, type Status } from './lib/api';
+import type { User } from 'firebase/auth';
+import { CandlestickChart, Crosshair, FlaskConical, History, LayoutDashboard, LogIn, LogOut, Pause, Play, Power, Radio, RotateCcw, Zap } from 'lucide-react';
+import { get, post, usePoll, type Status } from './lib/api';
+import { signIn, signOutUser, watchUser } from './lib/auth';
 import { hhmm, words } from './lib/format';
 import { Badge } from './components/ui';
 import { Overview } from './pages/Overview';
@@ -27,7 +29,40 @@ function readHash(): { page: PageId; symbol: string } {
   return { page: (PAGES.some((p) => p.id === page) ? page : 'overview') as PageId, symbol: symbol || 'BTCUSDT' };
 }
 
+/** Signs in first when the server requires it, then shows the dashboard. */
 export default function App() {
+  const [required, setRequired] = useState<boolean | null>(null);
+  const [user, setUser] = useState<User | null | undefined>(undefined);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    get<{ required: boolean }>('/api/auth/config').then((c) => setRequired(c.required)).catch(() => setRequired(false));
+    // If Firebase has not reported the signed-in user within 4 seconds, show the sign-in button rather than wait.
+    const fallback = setTimeout(() => setUser((u) => (u === undefined ? null : u)), 4000);
+    const stop = watchUser(setUser);
+    return () => { clearTimeout(fallback); stop(); };
+  }, []);
+
+  if (required === null || (required && user === undefined)) return <div className="grid h-screen place-items-center text-ink-3">Loading…</div>;
+  if (required && !user) {
+    return (
+      <div className="grid h-screen place-items-center px-4">
+        <div className="w-full max-w-sm rounded-2xl border border-line bg-card p-8 text-center shadow-2xl shadow-accent/10">
+          <div className="mx-auto mb-4 grid h-14 w-14 place-items-center rounded-2xl bg-gradient-to-br from-accent via-london to-newyork"><Zap size={26} className="text-white" /></div>
+          <h1 className="text-xl font-semibold">Session Engine</h1>
+          <p className="mt-1 text-sm text-ink-3">Sign in with an allowed Google account.</p>
+          <button onClick={() => signIn().catch((e) => setError(e instanceof Error ? e.message : String(e)))}
+            className="mt-6 inline-flex w-full items-center justify-center gap-2 rounded-xl bg-accent px-4 py-2.5 text-sm font-semibold text-white hover:brightness-110">
+            <LogIn size={16} />Sign in with Google
+          </button>
+          {error && <p className="mt-3 text-xs text-critical">{error}</p>}
+        </div>
+      </div>
+    );
+  }
+  return <Dashboard user={required ? user ?? null : null} />;
+}
+
+function Dashboard({ user }: { user: User | null }) {
   const [route, setRoute] = useState(readHash);
   useEffect(() => {
     const on = () => setRoute(readHash());
@@ -66,6 +101,12 @@ export default function App() {
           ))}
         </nav>
         <div className="mt-auto space-y-1 px-2 text-[11px] text-ink-3">
+          {user && (
+            <button onClick={() => void signOutUser()} className="mb-2 flex items-center gap-1 text-ink-2 hover:text-ink" title="Sign out">
+              <LogOut size={12} />{user.email}
+            </button>
+          )}
+          {status && <p>backup: {status.backup.ok ? `Firestore (${status.backup.namespace})` : 'local file'}</p>}
           <p>v{status?.engineVersion ?? '…'} · config {status?.configHash ?? '…'}</p>
           <p>No exchange account. Public Binance data, simulated fills.</p>
         </div>
@@ -75,7 +116,9 @@ export default function App() {
         <header className="sticky top-0 z-20 flex flex-wrap items-center gap-3 border-b border-line bg-page/85 px-4 py-3 backdrop-blur md:px-6">
           <h1 className="text-lg font-semibold">{PAGES.find((p) => p.id === route.page)?.label}</h1>
           <div className="ml-auto flex flex-wrap items-center gap-2">
-            {error && <Badge tone="critical">engine unreachable</Badge>}
+            {error && <Badge tone="critical" title={error}>{/403|not allowed/.test(error) ? 'account not allowed' : 'engine unreachable'}</Badge>}
+            {status?.backup.standby && <Badge tone="warning" title="Another copy of the engine holds the lock; this one shows data but does not trade">standby</Badge>}
+            {status && !status.backup.ok && status.backup.target === 'firestore' && <Badge tone="warning" title={status.backup.error ?? ''}>backup off</Badge>}
             {status && (
               <Badge tone={live ? 'good' : 'warning'} title={status.feed.lastError ?? undefined}>
                 <span className={`h-1.5 w-1.5 rounded-full ${live ? 'animate-pulse bg-good' : 'bg-warning'}`} />

@@ -35,11 +35,11 @@ storage:
     4h: 400
 
 backup:
-  target: firestore             # firestore (AI Studio) | file (VPS/local)
-  namespace: hosted             # local runs default to "local" so they never touch hosted data
-  events_flush_sec: 30
-  snapshot_every_min: 5
-  lock_lease_sec: 90
+  target: firestore             # firestore (AI Studio) | file (VPS/local); BACKUP_TARGET overrides
+  namespace: hosted             # production uses this; development uses "local" (ENGINE_NAMESPACE overrides)
+  events_flush_sec: 30          # trade events written to Firestore at most this often
+  lock_lease_sec: 300           # single-engine lease, renewed at half this (about 580 writes a day)
+  file_keep_days: 14            # daily SQLite copies in data/engine/backups
 
 scanner:
   min_quote_volume_24h: 50000000

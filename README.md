@@ -3,7 +3,8 @@
 A simulated crypto futures trading engine. It reads Binance USDⓈ-M futures
 public market data (no account, no API keys), looks for trend pullback setups
 inside the Asian, London and New York sessions, and records every signal with
-its reasoning. Simulated trades arrive with the simulator (Phase 5).
+its reasoning. Taken signals become simulated trades with fees, slippage and
+funding, managed by stops, a profit ladder, early exits and session ends.
 
 The design and the build plan are in [ENGINE_PLAN.md](ENGINE_PLAN.md).
 
@@ -56,11 +57,34 @@ Other commands: `npm test` (engine tests), `npm run lint` (type check).
 
 ## Environment
 
-Optional, in `.env.local`: `PORT` (default 3000), `ENGINE_DB_PATH`,
-`ENGINE_CONFIG`. See `.env.example`.
+Optional, in `.env.local` locally or as environment variables on the host (see `.env.example`):
 
-## Not built yet
+| Variable | Default | What |
+|---|---|---|
+| `ALLOWED_EMAILS` | unset (no sign-in) | Google accounts that may sign in. **Set this on AI Studio**, or anyone with the link can use the controls. |
+| `BACKUP_TARGET` | `firestore` in production, `file` in development | Where the trade log is backed up. |
+| `ENGINE_NAMESPACE` | `hosted` in production, `local` in development | Keeps a local copy's backup apart from the hosted one. |
+| `PORT` | 3000 | |
+| `ENGINE_DB_PATH` | `data/engine/engine.db` | |
+| `ENGINE_CONFIG` | `engine/config/config.yaml` | |
 
-Simulated fills and positions (Phase 5), Firestore backup so AI Studio restarts
-keep the data (Phase 6), login and the dashboard (Phases 6-7). Until the
-backup exists, a restart on AI Studio starts from an empty database.
+## Running on AI Studio
+
+1. Set `ALLOWED_EMAILS` to your Google account.
+2. In the Firebase console of this project: enable **Google** under
+   Authentication → Sign-in method, and make sure the app's domain is listed
+   under Authorized domains.
+3. Deploy. `npm run build` then `npm start` run the engine and the dashboard.
+4. Check the dashboard's sidebar: `backup: Firestore (hosted)` means the trade
+   log is backed up and survives restarts. `backup off` in the header means
+   the server cannot reach Firestore with its credentials; it then keeps only a
+   local file, which Cloud Run loses on restart.
+5. Deploy `firestore.rules` (browsers get no access; the server's Admin SDK
+   is not affected by rules).
+6. Keep it awake: one instance, and if possible a minimum of one. Otherwise an
+   uptime monitor calling `/api/health` every 5 minutes. Time it was asleep is
+   caught up on the next start.
+
+Only one copy trades at a time: the running engine holds a lock in Firestore;
+another copy with the same namespace shows data but does not trade
+(`standby` in the header).

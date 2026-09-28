@@ -46,8 +46,8 @@ export const configSchema = z.object({
     target: z.enum(['firestore', 'file']),
     namespace: z.string().regex(/^[a-z0-9_-]+$/),
     events_flush_sec: posInt,
-    snapshot_every_min: posInt,
     lock_lease_sec: posInt,
+    file_keep_days: posInt,
   }).strict(),
 
   scanner: z.object({
