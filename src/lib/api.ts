@@ -41,6 +41,10 @@ export interface MarketRow {
 }
 
 export interface Zone { id: string; type: 'demand' | 'supply'; low: number; high: number; status: string; touches: number; createdAt: number }
+export interface Fvg { id: string; tf: string; side: 'bullish' | 'bearish'; inverse: boolean; top: number; bottom: number; createdAt: number; status: string; invertedAt: number | null }
+export interface VolumeProfile { name: string; from: number; to: number; bins: { low: number; high: number; volume: number }[]; poc: number; vah: number; val: number; hvn: number[]; lvn: number[] }
+export interface TrendMeterRow { structure: string | null; supertrend: 1 | -1 | null; line: number | null }
+
 export interface Analysis {
   symbol: string;
   asOf: number;
@@ -49,6 +53,10 @@ export interface Analysis {
   long: Direction;
   short: Direction;
   zones: Zone[];
+  fvgs: Fvg[];
+  profiles: VolumeProfile[];
+  trendMeter: Record<'4h' | '1h' | '15m', TrendMeterRow>;
+  adx1h: number | null;
 }
 
 export interface Armed {

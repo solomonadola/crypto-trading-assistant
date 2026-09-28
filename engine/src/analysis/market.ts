@@ -2,7 +2,9 @@
 // 4h, 1h or 15m candle closes; 1m candles are only kept (they drive exits).
 import { TIMEFRAME_MS, type Candle, type Timeframe } from '../../../shared/types';
 import type { EngineConfig } from '../config';
-import { ema } from './indicators';
+import { adx, ema, supertrend } from './indicators';
+import { activeFvgs, detectFvgs, type Fvg } from './fvg';
+import { volumeProfile, type VolumeProfile } from './volumeProfile';
 import { analyzeStructure, type TfStructure } from './structure';
 import { combinedState, type Direction, type TrendState } from './trendState';
 import { activeZones, detectZones, type Zone } from './zones';
@@ -25,6 +27,13 @@ export interface SymbolAnalysis {
   short: DirectionView;
   /** Zones on the setup timeframe that are not invalid. */
   zones: Zone[];
+  /** Working fair value gaps and inverse gaps on each configured timeframe. */
+  fvgs: Fvg[];
+  profiles: VolumeProfile[];
+  /** Per timeframe: structure trend, SuperTrend direction and line. */
+  trendMeter: Record<'4h' | '1h' | '15m', { structure: string | null; supertrend: 1 | -1 | null; line: number | null }>;
+  /** 1h ADX: trend strength (above ~20-25 trending). */
+  adx1h: number | null;
 }
 
 const ANALYSED: Timeframe[] = ['4h', '1h', '15m'];
@@ -111,6 +120,27 @@ export class MarketBook {
       const list = this.recent(symbol, tf, 1);
       return list.length ? list[0].openTime + TIMEFRAME_MS[tf] : 0;
     }));
-    return { symbol, asOf, structure, ema4h: { fast, slow, close }, long: view('long'), short: view('short'), zones };
+    // Working gaps nearest the price, at most max_per_tf per timeframe: old gaps far away are noise.
+    const px = lastOf(this.recent(symbol, '1m', 1).map((c) => c.close)) ?? close ?? 0;
+    const dist = (g: Fvg) => (px > g.top ? px - g.top : px < g.bottom ? g.bottom - px : 0);
+    const fvgs = this.config.fvg.timeframes.flatMap((tf) => activeFvgs(detectFvgs(this.recent(symbol, tf), this.config.fvg))
+      .sort((a, b) => dist(a) - dist(b))
+      .slice(0, this.config.fvg.max_per_tf));
+    const profiles = this.config.volume_profile.windows
+      .map((w) => volumeProfile(w.name, this.recent(symbol, w.tf, w.candles), this.config.volume_profile.bins, this.config.volume_profile.value_area_pct))
+      .filter((p): p is VolumeProfile => p !== null);
+    const st = this.config.supertrend;
+    const meter = (tf: '4h' | '1h' | '15m') => {
+      const list = this.recent(symbol, tf);
+      const s = supertrend(list.map((c) => c.high), list.map((c) => c.low), list.map((c) => c.close), st.atr_period, st.multiplier);
+      const d = lastOf(s.dir);
+      return { structure: structure[tf]?.trend ?? null, supertrend: d === 1 || d === -1 ? d : null, line: lastOf(s.line) } as const;
+    };
+    const h1 = this.recent(symbol, '1h');
+    const adx1h = lastOf(adx(h1.map((c) => c.high), h1.map((c) => c.low), h1.map((c) => c.close), 14).adx);
+    return {
+      symbol, asOf, structure, ema4h: { fast, slow, close }, long: view('long'), short: view('short'), zones,
+      fvgs, profiles, trendMeter: { '4h': meter('4h'), '1h': meter('1h'), '15m': meter('15m') }, adx1h,
+    };
   }
 }

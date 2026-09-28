@@ -65,9 +65,12 @@ export function TradePlanCard({ idea, compact = false }: { idea: TradeIdea; comp
 
         {!compact && (
           <div>
-            <h3 className="mb-1 text-xs uppercase tracking-wider text-ink-3">Key levels near price</h3>
+            <h3 className="mb-1 text-xs uppercase tracking-wider text-ink-3">Key levels: 5 nearest above and below</h3>
             <ul className="space-y-1">
-              {idea.levels.filter((l) => Math.abs(l.distancePct) <= 10).map((l) => (
+              {[
+                ...idea.levels.filter((l) => l.kind === 'resistance').sort((x, y) => x.price - y.price).slice(0, 5).reverse(),
+                ...idea.levels.filter((l) => l.kind === 'support').sort((x, y) => y.price - x.price).slice(0, 5),
+              ].map((l) => (
                 <li key={l.price} className="flex items-center gap-2 text-xs" title={l.sources.join(', ')}>
                   <span className={`w-16 font-medium ${l.kind === 'support' ? 'text-demand' : 'text-supply'}`}>{l.kind}</span>
                   <span className="w-24 tabular">{fmt(l.price)}</span>

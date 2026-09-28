@@ -37,7 +37,7 @@ function ctx(over: Partial<Context> = {}, config: EngineConfig = cfg): Context {
   const m15 = series(Array.from({ length: 60 }, (_, i) => candle(i, 100, 100.5, 99.5, 100)));
   return {
     symbol: 'SOLUSDT', t: T, config,
-    analysis: { symbol: 'SOLUSDT', asOf: T, structure: { '4h': null, '1h': null, '15m': null }, ema4h: { fast: 90, slow: 80, close: 100 }, long: view(true), short: view(false), zones: [] },
+    analysis: { symbol: 'SOLUSDT', asOf: T, structure: { '4h': null, '1h': null, '15m': null }, ema4h: { fast: 90, slow: 80, close: 100 }, long: view(true), short: view(false), zones: [], fvgs: [], profiles: [], trendMeter: { '4h': { structure: null, supertrend: null, line: null }, '1h': { structure: null, supertrend: null, line: null }, '15m': { structure: null, supertrend: null, line: null } }, adx1h: null },
     h4: series([]), h1, m15, price: 100,
     atr1h: flat(60, 2), atr15m: flat(60, 1),
     ema1h: { 20: flat(60, 130), 50: flat(60, 140) }, ema15m20: flat(60, 99),

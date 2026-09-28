@@ -277,3 +277,39 @@ export function fibLevel(from: number, to: number, ratio: number): number {
 export function fibRetracement(from: number, to: number): Record<string, number> {
   return Object.fromEntries(FIB_RATIOS.map((r) => [String(r), fibLevel(from, to, r)]));
 }
+
+export interface SuperTrend {
+  /** The trailing line: below price in an uptrend, above it in a downtrend. */
+  line: Series;
+  /** 1 up, -1 down, NaN before there is enough data. */
+  dir: Series;
+}
+
+/**
+ * SuperTrend: bands at (high+low)/2 +/- mult x ATR(period), each only moving
+ * in the trend's favour; the trend flips when a close crosses the active band.
+ */
+export function supertrend(high: Series, low: Series, close: Series, period = 10, mult = 3): SuperTrend {
+  const n = close.length;
+  const a = atr(high, low, close, period);
+  const line = nans(n);
+  const dir = nans(n);
+  let upper = NaN;
+  let lower = NaN;
+  let d = 1;
+  for (let i = 0; i < n; i++) {
+    if (!Number.isFinite(a[i])) continue;
+    const mid = (high[i] + low[i]) / 2;
+    const basicUpper = mid + mult * a[i];
+    const basicLower = mid - mult * a[i];
+    const prevClose = i > 0 ? close[i - 1] : close[i];
+    upper = Number.isFinite(upper) && !(basicUpper < upper || prevClose > upper) ? upper : basicUpper;
+    lower = Number.isFinite(lower) && !(basicLower > lower || prevClose < lower) ? lower : basicLower;
+    if (!Number.isFinite(dir[i - 1])) d = close[i] >= mid ? 1 : -1;
+    else if (d === 1 && close[i] < lower) d = -1;
+    else if (d === -1 && close[i] > upper) d = 1;
+    dir[i] = d;
+    line[i] = d === 1 ? lower : upper;
+  }
+  return { line, dir };
+}

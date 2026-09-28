@@ -84,6 +84,22 @@ zones:
   lookback_candles: 200
   max_zone_width_pct: 3.0
 
+# Chart-reading tools; they also feed the key levels and trade plans, not the engine's entry rules.
+fvg:
+  timeframes: [15m, 1h, 4h]
+  min_size_atr: 0.2             # smaller gaps are noise
+  lookback_candles: 150
+  max_per_tf: 6                 # only the working gaps nearest the price are kept
+
+volume_profile:
+  bins: 48
+  value_area_pct: 70
+  windows:
+    - { name: 24h, tf: 15m, candles: 96 }
+    - { name: 7d, tf: 1h, candles: 168 }
+
+supertrend: { atr_period: 10, multiplier: 3 }
+
 pullback:
   ema_levels: [20, 50]
   fib_min: 0.5

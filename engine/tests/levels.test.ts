@@ -30,7 +30,7 @@ function ctx(over: Partial<Context> = {}, long = 'pullback', short = 'reversed')
   const today = (i: number) => ({ ...candle(i, 100, 100.5, 99.5, 100, '1h'), openTime: T - 3_600_000 + i, closeTime: T + i });
   return {
     symbol: 'SOLUSDT', t: T, config: cfg,
-    analysis: { symbol: 'SOLUSDT', asOf: T, structure: { '4h': null, '1h': null, '15m': null }, ema4h: { fast: 90, slow: 80, close: 100 }, long: state(long), short: state(short), zones: [] },
+    analysis: { symbol: 'SOLUSDT', asOf: T, structure: { '4h': null, '1h': null, '15m': null }, ema4h: { fast: 90, slow: 80, close: 100 }, long: state(long), short: state(short), zones: [], fvgs: [], profiles: [], trendMeter: { '4h': { structure: null, supertrend: null, line: null }, '1h': { structure: null, supertrend: null, line: null }, '15m': { structure: null, supertrend: null, line: null } }, adx1h: null },
     h4: series([]), h1: series(Array.from({ length: 60 }, (_, i) => today(i))), m15: series(Array.from({ length: 60 }, (_, i) => candle(i, 100, 100.5, 99.5, 100, '15m'))),
     price: 100, atr1h: flat(60, 2), atr15m: flat(60, 1),
     ema1h: { 20: flat(60, 300), 50: flat(60, 300) }, ema15m20: flat(60, 100), vwap15m: flat(60, 300),
@@ -48,6 +48,15 @@ describe('key levels', () => {
     expect(c.map((l) => [Number(l.price.toFixed(2)), l.sources, l.strength, l.kind])).toEqual([
       [95.4, ['a', 'b'], 2, 'support'], [99, ['c'], 2, 'support'], [110, ['d'], 1, 'resistance'],
     ]);
+  });
+});
+
+describe('key levels, dense', () => {
+  it('a run of levels each close to the next does not chain into one wide cluster', () => {
+    const run = Array.from({ length: 20 }, (_, i) => ({ price: 90 + i * 0.6, source: `s${i}`, weight: 1 }));
+    const c = clusterLevels(run, 100, 1);
+    expect(c.length).toBeGreaterThanOrEqual(10);
+    for (const l of c) expect(Math.max(...l.sources.map((s) => 90 + Number(s.slice(1)) * 0.6)) - Math.min(...l.sources.map((s) => 90 + Number(s.slice(1)) * 0.6))).toBeLessThanOrEqual(1);
   });
 });
 

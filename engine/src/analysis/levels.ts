@@ -1,9 +1,10 @@
 // Key levels and a suggested trade plan for one coin: an aid for reading the
 // market by hand, separate from the engine's own entry rules. Pure.
 //
-// Levels come from everything the analysis knows (zones, swing points,
-// protected levels, the previous day's range, VWAP, EMAs, the 0.5-0.618
-// retracement, old resistance/support). Levels within half a 1h ATR of each
+// Levels come from everything the analysis knows (zones, fair value gaps and
+// inverse gaps, volume profile POC/VAH/VAL/HVN, swing points, protected
+// levels, the previous day's range, VWAP, EMAs, the 0.5-0.618 retracement,
+// old resistance/support). Levels within half a 1h ATR of each
 // other are merged into one, so agreement shows up as strength.
 //
 // The plan follows the trend state: long when the long side is strong or in a
@@ -43,6 +44,16 @@ function rawLevels(ctx: Context): RawLevel[] {
   for (const z of ctx.analysis.zones) {
     add(z.type === 'demand' ? z.high : z.low, `${z.status} ${z.type} zone`, z.status === 'fresh' ? 3 : 2, [z.low, z.high]);
   }
+  for (const g of ctx.analysis.fvgs ?? []) {
+    const name = `${g.tf} ${g.side} ${g.inverse ? 'IFVG' : 'FVG'}`;
+    add((g.top + g.bottom) / 2, name, g.tf === '15m' ? 1 : 2, [g.bottom, g.top]);
+  }
+  for (const p of ctx.analysis.profiles ?? []) {
+    add(p.poc, `${p.name} POC`, 2);
+    add(p.vah, `${p.name} VAH`);
+    add(p.val, `${p.name} VAL`);
+    for (const h of p.hvn.slice(0, 2)) add(h, `${p.name} HVN`);
+  }
   for (const [tf, pivots, n, weight] of [['1h', ctx.pivots1h, 4, 1], ['4h', ctx.pivots4h, 3, 2]] as const) {
     for (const p of pivots.filter((x) => x.type === 'high').slice(-n)) add(p.price, `${tf} swing high`, weight);
     for (const p of pivots.filter((x) => x.type === 'low').slice(-n)) add(p.price, `${tf} swing low`, weight);
@@ -71,13 +82,18 @@ function rawLevels(ctx: Context): RawLevel[] {
   return out;
 }
 
-/** Merges levels within `tol` of their neighbours into clusters, strongest source list first. */
+/**
+ * Merges levels into clusters no wider than `tol`: a level joins a cluster
+ * only if it is within `tol` of the cluster's first level. (Comparing with
+ * the last level instead lets a dense run of levels chain into one cluster
+ * spanning the whole chart.)
+ */
 export function clusterLevels(raw: RawLevel[], price: number, tol: number): (KeyLevel & { band: [number, number] })[] {
   const sorted = [...raw].sort((a, b) => a.price - b.price);
   const groups: RawLevel[][] = [];
   for (const r of sorted) {
     const g = groups[groups.length - 1];
-    if (g && r.price - g[g.length - 1].price <= tol) g.push(r); else groups.push([r]);
+    if (g && r.price - g[0].price <= tol) g.push(r); else groups.push([r]);
   }
   return groups.map((g) => {
     const w = g.reduce((s, r) => s + r.weight, 0);
@@ -122,9 +138,9 @@ export function tradeIdea(ctx: Context, armedDirections: Direction[]): TradeIdea
   const s = sign(bias);
   // Entry: the strongest cluster on the near side of the price, within reach (the one containing the price counts).
   const reach = MAX_ENTRY_ATR * atr;
-  // Never enter a long from a supply zone or a short from a demand zone: that zone is the other side's.
-  const otherSide = bias === 'long' ? 'supply zone' : 'demand zone';
-  const candidates = levels.filter((l) => !l.sources.some((src) => src.endsWith(otherSide)) && (bias === 'long'
+  // Never enter a long from a supply zone or a bearish gap (or a short from their mirrors): that level is the other side's.
+  const otherSide = bias === 'long' ? /supply zone$|bearish I?FVG$/ : /demand zone$|bullish I?FVG$/;
+  const candidates = levels.filter((l) => !l.sources.some((src) => otherSide.test(src)) && (bias === 'long'
     ? l.price <= price + tol && l.band[1] >= price - reach
     : l.price >= price - tol && l.band[0] <= price + reach));
   const entryLevel = candidates.sort((x, y) => y.strength - x.strength || Math.abs(x.distancePct) - Math.abs(y.distancePct))[0];

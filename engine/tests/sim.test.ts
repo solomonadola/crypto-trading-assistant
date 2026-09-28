@@ -142,7 +142,7 @@ describe('trade management', () => {
   const ctx = (price: number, over: Partial<Context> = {}): Context => ({
     symbol: 'SOLUSDT', t: u('2026-07-15T11:00Z'), config: cfg,
     analysis: { symbol: 'SOLUSDT', asOf: 0, structure: { '4h': null, '1h': null, '15m': null }, ema4h: { fast: 1, slow: 1, close: 1 },
-      long: { state: 'strong', emaAligned: true, tradable: true }, short: { state: 'reversed', emaAligned: false, tradable: false }, zones: [] },
+      long: { state: 'strong', emaAligned: true, tradable: true }, short: { state: 'reversed', emaAligned: false, tradable: false }, zones: [], fvgs: [], profiles: [], trendMeter: { '4h': { structure: null, supertrend: null, line: null }, '1h': { structure: null, supertrend: null, line: null }, '15m': { structure: null, supertrend: null, line: null } }, adx1h: null },
     h4: series([]), h1: series([]), m15: series(Array.from({ length: 30 }, (_, i) => bar(price, price + 0.1, price - 0.1, price, i * 900_000, 'SOLUSDT', '15m'))),
     price, atr1h: flat(30, 2), atr15m: flat(30, 0.5), ema1h: {}, ema15m20: flat(30, price), vwap15m: flat(30, price), rsi15m: flat(30, 55),
     rvol15m: flat(30, 1), adx1h: flat(30, 30), chop1h: flat(30, 40), bbw1h: flat(30, 0.02), pivots1h: [], pivots15m: [], pivots4h: [],

@@ -90,6 +90,21 @@ export const configSchema = z.object({
     max_zone_width_pct: pct,
   }).strict(),
 
+  fvg: z.object({
+    timeframes: z.array(timeframe).min(1),
+    min_size_atr: z.number().min(0),
+    lookback_candles: posInt,
+    max_per_tf: posInt,
+  }).strict(),
+
+  volume_profile: z.object({
+    bins: z.number().int().min(10).max(200),
+    value_area_pct: z.number().min(50).max(95),
+    windows: z.array(z.object({ name: z.string().min(1), tf: timeframe, candles: posInt }).strict()),
+  }).strict(),
+
+  supertrend: z.object({ atr_period: posInt, multiplier: positive }).strict(),
+
   pullback: z.object({
     ema_levels: z.array(posInt).min(1),
     fib_min: z.number().min(0).max(1),
