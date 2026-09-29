@@ -64,7 +64,7 @@ Optional, in `.env.local` locally or as environment variables on the host (see `
 | `ALLOWED_EMAILS` | unset (no sign-in) | Google accounts that may sign in. **Set this on AI Studio**, or anyone with the link can use the controls. |
 | `BACKUP_TARGET` | `firestore` in production, `file` in development | Where the trade log is backed up. |
 | `ENGINE_NAMESPACE` | `hosted` in production, `local` in development | Keeps a local copy's backup apart from the hosted one. |
-| `PORT` | 3000 | |
+| `PORT` | 3009 | |
 | `ENGINE_DB_PATH` | `data/engine/engine.db` | |
 | `ENGINE_CONFIG` | `engine/config/config.yaml` | |
 

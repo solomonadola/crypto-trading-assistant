@@ -181,7 +181,7 @@ export function tryConfirm(ctx: Context, a: Armed): Confirmation | null {
   let liquiditySweep = false;
   if (a.zone) {
     for (let i = 0; i <= n; i++) {
-      if (m.candles[i].closeTime <= a.armedAt - 3_600_000) continue;
+      if (m.candles[i].closeTime <= a.armedAt - fourCandles(ctx)) continue;
       if (a.direction === 'long' ? m.low[i] < a.zone.low && m.close[i] >= a.zone.low : m.high[i] > a.zone.high && m.close[i] <= a.zone.high) liquiditySweep = true;
     }
   }
@@ -205,12 +205,18 @@ export interface TradePlan {
  * confirming candle with a 15m-ATR buffer. Target at the exit mode's first
  * objective or the nearest opposing level, whichever is closer.
  */
+/** Four trigger candles (an hour on 15m), measured from the candles themselves. */
+function fourCandles(ctx: Context): number {
+  const c = ctx.m15.candles[ctx.m15.candles.length - 1];
+  return 4 * (c.closeTime - c.openTime);
+}
+
 export function planTrade(ctx: Context, a: Armed): TradePlan {
   const cfg = ctx.config;
   const s = sign(a.direction);
   const entry = ctx.price;
   const pullbackExtreme = () => {
-    const since = ctx.m15.candles.filter((c) => c.closeTime > a.armedAt - 3_600_000);
+    const since = ctx.m15.candles.filter((c) => c.closeTime > a.armedAt - fourCandles(ctx));
     return a.direction === 'long' ? Math.min(...since.map((c) => c.low)) : Math.max(...since.map((c) => c.high));
   };
   let anchor: number;

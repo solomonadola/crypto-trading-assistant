@@ -32,6 +32,11 @@ const DIRECTIONS: Direction[] = ['long', 'short'];
 const WINDOW_CLOSED = new Set(['outside_sessions', 'session_ending', 'weekend']);
 const FUNDING_EVERY = 8 * 3_600_000;
 const DAY = 86_400_000;
+
+interface Checked {
+  ctx: Context; a: Armed; conf: Confirmation; filters: ReturnType<typeof runFilters>;
+  plan: TradePlan; score: ReturnType<typeof scoreSignal>; failures: string[];
+}
 /** How long a confirmation shows on the trade idea after it happened (longer while in the trade). */
 const CONFIRMED_SHOWN_MS = 3_600_000;
 
@@ -82,6 +87,8 @@ export class Engine {
   private readonly portfolio: Portfolio;
   private readonly market: MarketBook;
   private readonly armed = new Map<string, Armed>();
+  /** Signals that passed every check at this 15m close, waiting to be ranked. */
+  private clean: Checked[] = [];
   /** The latest confirmation per symbol|direction, for the trade ideas' stage. */
   private readonly confirmed = new Map<string, { direction: Direction; time: number; taken: boolean; reason: string | null }>();
   private universe = new Set<string>();
@@ -316,6 +323,10 @@ export class Engine {
       const setup = this.deps.research?.setup ?? 'pullback';
       if (inUniverse) out.push(...(setup === 'pullback' ? this.evaluate(ctx) : this.evaluateAlternative(ctx, setup)));
     }
+    // Clean signals from this close, best first: highest score, then reward:risk.
+    const clean = this.clean.sort((x, y) => y.score.total - x.score.total || y.plan.rewardRisk - x.plan.rewardRisk);
+    this.clean = [];
+    for (const c of clean) out.push(...this.finish(c));
     return out;
   }
 
@@ -556,6 +567,18 @@ export class Engine {
       ...(plan.rewardRisk >= cfg.exits.min_rr ? [] : ['rr_too_low']),
       ...(score.total >= cfg.scoring.min_score ? [] : ['score_too_low']),
     ];
+    const checked: Checked = { ctx, a, conf, filters, plan, score, failures };
+    // A clean signal waits for the other coins closing now: the best are sized first when slots are short.
+    if (!failures.length && !this.deps.research) {
+      this.clean.push(checked);
+      return [];
+    }
+    return this.finish(checked);
+  }
+
+  /** Risk, the signal record, the shadow trade and the order for one checked signal. */
+  private finish({ ctx, a, conf, filters, plan, score, failures }: Checked): TradeEvent[] {
+    const cfg = this.cfg;
     const lastHour = this.market.recent(a.symbol, '1h', 1)[0];
     const risk = failures.length || this.deps.research ? null : decideEntry({
       config: cfg, t: ctx.t, symbol: a.symbol, side: a.direction, entry: plan.entry, stop: plan.stop,

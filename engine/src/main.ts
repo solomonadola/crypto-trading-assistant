@@ -372,6 +372,16 @@ app.get('/api/market', (_req, res) => {
       trend: a ? { '4h': a.structure['4h']?.trend ?? null, '1h': a.structure['1h']?.trend ?? null, '15m': a.structure['15m']?.trend ?? null } : null,
       zones: a?.zones.length ?? 0,
       armed: engine.armedSetups().filter((x) => x.symbol === symbol).map((x) => x.direction),
+      setup: (() => {
+        const idea = engine.tradeIdea(symbol);
+        if (!idea) return null;
+        const decided = idea.checklist.filter((c) => c.ok !== null);
+        return {
+          bias: idea.bias, stage: idea.plan?.status ?? null, skipped: !!idea.plan?.confirmation && !idea.plan.confirmation.taken,
+          rr: idea.plan?.targets[0]?.r ?? null, meetsRules: idea.plan?.meetsRules ?? false,
+          checksMet: decided.filter((c) => c.ok).length, checksDecided: decided.length, quality: idea.quality,
+        };
+      })(),
     };
   }));
 });
@@ -433,7 +443,7 @@ if (isProduction) {
   app.use(vite.middlewares);
 }
 
-const port = Number(process.env.PORT || 3000);
+const port = Number(process.env.PORT || 3009);
 const server = app.listen(port, '0.0.0.0', () => {
   console.log(`[engine] v${ENGINE_VERSION} config ${hash}, database ${dbPath}, backup ${cloud ? `firestore (${namespace})` : 'file only'}, sign-in ${auth.allowed.length ? 'on' : 'off'}; open http://localhost:${port}`);
   void rescan().then(() => feed.start());

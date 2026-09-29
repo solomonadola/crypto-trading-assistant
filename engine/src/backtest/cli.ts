@@ -27,7 +27,19 @@ const holdOn = (c: EngineConfig) => {
   c.exits.time_stop_hours = 1_000;
   c.exits.early_exit.stagnation.candles = 1_000;
 };
-type Variant = { label: string; patch: (c: EngineConfig) => void; setup?: SetupName; params?: Parameters<typeof runResearch>[0]['params'] };
+/**
+ * Slow mode: the same rules on candles 4x longer (1h trigger, 4h zones, daily
+ * bias, 15m management). Times written in hours scale with it; the session
+ * rules do not (they are clock times).
+ */
+const slower = (c: EngineConfig) => {
+  c.pullback.armed_expiry_hours *= 4;
+  c.exits.time_stop_hours *= 4;
+  c.risk.cooldown_after_loss_min *= 4;
+  c.sim.entry_timeout_min = 20;                  // the next 15m candle fills the entry
+  c.sessions.no_entry_before_end_min = 120;      // an hour-candle entry needs time before the session closes
+};
+type Variant = { label: string; patch: (c: EngineConfig) => void; slow?: boolean; setup?: SetupName; params?: Parameters<typeof runResearch>[0]['params'] };
 const VARIANTS: Record<string, Variant> = {
   current: { label: 'As configured (stop beyond 15m swing, half at first target, ladder)', patch: () => {} },
   stop_setup: { label: 'Stop beyond the setup (zone / pullback extreme, 1h ATR buffer)', patch: (c) => { c.exits.stop_anchor = 'setup'; } },
@@ -41,6 +53,11 @@ const VARIANTS: Record<string, Variant> = {
   momentum_rv15: { label: 'Momentum: strong trend, 4h high broken on 1.5x volume, 2R', setup: 'momentum', params: { lookback: 16, minRvol: 1.5, targetR: 2 }, patch: (c) => { c.exits.mode = 'fixed'; } },
   orb_30_hold: { label: 'Opening-range breakout: 30 min range, far-side stop, 2R, no early exits', setup: 'orb', params: { rangeMinutes: 30, stopAt: 'opposite', targetR: 2 }, patch: holdOn },
   momentum_rv15_hold: { label: 'Momentum: 1.5x volume, 2R, no early exits', setup: 'momentum', params: { lookback: 16, minRvol: 1.5, targetR: 2 }, patch: holdOn },
+  slow_pullback: { label: 'Slow: pullback on 1h trigger, 4h zones, daily bias', slow: true, patch: slower },
+  slow_pullback_fixed: { label: 'Slow: pullback, all out at the first target', slow: true, patch: (c) => { slower(c); c.exits.mode = 'fixed'; } },
+  slow_pullback_hold: { label: 'Slow: pullback, held past the session close (breaks the session rule)', slow: true, patch: (c) => { slower(c); c.sessions.exit_at_session_end = false; } },
+  slow_momentum: { label: 'Slow: momentum on 1h, 16h high broken on 1.5x volume, 2R', slow: true, setup: 'momentum', params: { lookback: 16, minRvol: 1.5, targetR: 2 }, patch: (c) => { slower(c); c.exits.mode = 'fixed'; } },
+  slow_meanrev: { label: 'Slow: mean reversion on 1h, 2.0 band', slow: true, setup: 'meanrev', params: { bbPeriod: 20, bbStd: 2, maxAdx: 20, minR: 0.8 }, patch: (c) => { slower(c); c.exits.mode = 'fixed'; } },
   meanrev_bb2: { label: 'Mean reversion: wick outside the 2.0 band, back to the middle', setup: 'meanrev', params: { bbPeriod: 20, bbStd: 2, maxAdx: 20, minR: 0.8 }, patch: (c) => { c.exits.mode = 'fixed'; } },
   meanrev_bb25: { label: 'Mean reversion: wick outside the 2.5 band, back to the middle', setup: 'meanrev', params: { bbPeriod: 20, bbStd: 2.5, maxAdx: 20, minR: 0.8 }, patch: (c) => { c.exits.mode = 'fixed'; } },
 };
@@ -69,7 +86,7 @@ for (const v of wanted) {
   def.patch(config);
   console.log(`\n[${v}] ${def.label}: replaying ${new Date(FROM).toISOString().slice(0, 10)} to ${new Date(TO).toISOString().slice(0, 10)}...`);
   const run = runResearch({
-    dbPath: DB, config, label: v, from: FROM, to: TO, setup: def.setup, params: def.params,
+    dbPath: DB, config, label: v, from: FROM, to: TO, setup: def.setup, params: def.params, slow: def.slow,
     onProgress: (t, n) => { if (new Date(t).getUTCDate() === 1) console.log(`  ${new Date(t).toISOString().slice(0, 10)}: ${n} research trades`); },
   });
   console.log(`  ${run.trades.length} research trades from ${run.confirmed} confirmed setups in ${run.seconds}s`);

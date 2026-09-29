@@ -192,6 +192,17 @@ describe('checklist and levels to wait for', () => {
     expect(Object.fromEntries(w.map((x) => [x.kind, x.price]))).toEqual({ range_bottom: 96, range_top: 104 });
   });
 
+  it('quality: checklist, reward:risk, stage and the rules; confirmed ranks above waiting', () => {
+    const c = longCtx();
+    const waiting = tradeIdea(c, { armed: [], entryBlock: null });
+    c.price = 97;
+    const confirmed = tradeIdea(c, { armed: [], entryBlock: null, confirmed: [{ direction: 'long', time: c.t, taken: true, reason: null }] });
+    const skipped = tradeIdea(c, { armed: [], entryBlock: null, confirmed: [{ direction: 'long', time: c.t, taken: false, reason: 'filter_chop' }] });
+    for (const i of [waiting, confirmed, skipped]) { expect(i.quality).toBeGreaterThanOrEqual(0); expect(i.quality).toBeLessThanOrEqual(100); }
+    expect(confirmed.quality).toBeGreaterThan(skipped.quality);
+    expect(tradeIdea(ctx({}, 'none', 'none'), { armed: [], entryBlock: null }).quality).toBeLessThanOrEqual(50);   // no plan: checklist only
+  });
+
   it('if a level breaks: the next key levels beyond it, nearest first', () => {
     const c = ctx({ pivots1h: [pivot('low', 20, 92), pivot('low', 30, 96), pivot('high', 40, 104), pivot('high', 45, 110)] }, 'none', 'none');
     const w = tradeIdea(c, { armed: [], entryBlock: null }).watch;

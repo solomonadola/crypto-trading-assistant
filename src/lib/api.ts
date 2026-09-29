@@ -38,6 +38,10 @@ export interface MarketRow {
   trend: Record<'4h' | '1h' | '15m', string | null> | null;
   zones: number;
   armed: string[];
+  setup: null | {
+    bias: 'long' | 'short' | 'none'; stage: string | null; skipped: boolean;
+    rr: number | null; meetsRules: boolean; checksMet: number; checksDecided: number; quality: number;
+  };
 }
 
 export interface Zone { id: string; type: 'demand' | 'supply'; low: number; high: number; status: string; touches: number; createdAt: number }

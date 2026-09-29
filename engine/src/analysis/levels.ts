@@ -124,10 +124,23 @@ export interface IdeaInputs {
 
 export function tradeIdea(ctx: Context, inputs: IdeaInputs): TradeIdea {
   const idea = planIdea(ctx, inputs);
-  return { ...idea, checklist: checklist(ctx, idea, inputs.entryBlock), watch: watchLevels(idea) };
+  const list = checklist(ctx, idea, inputs.entryBlock);
+  return { ...idea, checklist: list, watch: watchLevels(idea), quality: quality(idea, list) };
 }
 
-type Planned = Omit<TradeIdea, 'checklist' | 'watch'>;
+type Planned = Omit<TradeIdea, 'checklist' | 'watch' | 'quality'>;
+
+const STAGE_POINTS: Record<NonNullable<TradeIdea['plan']>['status'], number> = { in_trade: 15, confirmed: 15, armed: 15, in_zone: 12, wait: 5, no_level: 0 };
+
+/** See TradeIdea.quality. Without a trend there is no plan, so only the checklist counts. */
+export function quality(idea: Planned, list: ChecklistItem[]): number {
+  const decided = list.filter((c) => c.ok !== null);
+  const checks = decided.length ? decided.filter((c) => c.ok).length / decided.length : 0;
+  const plan = idea.plan;
+  const r = plan?.targets[0]?.r ?? 0;
+  const stage = plan ? (plan.status === 'confirmed' && plan.confirmation && !plan.confirmation.taken ? 5 : STAGE_POINTS[plan.status]) : 0;
+  return Math.round(50 * checks + 25 * Math.min(Math.max(r, 0), 3) / 3 + stage + (plan?.meetsRules ? 10 : 0));
+}
 
 function planIdea(ctx: Context, inputs: IdeaInputs): Planned {
   const cfg = ctx.config;

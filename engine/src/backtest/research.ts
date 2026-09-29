@@ -13,7 +13,7 @@ import { Engine } from '../core/engine';
 import { atr } from '../analysis/indicators';
 import { prefilter, rank } from '../scanner';
 import type { EngineConfig } from '../config';
-import type { Candle, SignalRecord } from '../../../shared/types';
+import { compareCandles, type Candle, type SignalRecord, type Timeframe } from '../../../shared/types';
 
 export interface ResearchTrade {
   symbol: string;
@@ -55,6 +55,29 @@ export interface ResearchOptions {
   from: number;
   to: number;
   onProgress?: (t: number, trades: number) => void;
+  /**
+   * 4x slower: each timeframe the engine expects is fed the next one up
+   * (15m for 5m, 1h for 15m, 4h for 1h, daily for 4h, built from 4h). Times
+   * stay real, so sessions and funding are unchanged.
+   */
+  slow?: boolean;
+}
+
+const SLOW: Partial<Record<Timeframe, Timeframe | '1d'>> = { '5m': '15m', '15m': '1h', '1h': '4h', '4h': '1d' };
+
+/** Daily candles from complete UTC days of 4h candles. */
+export function daily(h4: Candle[]): Candle[] {
+  const out: Candle[] = [];
+  for (let i = 0; i + 6 <= h4.length; i++) {
+    const g = h4.slice(i, i + 6);
+    if (g[0].openTime % DAY !== 0 || g[5].closeTime !== g[0].openTime + DAY) continue;
+    out.push({
+      ...g[0], closeTime: g[5].closeTime, close: g[5].close, high: Math.max(...g.map((c) => c.high)), low: Math.min(...g.map((c) => c.low)),
+      volume: g.reduce((a, c) => a + c.volume, 0), quoteVolume: g.reduce((a, c) => a + c.quoteVolume, 0), trades: g.reduce((a, c) => a + c.trades, 0),
+    });
+    i += 5;
+  }
+  return out;
 }
 
 const HOUR = 3_600_000;
@@ -72,10 +95,34 @@ export function runResearch(o: ResearchOptions): ResearchRun {
   // Only coins that matter are fed (the universe, BTC, and coins with open positions); a coin gets its
   // recent history when it joins, as the live feed does. Feeding all of them would only slow the replay.
   const fed = new Set<string>();
+  // The candles the engine sees as `tf`: the store's own, or in slow mode the next timeframe up, relabelled.
+  const load = (s: string, tf: Timeframe, n: number, t: number): Candle[] => {
+    if (!o.slow) return store.latest(s, tf, n, t);
+    const src = SLOW[tf];
+    if (!src) throw new Error(`slow mode has no source for ${tf}`);
+    const list = src === '1d' ? daily(store.latest(s, '4h', 6 * n + 6, t)).slice(-n) : store.latest(s, src, n, t);
+    return list.map((c) => ({ ...c, tf }));
+  };
+  const replayed = (symbols: string[], from: number, to: number): Candle[][] => {
+    if (!o.slow) return [...replayCandles(store, { symbols, timeframes: o.config.feed.timeframes, from, to, chunkMs: HOUR })];
+    const label = new Map(o.config.feed.timeframes.map((tf) => [SLOW[tf], tf]));
+    const src = [...label.keys()].filter((tf): tf is Timeframe => tf !== undefined && tf !== '1d');
+    const out: Candle[] = [];
+    for (const batch of replayCandles(store, { symbols, timeframes: src, from, to, chunkMs: HOUR })) {
+      for (const c of batch) {
+        out.push({ ...c, tf: label.get(c.tf)! });
+        if (c.tf === '4h' && label.has('1d') && c.closeTime % DAY === 0) {
+          const d = daily(store.latest(c.symbol, '4h', 6, c.closeTime));
+          if (d.length) out.push({ ...d[0], tf: label.get('1d')! });
+        }
+      }
+    }
+    return out.length ? [out.sort(compareCandles)] : [];
+  };
   const feed = (s: string, t: number) => {
     if (fed.has(s)) return;
     fed.add(s);
-    for (const tf of o.config.feed.timeframes) engine.seedHistory(store.latest(s, tf, o.config.feed.history[tf] ?? 500, t));
+    for (const tf of o.config.feed.timeframes) engine.seedHistory(load(s, tf, o.config.feed.history[tf] ?? 500, t));
   };
   feed('BTCUSDT', o.from);
 
@@ -106,7 +153,7 @@ export function runResearch(o: ResearchOptions): ResearchRun {
     // Funding charged at 00/08/16 UTC uses the rate for that time.
     const next = hour + HOUR;
     if (next % (8 * HOUR) === 0) for (const f of fundingAt.all(next) as { symbol: string; rate: number }[]) engine.onFunding(f.symbol, f.rate);
-    for (const batch of replayCandles(store, { symbols: [...fed], timeframes: o.config.feed.timeframes, from: Math.max(hour, o.from) + 1, to: next + 1, chunkMs: HOUR })) {
+    for (const batch of replayed([...fed], Math.max(hour, o.from) + 1, next + 1)) {
       engine.onCandles(batch as Candle[]);
     }
     for (const s of engine.takeSignals()) if (s.status === 'taken' || s.status === 'filtered') confirmed.set(String(s.payload.armedId), s);

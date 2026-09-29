@@ -223,6 +223,12 @@ export interface TradeIdea {
   checklist: ChecklistItem[];
   /** The prices to wait for, nearest first. */
   watch: WatchLevel[];
+  /**
+   * Setup quality, 0 to 100: share of the checklist met (50), reward:risk to
+   * the first target up to 3R (25), stage (15), fits the stop and R rules (10).
+   * A ranking of how close the coin is to a clean setup, not a win probability.
+   */
+  quality: number;
   plan: null | {
     direction: Direction;
     /**

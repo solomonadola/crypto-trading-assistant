@@ -74,12 +74,15 @@ export function buildContext(book: MarketBook, symbol: string, t: number, config
   const emaLevels = [...new Set([20, 50, ...config.pullback.ema_levels])];
   // BTC over the hour to `t` on the exits timeframe: the candle closing at t and the one closing an hour earlier
   // (newer candles may already be stored when this is evaluated between 15m closes).
+  // "An hour" is four trigger candles, measured from the candles themselves (it scales in the backtest's slow mode).
   const exitTf = config.timeframes.exits;
-  const perHour = 3_600_000 / TIMEFRAME_MS[exitTf];
+  const lastTrigger = m15.candles[m15.candles.length - 1];
+  const hour = 4 * (lastTrigger.closeTime - lastTrigger.openTime);
   const btc = book.recent('BTCUSDT', exitTf);
   let atT = -1;
   for (let i = btc.length - 1; i >= 0; i--) if (btc[i].closeTime === t) { atT = i; break; }
-  const btcChange1hPct = atT >= perHour && btc[atT - perHour].closeTime === t - 3_600_000
+  const perHour = atT >= 0 ? Math.round(hour / (btc[atT].closeTime - btc[atT].openTime)) : 0;
+  const btcChange1hPct = atT >= perHour && perHour > 0 && btc[atT - perHour].closeTime === t - hour
     ? (btc[atT].close / btc[atT - perHour].close - 1) * 100
     : null;
 

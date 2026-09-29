@@ -4,19 +4,42 @@ import { usePoll, type Armed, type MarketRow, type Scanner } from '../lib/api';
 import { coin, compact, dateTime, duration, hhmm, pct, price, words } from '../lib/format';
 import { Badge, Card, Empty, SideBadge, StateBadge, Table, TrendChip, td } from '../components/ui';
 
-type SortKey = 'rank' | 'change' | 'atr' | 'volume';
+type SortKey = 'quality' | 'rr' | 'checks' | 'rank' | 'change' | 'atr' | 'volume';
+
+const STAGE: Record<string, { tone: string; label: string }> = {
+  in_trade: { tone: 'good', label: 'in trade' },
+  confirmed: { tone: 'good', label: 'confirmed' },
+  armed: { tone: 'london', label: 'armed' },
+  in_zone: { tone: 'newyork', label: 'retest' },
+  wait: { tone: 'muted', label: 'wait retest' },
+  no_level: { tone: 'warning', label: 'no level' },
+};
+
+function Quality({ q }: { q: number }) {
+  const color = q >= 70 ? 'var(--color-good)' : q >= 50 ? 'var(--color-warning)' : 'var(--color-ink-3)';
+  return (
+    <span className="flex items-center gap-2" title={`setup quality ${q}/100`}>
+      <span className="h-2 w-16 rounded bg-card-2"><span className="block h-2 rounded" style={{ width: `${q}%`, background: color }} /></span>
+      <span className="w-6 text-right tabular font-semibold">{q}</span>
+    </span>
+  );
+}
 
 export function Market({ go }: { go: (page: string, symbol?: string) => void }) {
   const { data: rows } = usePoll<MarketRow[]>('/api/market', 15_000);
   const { data: scanner } = usePoll<Scanner>('/api/scanner', 60_000);
   const { data: armed } = usePoll<Armed[]>('/api/armed', 15_000);
   const [q, setQ] = useState('');
-  const [sort, setSort] = useState<SortKey>('rank');
+  const [sort, setSort] = useState<SortKey>('quality');
 
   const shown = useMemo(() => {
     const list = (rows ?? []).filter((r) => r.symbol.includes(q.toUpperCase()));
     const by: Record<SortKey, (r: MarketRow) => number> = {
-      rank: () => 0, change: (r) => -(r.changePct ?? 0), atr: (r) => -(r.atrPct1h ?? 0), volume: (r) => -(r.quoteVolume ?? 0),
+      rank: () => 0,
+      quality: (r) => -(r.setup?.quality ?? -1),
+      rr: (r) => -(r.setup?.rr ?? -99),
+      checks: (r) => -(r.setup && r.setup.checksDecided ? r.setup.checksMet / r.setup.checksDecided : -1),
+      change: (r) => -(r.changePct ?? 0), atr: (r) => -(r.atrPct1h ?? 0), volume: (r) => -(r.quoteVolume ?? 0),
     };
     return sort === 'rank' ? list : [...list].sort((a, b) => by[sort](a) - by[sort](b));
   }, [rows, q, sort]);
@@ -55,16 +78,29 @@ export function Market({ go }: { go: (page: string, symbol?: string) => void }) 
               <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="find coin" className="w-24 bg-transparent outline-none placeholder:text-ink-3" />
             </label>
             <select value={sort} onChange={(e) => setSort(e.target.value as SortKey)} className="rounded-lg border border-line bg-card-2 px-2 py-1 text-xs">
-              <option value="rank">scanner rank</option><option value="change">24h change</option><option value="atr">volatility</option><option value="volume">volume</option>
+              <option value="quality">best setups</option><option value="rr">reward:risk</option><option value="checks">checks met</option><option value="rank">scanner rank</option><option value="change">24h change</option><option value="atr">volatility</option><option value="volume">volume</option>
             </select>
           </div>
         }
       >
         {!shown.length ? <Empty>The scanner has not picked coins yet.</Empty> : (
-          <Table head={['Coin', 'Price', '24h', '1h ATR', 'Volume', 'Trend 4h / 1h / 15m', 'Long', 'Short', 'Zones', '']}>
+          <Table head={['Coin', 'Quality', 'Setup', 'R:R', 'Checks', 'Price', '24h', '1h ATR', 'Volume', 'Trend 4h / 1h / 15m', 'Long', 'Short', 'Zones']}>
             {shown.map((r) => (
               <tr key={r.symbol} className="cursor-pointer hover:bg-card-2/60" onClick={() => go('chart', r.symbol)}>
                 <td className={`${td} font-semibold`}>{coin(r.symbol)}</td>
+                <td className={td}>{r.setup ? <Quality q={r.setup.quality} /> : <span className="text-ink-3">–</span>}</td>
+                <td className={td}>
+                  {r.setup && r.setup.bias !== 'none' ? (
+                    <span className="flex items-center gap-1">
+                      <SideBadge side={r.setup.bias} />
+                      {r.setup.stage && (r.setup.skipped ? <Badge tone="warning">skipped</Badge> : <Badge tone={STAGE[r.setup.stage]?.tone ?? 'muted'}>{STAGE[r.setup.stage]?.label ?? r.setup.stage}</Badge>)}
+                    </span>
+                  ) : <span className="text-xs text-ink-3">no trend</span>}
+                </td>
+                <td className={`${td} tabular font-semibold ${r.setup?.rr == null ? 'text-ink-3' : r.setup.rr >= 2 ? 'text-good' : r.setup.rr >= 1 ? 'text-ink' : 'text-warning'}`} title={r.setup?.meetsRules ? 'fits the stop and reward:risk rules' : 'outside the stop or reward:risk rules'}>
+                  {r.setup?.rr != null ? `${r.setup.rr.toFixed(2)}R` : '–'}{r.setup?.meetsRules && <span className="ml-1 text-good">✓</span>}
+                </td>
+                <td className={`${td} tabular text-ink-2`}>{r.setup ? `${r.setup.checksMet}/${r.setup.checksDecided}` : '–'}</td>
                 <td className={`${td} tabular`}>{price(r.price)}</td>
                 <td className={`${td} tabular ${(r.changePct ?? 0) >= 0 ? 'text-good' : 'text-critical'}`}>{(r.changePct ?? 0) >= 0 ? '▲' : '▼'} {pct(r.changePct, 1, true)}</td>
                 <td className={`${td} tabular text-ink-2`}>{pct(r.atrPct1h, 2)}</td>
@@ -73,11 +109,14 @@ export function Market({ go }: { go: (page: string, symbol?: string) => void }) 
                 <td className={td}><StateBadge state={r.long?.state} tradable={r.long?.tradable} /></td>
                 <td className={td}><StateBadge state={r.short?.state} tradable={r.short?.tradable} /></td>
                 <td className={`${td} tabular text-ink-2`}>{r.zones}</td>
-                <td className={td}>{r.armed.map((d) => <Badge key={d} tone="london">armed {d}</Badge>)}</td>
               </tr>
             ))}
           </Table>
         )}
+        <p className="mt-3 text-xs text-ink-3">
+          Quality (0–100) ranks how close a coin is to a clean setup: share of the checklist met, reward:risk to the first target, how far the setup has got, and whether it fits the stop and R rules.
+          It is not a win probability: the backtests have not found checks that predict winners yet.
+        </p>
         {scanner?.lastScan && (
           <p className="mt-3 text-xs text-ink-3">
             Last scan {dateTime(scanner.lastScan.time)} UTC. Left out: {Object.entries(scanner.lastScan.dropped).map(([k, v]) => `${words(k)} ${v}`).join(' · ')}.
