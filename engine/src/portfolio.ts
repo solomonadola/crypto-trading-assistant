@@ -28,7 +28,13 @@ export interface EntryFill {
   /** The 15m level the confirmation closed through; a close back beyond it early is a failed breakout. */
   chochLevel?: number | null;
   signalId?: string | null;
+  /** Which setup opened it (default the pullback). Trend-state exits apply only to trend setups. */
+  setup?: SetupName;
 }
+
+export type SetupName = 'pullback' | 'orb' | 'momentum' | 'meanrev';
+/** Setups that ride a trend: exits on the trend state turning apply to them. */
+export const TREND_SETUPS: SetupName[] = ['pullback', 'momentum'];
 
 /** Payload of an `order_placed` event asking for a position to be closed at market. */
 export interface CloseOrder {
@@ -49,6 +55,7 @@ export interface OpenOrder {
   chochLevel: number | null;
   signalId: string | null;
   refPrice: number;
+  setup?: SetupName;
 }
 
 export interface Position {
@@ -67,6 +74,7 @@ export interface Position {
   liqPrice: number | null;
   chochLevel: number | null;
   signalId: string | null;
+  setup: SetupName;
   /** Index of the highest ladder step reached; -1 before the first. */
   ladderStep: number;
   partialDone: boolean;
@@ -147,7 +155,7 @@ export class Portfolio {
         this.open.set(id, {
           id, symbol: e.symbol, side: f.side, qty: f.qty, initialQty: f.qty, entryPrice: f.price,
           stop: f.stop, initialStop: f.stop, target: f.target ?? null, openedAt: e.time, session: f.session,
-          leverage: f.leverage ?? 1, liqPrice: f.liqPrice ?? null, chochLevel: f.chochLevel ?? null, signalId: f.signalId ?? null,
+          leverage: f.leverage ?? 1, liqPrice: f.liqPrice ?? null, chochLevel: f.chochLevel ?? null, signalId: f.signalId ?? null, setup: f.setup ?? 'pullback',
           ladderStep: -1, partialDone: false, fees: fee, funding: 0, realized: 0, pendingClose: null,
         });
         const key = `${e.symbol}|${day(e.time)}`;

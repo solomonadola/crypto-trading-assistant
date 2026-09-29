@@ -48,6 +48,9 @@ export interface ResearchRun {
 export interface ResearchOptions {
   dbPath: string;
   config: EngineConfig;
+  /** The setup to research (default: the pullback), with its parameters. */
+  setup?: NonNullable<ConstructorParameters<typeof Engine>[0]['research']>['setup'];
+  params?: NonNullable<ConstructorParameters<typeof Engine>[0]['research']>['params'];
   label: string;
   from: number;
   to: number;
@@ -65,7 +68,7 @@ export function runResearch(o: ResearchOptions): ResearchRun {
   const symbols: string[] = JSON.parse((meta.get('symbols') as { value: string }).value);
   const fundingAt = db.prepare('SELECT symbol, rate FROM funding WHERE time = ?');
 
-  const engine = new Engine({ config: o.config, configHash: 'backtest', engineVersion: 'backtest', research: { notional: 1000 }, analysisExtras: false });
+  const engine = new Engine({ config: o.config, configHash: 'backtest', engineVersion: 'backtest', research: { notional: 1000, setup: o.setup, params: o.params }, analysisExtras: false });
   // Only coins that matter are fed (the universe, BTC, and coins with open positions); a coin gets its
   // recent history when it joins, as the live feed does. Feeding all of them would only slow the replay.
   const fed = new Set<string>();

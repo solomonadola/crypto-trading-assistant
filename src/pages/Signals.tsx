@@ -1,7 +1,9 @@
 import { Fragment, useState } from 'react';
 import { CheckCircle2, ChevronDown, ChevronRight, Radio, XCircle } from 'lucide-react';
 import { usePoll, type SignalRecord } from '../lib/api';
-import { coin, dateTime, price, words } from '../lib/format';
+import { coin, dateTime, pct, price, words } from '../lib/format';
+import type { TradeIdea } from '../../shared/types';
+import { IfBroken } from './ChartPage';
 import { Badge, Card, Empty, SessionBadge, SideBadge, Table, td } from '../components/ui';
 import { StatusBadge } from './Overview';
 
@@ -10,14 +12,86 @@ const FILTERS = ['all', 'taken', 'filtered', 'armed', 'expired'] as const;
 interface Summary { status: string; reason: string | null; count: number }
 interface FilterResult { name: string; pass: boolean; detail: Record<string, unknown> }
 
+interface Plan { entry: number; stop: number; target: number; rewardRisk: number; stopDistancePct: number; targetSource: string }
+
+/** One setup from arming to its outcome: the engine records "armed", then "taken", "filtered" or "expired" for it. */
+interface Setup {
+  key: string; symbol: string; direction: 'long' | 'short';
+  records: SignalRecord[];      // oldest first
+  last: SignalRecord;
+  plan: Plan | null;
+  estimate: boolean;            // the plan is the estimate made when it armed
+  score: number | null;
+}
+
+function toSetups(signals: SignalRecord[]): Setup[] {
+  const by = new Map<string, SignalRecord[]>();
+  for (const s of signals) {
+    const key = String((s.payload as Record<string, unknown>).armedId ?? `id${s.id}`);
+    by.set(key, [...(by.get(key) ?? []), s]);
+  }
+  return [...by.entries()].map(([key, rs]) => {
+    const records = [...rs].sort((a, b) => a.time - b.time || (a.id ?? 0) - (b.id ?? 0));
+    const last = records[records.length - 1];
+    const confirmed = records.find((r) => r.status === 'taken' || r.status === 'filtered');
+    const p = (confirmed?.payload ?? {}) as Record<string, any>;
+    const armed = records.find((r) => r.status === 'armed')?.payload as Record<string, any> | undefined;
+    const plan = (p.plan ?? armed?.planEstimate ?? null) as Plan | null;
+    return { key, symbol: last.symbol, direction: last.direction, records, last, plan, estimate: !p.plan && !!plan, score: p.score?.total ?? null };
+  }).sort((a, b) => b.last.time - a.last.time);
+}
+
+const STAGE: Record<string, { tone: string; label: string }> = {
+  armed: { tone: 'london', label: 'waiting for confirmation' },
+  taken: { tone: 'good', label: 'confirmed · taken' },
+  filtered: { tone: 'warning', label: 'confirmed · skipped' },
+  expired: { tone: 'muted', label: 'expired' },
+};
+
+/** Why it is at this stage: the failed rule or expiry reason, else the factors that armed it. */
+function reasonOf(s: Setup): string {
+  if (s.last.reason) return words(s.last.reason);
+  const armed = s.records.find((r) => r.status === 'armed')?.payload as Record<string, any> | undefined;
+  const factors = ((armed?.factors ?? (s.last.payload as Record<string, any>).factors ?? []) as { name: string }[]).map((f) => words(f.name)).join(' + ');
+  return s.last.status === 'taken' ? `passed all checks${factors ? ` · ${factors}` : ''}` : factors;
+}
+
+function Reason({ s }: { s: Setup }) {
+  const tone = s.last.status === 'filtered' ? 'text-warning' : s.last.status === 'taken' ? 'text-good' : 'text-ink-2';
+  return <td className={`${td} whitespace-normal text-xs ${tone}`}>{reasonOf(s)}</td>;
+}
+
+function Stage({ s }: { s: Setup }) {
+  const st = STAGE[s.last.status] ?? { tone: 'muted', label: s.last.status };
+  return <Badge tone={st.tone}>{st.label}</Badge>;
+}
+
+function PlanCells({ s }: { s: Setup }) {
+  const est = s.estimate ? 'italic text-ink-3' : '';
+  return (
+    <>
+      <td className={`${td} tabular`}>{s.score ?? <span className="text-ink-3" title="scored at the confirmation close">–</span>}</td>
+      <td className={`${td} tabular ${est}`} title={s.estimate ? 'estimate made when it armed; the real plan is set at confirmation' : undefined}>{s.plan ? price(s.plan.entry) : ''}</td>
+      <td className={`${td} tabular text-critical ${s.estimate ? 'italic' : ''}`}>{s.plan ? <>{price(s.plan.stop)} <span className="text-xs text-ink-3">{s.plan.stopDistancePct.toFixed(2)}%</span></> : ''}</td>
+      <td className={`${td} tabular text-good ${s.estimate ? 'italic' : ''}`}>{s.plan ? price(s.plan.target) : ''}</td>
+      <td className={`${td} tabular font-semibold ${est}`}>{s.plan ? `${s.plan.rewardRisk.toFixed(2)}R` : ''}{s.estimate && <span className="ml-1 text-[10px] font-normal">est.</span>}</td>
+    </>
+  );
+}
+
 export function Signals({ go }: { go: (page: string, symbol?: string) => void }) {
   const [status, setStatus] = useState<(typeof FILTERS)[number]>('all');
-  const [open, setOpen] = useState<number | null>(null);
-  const { data: signals } = usePoll<SignalRecord[]>(`/api/signals?limit=300${status === 'all' ? '' : `&status=${status}`}`, 15_000);
+  const [open, setOpen] = useState<string | null>(null);
+  const { data: signals } = usePoll<SignalRecord[]>('/api/signals?limit=1000', 15_000);
   const { data: summary } = usePoll<Summary[]>('/api/signals/summary?hours=24', 30_000);
 
   const byStatus = (s: string) => (summary ?? []).filter((x) => x.status === s).reduce((a, b) => a + b.count, 0);
   const reasons = (summary ?? []).filter((x) => x.status === 'filtered' || x.status === 'expired').slice(0, 8);
+
+  // One row per coin: its newest setup, with the rest underneath.
+  const setups = toSetups(signals ?? []).filter((s) => status === 'all' || s.last.status === status);
+  const coins = new Map<string, Setup[]>();
+  for (const s of setups) coins.set(s.symbol, [...(coins.get(s.symbol) ?? []), s]);
 
   return (
     <div className="space-y-5">
@@ -51,7 +125,7 @@ export function Signals({ go }: { go: (page: string, symbol?: string) => void })
       )}
 
       <Card
-        title="Signals"
+        title="Signals by coin"
         icon={<Radio size={16} />}
         right={
           <div className="flex overflow-hidden rounded-lg border border-line">
@@ -61,34 +135,89 @@ export function Signals({ go }: { go: (page: string, symbol?: string) => void })
           </div>
         }
       >
-        {!signals?.length ? <Empty>No signals{status === 'all' ? '' : ` with status ${status}`} yet.</Empty> : (
-          <Table head={['', 'Time (UTC)', 'Coin', 'Side', 'Status', 'Reason', 'Score', 'Entry / stop / target', 'R']}>
-            {signals.map((s) => {
-              const p = s.payload as Record<string, any>;
-              const plan = p.plan as { entry: number; stop: number; target: number; rewardRisk: number; stopDistancePct: number; targetSource: string } | undefined;
-              const isOpen = open === s.id;
+        {!coins.size ? <Empty>No signals{status === 'all' ? '' : ` with status ${status}`} yet.</Empty> : (
+          <Table head={['', 'Coin', 'Side', 'Stage', 'Reason', 'Time (UTC)', 'Score', 'Entry', 'Stop', 'Target', 'R', '']}>
+            {[...coins.entries()].map(([symbol, list]) => {
+              const s = list[0];
+              const isOpen = open === symbol;
               return (
-                <Fragment key={s.id}>
-                  <tr className="cursor-pointer hover:bg-card-2/60" onClick={() => setOpen(isOpen ? null : s.id!)}>
+                <Fragment key={symbol}>
+                  <tr className="cursor-pointer hover:bg-card-2/60" onClick={() => setOpen(isOpen ? null : symbol)}>
                     <td className={`${td} text-ink-3`}>{isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</td>
-                    <td className={`${td} tabular text-ink-2`}>{dateTime(s.time)}</td>
-                    <td className={td}><button className="font-semibold hover:text-accent" onClick={(e) => { e.stopPropagation(); go('chart', s.symbol); }}>{coin(s.symbol)}</button></td>
+                    <td className={td}><button className="font-semibold hover:text-accent" onClick={(e) => { e.stopPropagation(); go('chart', symbol); }}>{coin(symbol)}</button></td>
                     <td className={td}><SideBadge side={s.direction} /></td>
-                    <td className={td}><StatusBadge status={s.status} /></td>
-                    <td className={`${td} text-ink-2`}>{words(s.reason) || (s.status === 'armed' ? (p.factors ?? []).map((f: { name: string }) => words(f.name)).join(' + ') : '')}</td>
-                    <td className={`${td} tabular`}>{p.score?.total ?? ''}</td>
-                    <td className={`${td} tabular text-ink-2`}>{plan ? `${price(plan.entry)} / ${price(plan.stop)} / ${price(plan.target)}` : ''}</td>
-                    <td className={`${td} tabular`}>{plan ? plan.rewardRisk.toFixed(2) : ''}</td>
+                    <td className={td}><Stage s={s} /></td>
+                    <Reason s={s} />
+                    <td className={`${td} tabular text-ink-2`}>{dateTime(s.last.time)}</td>
+                    <PlanCells s={s} />
+                    <td className={`${td} text-xs text-ink-3`}>{list.length > 1 ? `+${list.length - 1} earlier` : ''}</td>
                   </tr>
                   {isOpen && (
-                    <tr><td colSpan={9} className="bg-card-2/40 px-4 py-4"><SignalDetail s={s} /></td></tr>
+                    <tr><td colSpan={12} className="bg-card-2/40 px-4 py-4"><CoinDetail symbol={symbol} setups={list} /></td></tr>
                   )}
                 </Fragment>
               );
             })}
           </Table>
         )}
+        <p className="mt-2 text-xs text-ink-3">Grey italic prices are estimates from when the setup armed; the real entry, stop and target are set at the 15m confirmation close, when it is also scored.</p>
       </Card>
+    </div>
+  );
+}
+
+/** A coin's setups, newest first, the latest opened; and where price goes next if it breaks its key levels. */
+function CoinDetail({ symbol, setups }: { symbol: string; setups: Setup[] }) {
+  const [shown, setShown] = useState(setups[0].key);
+  const { data: idea } = usePoll<TradeIdea>(`/api/ideas/${symbol}`, 60_000);
+  const current = setups.find((s) => s.key === shown) ?? setups[0];
+  const detail = [...current.records].reverse().find((r) => r.status !== 'expired') ?? current.last;
+  const breaks = (idea?.watch ?? []).filter((w) => w.ifBroken?.length);
+  return (
+    <div className="space-y-4">
+      <ol className="flex flex-wrap items-center gap-2 text-xs">
+        {current.records.map((r, i) => (
+          <li key={r.id ?? i} className="flex items-center gap-2">
+            {i > 0 && <span className="text-ink-3">→</span>}
+            <StatusBadge status={r.status} />
+            <span className="tabular text-ink-3">{dateTime(r.time)}</span>
+            {r.reason && <span className="text-ink-2">{words(r.reason)}</span>}
+          </li>
+        ))}
+      </ol>
+      <SignalDetail s={detail} />
+      {breaks.length > 0 && (
+        <div>
+          <h3 className="mb-1 text-xs uppercase tracking-wider text-ink-3">If it breaks: next key levels and targets (now {price(idea!.price)})</h3>
+          <ul className="grid gap-2 md:grid-cols-2">
+            {breaks.map((w) => (
+              <li key={`${w.kind}${w.price}`} className="rounded-lg bg-card px-3 py-2">
+                <div className="flex items-baseline justify-between gap-2 text-sm">
+                  <span className="font-semibold">{w.label}</span>
+                  <span className="tabular">{price(w.price)} <span className="text-xs text-ink-3">{pct(w.distancePct, 1, true)}</span></span>
+                </div>
+                <IfBroken w={w} />
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {setups.length > 1 && (
+        <div>
+          <h3 className="mb-1 text-xs uppercase tracking-wider text-ink-3">All setups on {coin(symbol)}</h3>
+          <Table head={['Side', 'Stage', 'Reason', 'Time (UTC)', 'Score', 'Entry', 'Stop', 'Target', 'R']}>
+            {setups.map((s) => (
+              <tr key={s.key} onClick={() => setShown(s.key)} className={`cursor-pointer ${s.key === current.key ? 'bg-card-2' : 'hover:bg-card-2/60'}`}>
+                <td className={td}><SideBadge side={s.direction} /></td>
+                <td className={td}><Stage s={s} /></td>
+                <Reason s={s} />
+                <td className={`${td} tabular text-ink-2`}>{dateTime(s.last.time)}</td>
+                <PlanCells s={s} />
+              </tr>
+            ))}
+          </Table>
+        </div>
+      )}
     </div>
   );
 }
@@ -105,6 +234,7 @@ function SignalDetail({ s }: { s: SignalRecord }) {
         {p.session !== undefined && <p>session <SessionBadge name={p.session} /></p>}
         {p.confirmation && <p>confirmed through {price(p.confirmation.level)} with {(p.confirmation.confirmations ?? []).map(words).join(', ') || 'no extra confirmation'}{p.confirmation.liquiditySweep ? ', after a liquidity sweep' : ''}</p>}
         {p.plan && <p className="tabular">stop {p.plan.stopDistancePct.toFixed(2)}% away · target from {p.plan.targetSource} · reward/risk {p.plan.rewardRisk.toFixed(2)}</p>}
+        {!p.plan && p.planEstimate && <p className="tabular text-ink-3">if it confirmed now: entry {price(p.planEstimate.entry)}, stop {price(p.planEstimate.stop)} ({p.planEstimate.stopDistancePct.toFixed(2)}%), target {price(p.planEstimate.target)}, {p.planEstimate.rewardRisk.toFixed(2)}R</p>}
         {p.risk && <p className="tabular">size {p.risk.ok ? `$${p.risk.notional.toFixed(2)}` : 'refused'}{p.risk.detail?.caps ? ` (capped by ${p.risk.detail.caps})` : ''}</p>}
       </div>
       <div className="space-y-2">

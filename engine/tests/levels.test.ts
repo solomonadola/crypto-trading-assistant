@@ -93,6 +93,22 @@ describe('trade plan', () => {
     expect(tradeIdea(c, { armed: ['short'], entryBlock: null }).plan!.status).toBe('in_zone');
   });
 
+  it('stages: waiting for retest, then confirmation, then confirmed (taken or skipped) and in the trade', () => {
+    expect(tradeIdea(longCtx(), { armed: [], entryBlock: null }).plan).toMatchObject({ status: 'wait', confirmation: null });
+    const c = longCtx();
+    c.price = 97;
+    const taken = { direction: 'long' as const, time: c.t, taken: true, reason: null };
+    const idea = tradeIdea(c, { armed: [], entryBlock: null, confirmed: [taken] });
+    expect(idea.plan).toMatchObject({ status: 'confirmed', confirmation: { time: c.t, taken: true, reason: null } });
+    expect(idea.checklist.find((x) => x.label.startsWith('Confirmation'))!.ok).toBe(true);
+    expect(tradeIdea(c, { armed: [], entryBlock: null, confirmed: [taken], inTrade: ['long'] }).plan!.status).toBe('in_trade');
+    const skipped = tradeIdea(c, { armed: [], entryBlock: null, confirmed: [{ ...taken, taken: false, reason: 'filter_chop' }] }).plan!;
+    expect(skipped.status).toBe('confirmed');
+    expect(skipped.note).toContain('skipped it (filter chop)');
+    // A confirmation on the other side does not count.
+    expect(tradeIdea(c, { armed: [], entryBlock: null, confirmed: [{ ...taken, direction: 'short' }] }).plan!.status).toBe('in_zone');
+  });
+
   it('short mirrors long', () => {
     const c = ctx({ pivots1h: [pivot('high', 30, 103.8), pivot('low', 40, 96), pivot('low', 50, 92)] }, 'reversed', 'pullback');
     c.analysis.zones = [zone({ type: 'supply', low: 103, high: 104 })];
@@ -154,8 +170,8 @@ describe('checklist and levels to wait for', () => {
     expect(byLabel['1h trend up too']).toBe(false);
     expect(byLabel['Trend strong enough (1h ADX ≥ 20)']).toBe(true);
     expect(byLabel['Entries open now (session)']).toBe(false);
-    expect(byLabel['Price in the entry area']).toBe(false);
-    expect(byLabel['15m close back in the trend direction']).toBeNull();
+    expect(byLabel['Retest: price in the entry area']).toBe(false);
+    expect(byLabel['Confirmation: 15m close back in the trend direction']).toBeNull();
     expect(byLabel['Stop within 2.5%']).toBe(true);
     expect(byLabel['Funding not against the trade']).toBe(true);
     expect(byLabel['BTC not moving against it (1h)']).toBe(true);
@@ -174,5 +190,14 @@ describe('checklist and levels to wait for', () => {
     const w = tradeIdea(c, { armed: [], entryBlock: null }).watch;
     // Both 4% away: a tie, so compare without order. Retracement levels (fib 0.5/0.618 at 100/99.1) are not range edges.
     expect(Object.fromEntries(w.map((x) => [x.kind, x.price]))).toEqual({ range_bottom: 96, range_top: 104 });
+  });
+
+  it('if a level breaks: the next key levels beyond it, nearest first', () => {
+    const c = ctx({ pivots1h: [pivot('low', 20, 92), pivot('low', 30, 96), pivot('high', 40, 104), pivot('high', 45, 110)] }, 'none', 'none');
+    const w = tradeIdea(c, { armed: [], entryBlock: null }).watch;
+    expect(w.find((x) => x.kind === 'range_top')!.ifBroken!.map((n) => n.price)).toEqual([110]);
+    expect(w.find((x) => x.kind === 'range_bottom')!.ifBroken!.map((n) => n.price)).toEqual([92]);
+    const withPlan = tradeIdea(longCtx(), { armed: [], entryBlock: null }).watch;
+    for (const x of withPlan.filter((x) => x.kind === 'target')) for (const n of x.ifBroken ?? []) expect(n.price).toBeGreaterThan(x.price);
   });
 });

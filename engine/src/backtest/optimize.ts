@@ -150,3 +150,27 @@ export function search(trades: ResearchTrade[], cfg: EngineConfig, trainFrom: nu
   eligible.sort((a, b) => (b.train.profitFactor ?? 99) - (a.train.profitFactor ?? 99) || b.train.netUsd - a.train.netUsd);
   return { combinations: all.length, minTrainTrades, configured: score(configured(cfg)), best: eligible.slice(0, top) };
 }
+
+export interface EverySignal {
+  all: { train: Metrics; test: Metrics };
+  bySession: Record<string, { train: Metrics; test: Metrics }>;
+  bySide: Record<string, { train: Metrics; test: Metrics }>;
+}
+
+/**
+ * Every signal the setup produced, no filters or thresholds, under the
+ * portfolio rules. The baseline for setups without filters (the alternative
+ * ideas), and a fair comparison for the pullback. Breakdowns simulate each
+ * group alone.
+ */
+export function everySignal(trades: ResearchTrade[], cfg: EngineConfig, trainFrom: number, split: number, testTo: number): EverySignal {
+  const open: Settings = { minRr: -Infinity, maxStopPct: Infinity, minScore: -Infinity, fakeoutRvol: null, filtersOff: [] };
+  const bare = trades.map((t) => ({ ...t, failures: [] }));
+  const both = (ts: ResearchTrade[]) => ({ train: simulate(ts, open, cfg, trainFrom, split), test: simulate(ts, open, cfg, split, testTo) });
+  const group = (key: (t: ResearchTrade) => string) => {
+    const out: Record<string, { train: Metrics; test: Metrics }> = {};
+    for (const k of [...new Set(bare.map(key))].sort()) out[k] = both(bare.filter((t) => key(t) === k));
+    return out;
+  };
+  return { all: both(bare), bySession: group((t) => t.session ?? 'none'), bySide: group((t) => t.side) };
+}

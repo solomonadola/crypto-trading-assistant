@@ -2,7 +2,7 @@
 // ladder, the time stop and the early exits. Stops, targets and session ends
 // are handled on 1m candles by the engine. The stop only ever moves in the
 // trade's favour, and never closer than min_gap_atr_15m x 15m ATR to price.
-import type { Position, CloseReason } from './portfolio';
+import { TREND_SETUPS, type Position, type CloseReason } from './portfolio';
 import { lastOf, sign, type Context } from './strategy/context';
 
 export type ManageAction =
@@ -30,8 +30,10 @@ export function manage(i: ManageInput): ManageAction[] {
   const state = ctx.analysis[pos.side].state;
 
   // Closes, most fundamental first.
-  if ((state === 'transition' || state === 'reversed' || state === 'none') && early.on_4h_state_change === 'close') return [{ type: 'close', reason: 'early_exit_4h' }];
-  if (state === 'weakening' && early.on_1h_protected_level_break === 'close') return [{ type: 'close', reason: 'early_exit_1h' }];
+  // Trend-state exits only for trend setups: a range or reversion trade is not wrong because there is no trend.
+  const trendTrade = TREND_SETUPS.includes(pos.setup ?? 'pullback');
+  if (trendTrade && (state === 'transition' || state === 'reversed' || state === 'none') && early.on_4h_state_change === 'close') return [{ type: 'close', reason: 'early_exit_4h' }];
+  if (trendTrade && state === 'weakening' && early.on_1h_protected_level_break === 'close') return [{ type: 'close', reason: 'early_exit_1h' }];
   if (ctx.config.filters.fakeout.enabled && pos.chochLevel !== null && i.candlesSinceEntry <= ctx.config.filters.fakeout.failed_breakout_candles
     && s * (price - pos.chochLevel) < 0) return [{ type: 'close', reason: 'failed_breakout' }];
   const st = early.stagnation;

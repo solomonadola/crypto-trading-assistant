@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { loadConfig } from '../src/config';
-import { configured, passes, search, simulate, type Settings } from '../src/backtest/optimize';
+import { configured, everySignal, passes, search, simulate, type Settings } from '../src/backtest/optimize';
 import type { ResearchTrade } from '../src/backtest/research';
 
 const cfg = loadConfig('engine/config/config.yaml');
@@ -74,5 +74,22 @@ describe('portfolio rules and sizing', () => {
       expect(b.test.trades).toBe(20);
       expect(b.test.netUsd).toBeLessThan(0);
     }
+  });
+});
+
+describe('every signal', () => {
+  it('ignores filters and thresholds, keeps the portfolio rules, and splits by session and side', () => {
+    const trades = [
+      trade({ symbol: 'A', failures: ['filter_chop'], score: 0, rewardRisk: 0.5 }),
+      trade({ symbol: 'A', openedAt: T0 + 10, closedAt: T0 + H }),                      // A already open
+      trade({ symbol: 'B', side: 'short', session: 'asia', r: -1, stopPct: 8 }),
+      trade({ symbol: 'C', openedAt: T0 + 100 * H, closedAt: T0 + 101 * H }),
+    ];
+    const e = everySignal(trades, cfg, T0, T0 + 50 * H, T0 + 200 * H);
+    expect(e.all.train.trades).toBe(2);
+    expect(e.all.test.trades).toBe(1);
+    expect(e.bySession.asia.train.trades).toBe(1);
+    expect(e.bySide.long.train.trades).toBe(1);
+    expect(Object.keys(e.bySide)).toEqual(['long', 'short']);
   });
 });

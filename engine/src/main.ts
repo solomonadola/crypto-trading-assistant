@@ -385,8 +385,8 @@ app.get('/api/ideas/:symbol', (req, res) => {
 });
 app.get('/api/ideas', (_req, res) => {
   const ideas = universe.map((s) => engine.tradeIdea(s)).filter((x): x is NonNullable<typeof x> => x !== null);
-  const rank = { armed: 0, in_zone: 1, wait: 2, no_level: 3 } as const;
-  ideas.sort((a, b) => (a.plan ? rank[a.plan.status] : 4) - (b.plan ? rank[b.plan.status] : 4));
+  const rank = { in_trade: 0, confirmed: 1, armed: 2, in_zone: 3, wait: 4, no_level: 5 } as const;
+  ideas.sort((a, b) => (a.plan ? rank[a.plan.status] : 6) - (b.plan ? rank[b.plan.status] : 6));
   res.json(ideas);
 });
 app.get('/api/scanner', (_req, res) => {

@@ -72,6 +72,21 @@ const WATCH_TONE: Record<WatchLevel['kind'], string> = {
   entry: 'text-accent', invalidation: 'text-critical', target: 'text-good', breakout: 'text-ink', range_top: 'text-supply', range_bottom: 'text-demand',
 };
 
+/** Where price may run next if it closes through a level. */
+export function IfBroken({ w }: { w: TradeIdea['watch'][number] }) {
+  if (!w.ifBroken?.length) return null;
+  return (
+    <p className="mt-1 flex flex-wrap items-center gap-1 text-xs text-ink-3">
+      <span>if broken, next:</span>
+      {w.ifBroken.map((n, i) => (
+        <span key={n.price} className="rounded bg-card px-1.5 py-0.5 tabular text-ink-2" title={n.sources.join(', ')}>
+          {i === 0 ? '→ ' : ''}{price(n.price)} <span className="text-ink-3">{pct(n.distancePct, 1, true)} · {n.sources[0]}</span>
+        </span>
+      ))}
+    </p>
+  );
+}
+
 function WatchCard({ idea }: { idea: TradeIdea }) {
   return (
     <Card title="Levels to wait for" icon={<Crosshair size={16} />} right={<span className="text-xs text-ink-3 tabular">now {price(idea.price)}</span>} className="h-full">
@@ -84,6 +99,7 @@ function WatchCard({ idea }: { idea: TradeIdea }) {
                 <span className="tabular text-sm">{price(w.price)} <span className="text-xs text-ink-3">{pct(w.distancePct, 1, true)}</span></span>
               </div>
               <p className="mt-0.5 text-xs text-ink-2">{w.why}</p>
+              <IfBroken w={w} />
             </li>
           ))}
         </ul>

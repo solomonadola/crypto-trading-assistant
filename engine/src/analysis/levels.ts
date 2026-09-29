@@ -116,16 +116,20 @@ export interface IdeaInputs {
   armed: Direction[];
   /** Why new trades may not open now (session rules), or null if they may. */
   entryBlock: string | null;
+  /** The engine's recent 15m confirmations on this coin (taken or skipped). */
+  confirmed?: { direction: Direction; time: number; taken: boolean; reason: string | null }[];
+  /** Directions the engine holds a position (or pending entry) in on this coin. */
+  inTrade?: Direction[];
 }
 
 export function tradeIdea(ctx: Context, inputs: IdeaInputs): TradeIdea {
-  const idea = planIdea(ctx, inputs.armed);
+  const idea = planIdea(ctx, inputs);
   return { ...idea, checklist: checklist(ctx, idea, inputs.entryBlock), watch: watchLevels(idea) };
 }
 
 type Planned = Omit<TradeIdea, 'checklist' | 'watch'>;
 
-function planIdea(ctx: Context, armedDirections: Direction[]): Planned {
+function planIdea(ctx: Context, inputs: IdeaInputs): Planned {
   const cfg = ctx.config;
   const price = ctx.price;
   const atr = lastOf(ctx.atr1h);
@@ -160,7 +164,7 @@ function planIdea(ctx: Context, armedDirections: Direction[]): Planned {
     : l.price >= price - tol && l.band[0] <= price + reach));
   const entryLevel = candidates.sort((x, y) => y.strength - x.strength || Math.abs(x.distancePct) - Math.abs(y.distancePct))[0];
   if (!entryLevel) {
-    return { ...base, plan: { direction: bias, status: 'no_level', entryLow: null, entryHigh: null, entry: null, stop: null, riskPct: null, targets: [], meetsRules: false, note: `No support${bias === 'short' ? '/resistance' : ''} cluster within ${MAX_ENTRY_ATR} × 1h ATR to enter from; wait for structure to form.` } };
+    return { ...base, plan: { direction: bias, status: 'no_level', confirmation: null, entryLow: null, entryHigh: null, entry: null, stop: null, riskPct: null, targets: [], meetsRules: false, note: `No support${bias === 'short' ? '/resistance' : ''} cluster within ${MAX_ENTRY_ATR} × 1h ATR to enter from; wait for structure to form.` } };
   }
   const entryLow = Math.min(entryLevel.band[0], entryLevel.price) - tol / 2;
   const entryHigh = Math.max(entryLevel.band[1], entryLevel.price) + tol / 2;
@@ -186,18 +190,25 @@ function planIdea(ctx: Context, armedDirections: Direction[]): Planned {
 
   const inZone = price >= entryLow && price <= entryHigh;
   const riskPct = (risk / entry) * 100;
-  const status: NonNullable<TradeIdea['plan']>['status'] = armedDirections.includes(bias) ? 'armed' : inZone ? 'in_zone' : 'wait';
+  const conf = (inputs.confirmed ?? []).filter((c) => c.direction === bias).sort((x, y) => y.time - x.time)[0];
+  const inTrade = (inputs.inTrade ?? []).includes(bias);
+  const confirmation = conf ? { time: conf.time, taken: conf.taken, reason: conf.reason } : null;
+  const status: NonNullable<TradeIdea['plan']>['status'] = inTrade ? 'in_trade' : conf ? 'confirmed'
+    : inputs.armed.includes(bias) ? 'armed' : inZone ? 'in_zone' : 'wait';
+  const skipped = conf && !conf.taken ? `, but the engine skipped it (${(conf.reason ?? 'rule').replace(/_/g, ' ')})` : '';
   const meetsRules = riskPct <= cfg.exits.max_stop_pct && targets[0].r >= cfg.exits.min_rr;
   const noteParts = [
-    status === 'armed' ? 'The engine has armed this setup and waits for a 15m confirmation close.'
-      : status === 'in_zone' ? 'Price is in the entry area now; wait for a 15m close back in the trend direction before entering.'
-      : `Wait for price to ${bias === 'long' ? 'pull back down' : 'rally up'} into the entry area.`,
+    status === 'in_trade' ? 'Confirmed: the engine is in this trade.'
+      : status === 'confirmed' ? `Confirmed: a 15m close came back in the trend direction${skipped}.`
+      : status === 'armed' ? 'Retest in progress: the engine has armed this setup and waits for a 15m confirmation close.'
+      : status === 'in_zone' ? 'Retest in progress: price is in the entry area; wait for a 15m close back in the trend direction before entering.'
+      : `Waiting for the retest: price has to ${bias === 'long' ? 'pull back down' : 'rally up'} into the entry area.`,
     riskPct > cfg.exits.max_stop_pct ? `Stop is ${riskPct.toFixed(2)}% away, beyond the ${cfg.exits.max_stop_pct}% limit.` : null,
     targets[0].r < cfg.exits.min_rr ? `First target is ${targets[0].r.toFixed(2)}R, under the ${cfg.exits.min_rr}R minimum.` : null,
   ].filter(Boolean);
   return {
     ...base,
-    plan: { direction: bias, status, entryLow, entryHigh, entry, stop, riskPct, targets, meetsRules, note: noteParts.join(' ') },
+    plan: { direction: bias, status, confirmation, entryLow, entryHigh, entry, stop, riskPct, targets, meetsRules, note: noteParts.join(' ') },
   };
 }
 
@@ -218,8 +229,13 @@ function checklist(ctx: Context, idea: Planned, entryBlock: string | null): Chec
     { label: `Trend strong enough (1h ADX ≥ ${cfg.filters.chop.adx_min_1h})`, ok: a.adx1h === null ? null : a.adx1h >= cfg.filters.chop.adx_min_1h, detail: a.adx1h === null ? 'not enough data' : `ADX ${a.adx1h.toFixed(1)}` },
     { label: `4h close ${dir === 'long' ? 'above' : 'below'} EMA50`, ok: a[dir].emaAligned, detail: `4h close ${fmt(a.ema4h.close)}, EMA50 ${fmt(a.ema4h.fast)}` },
     { label: 'Entries open now (session)', ok: entryBlock === null, detail: entryBlock === null ? 'inside a session entry window' : entryBlock.replace(/_/g, ' ') },
-    { label: 'Price in the entry area', ok: plan ? plan.status === 'in_zone' || plan.status === 'armed' : null, detail: plan ? `area ${fmt(plan.entryLow)} – ${fmt(plan.entryHigh)}, price ${fmt(ctx.price)}` : 'no plan in this direction yet' },
-    { label: '15m close back in the trend direction', ok: null, detail: plan?.status === 'armed' ? 'the engine has armed the setup and is waiting for this close' : 'wait for it inside the entry area; the engine checks every 15m close' },
+    { label: 'Retest: price in the entry area', ok: plan ? plan.status !== 'wait' : null, detail: plan ? `area ${fmt(plan.entryLow)} – ${fmt(plan.entryHigh)}, price ${fmt(ctx.price)}` : 'no plan in this direction yet' },
+    {
+      label: 'Confirmation: 15m close back in the trend direction',
+      ok: plan?.confirmation ? true : null,
+      detail: plan?.confirmation ? `confirmed at ${new Date(plan.confirmation.time).toISOString().slice(11, 16)} UTC${plan.confirmation.taken ? '' : `, skipped: ${(plan.confirmation.reason ?? 'rule').replace(/_/g, ' ')}`}`
+        : plan?.status === 'armed' ? 'the engine has armed the setup and is waiting for this close' : 'wait for it inside the entry area; the engine checks every 15m close',
+    },
     { label: `Stop within ${cfg.exits.max_stop_pct}%`, ok: plan ? plan.riskPct! <= cfg.exits.max_stop_pct : null, detail: plan ? `stop ${fmt(plan.stop)}, ${plan.riskPct!.toFixed(2)}% away` : '–' },
     { label: `First target at least ${cfg.exits.min_rr}R`, ok: plan ? plan.targets[0].r >= cfg.exits.min_rr : null, detail: plan ? `${plan.targets[0].label} ${fmt(plan.targets[0].price)} = ${plan.targets[0].r.toFixed(2)}R` : '–' },
     {
@@ -245,19 +261,25 @@ function watchLevels(idea: Planned): WatchLevel[] {
   const above = structural.filter((l) => l.price > idea.price).sort((x, y) => x.price - y.price);
   const below = structural.filter((l) => l.price < idea.price).sort((x, y) => y.price - x.price);
   const plan = idea.plan;
+  // The next two structural levels past a price, going up or down.
+  const beyond = (p: number, up: boolean) => structural
+    .filter((l) => (up ? l.price > p : l.price < p) && Math.abs(l.price - p) > 1e-12)
+    .sort((x, y) => (up ? x.price - y.price : y.price - x.price))
+    .slice(0, 2)
+    .map((l) => ({ price: l.price, distancePct: l.distancePct, sources: l.sources }));
   if (plan && plan.entry !== null && plan.entryLow !== null && plan.entryHigh !== null && plan.stop !== null) {
     const long = plan.direction === 'long';
     const edge = long ? plan.entryHigh : plan.entryLow;
-    out.push({ kind: 'entry', label: long ? 'Buy area' : 'Sell area', price: edge, distancePct: pct(edge), why: `${fmt(plan.entryLow)} – ${fmt(plan.entryHigh)}: ${plan.status === 'in_zone' || plan.status === 'armed' ? 'price is there now; wait for the 15m confirmation close' : `wait for price to ${long ? 'pull back down' : 'rally up'} into it`}` });
-    out.push({ kind: 'invalidation', label: 'Idea is wrong beyond', price: plan.stop, distancePct: pct(plan.stop), why: `a move ${long ? 'below' : 'above'} this breaks the setup; the stop goes here` });
-    for (const t of plan.targets) out.push({ kind: 'target', label: `Take profit ${t.label}`, price: t.price, distancePct: pct(t.price), why: `${t.r.toFixed(2)}R · ${t.sources.slice(0, 2).join(', ')}` });
+    out.push({ kind: 'entry', label: long ? 'Buy area' : 'Sell area', price: edge, distancePct: pct(edge), why: `${fmt(plan.entryLow)} – ${fmt(plan.entryHigh)}: ${plan.status === 'confirmed' || plan.status === 'in_trade' ? 'confirmed by a 15m close' : plan.status === 'in_zone' || plan.status === 'armed' ? 'price is there now; wait for the 15m confirmation close' : `wait for price to ${long ? 'pull back down' : 'rally up'} into it`}` });
+    out.push({ kind: 'invalidation', label: 'Idea is wrong beyond', price: plan.stop, distancePct: pct(plan.stop), why: `a move ${long ? 'below' : 'above'} this breaks the setup; the stop goes here`, ifBroken: beyond(plan.stop, !long) });
+    for (const t of plan.targets) out.push({ kind: 'target', label: `Take profit ${t.label}`, price: t.price, distancePct: pct(t.price), why: `${t.r.toFixed(2)}R · ${t.sources.slice(0, 2).join(', ')}`, ifBroken: beyond(t.price, long) });
     const breakout = long ? above[0] : below[0];
     if (breakout && !plan.targets.some((t) => Math.abs(t.price - breakout.price) < 1e-12)) {
-      out.push({ kind: 'breakout', label: long ? 'Breakout above' : 'Breakdown below', price: breakout.price, distancePct: breakout.distancePct, why: `${breakout.sources.slice(0, 2).join(', ')}: a 15m close ${long ? 'above' : 'below'} it continues the trend without a pullback` });
+      out.push({ kind: 'breakout', label: long ? 'Breakout above' : 'Breakdown below', price: breakout.price, distancePct: breakout.distancePct, why: `${breakout.sources.slice(0, 2).join(', ')}: a 15m close ${long ? 'above' : 'below'} it continues the trend without a pullback`, ifBroken: beyond(breakout.price, long) });
     }
   } else {
-    if (above[0]) out.push({ kind: 'range_top', label: 'Range top', price: above[0].price, distancePct: above[0].distancePct, why: `${above[0].sources.slice(0, 2).join(', ')} (strength ${above[0].strength}): a 15m close above it could start an up move` });
-    if (below[0]) out.push({ kind: 'range_bottom', label: 'Range bottom', price: below[0].price, distancePct: below[0].distancePct, why: `${below[0].sources.slice(0, 2).join(', ')} (strength ${below[0].strength}): a 15m close below it could start a down move` });
+    if (above[0]) out.push({ kind: 'range_top', label: 'Range top', price: above[0].price, distancePct: above[0].distancePct, why: `${above[0].sources.slice(0, 2).join(', ')} (strength ${above[0].strength}): a 15m close above it could start an up move`, ifBroken: beyond(above[0].price, true) });
+    if (below[0]) out.push({ kind: 'range_bottom', label: 'Range bottom', price: below[0].price, distancePct: below[0].distancePct, why: `${below[0].sources.slice(0, 2).join(', ')} (strength ${below[0].strength}): a 15m close below it could start a down move`, ifBroken: beyond(below[0].price, false) });
   }
   return out.sort((x, y) => Math.abs(x.distancePct) - Math.abs(y.distancePct));
 }

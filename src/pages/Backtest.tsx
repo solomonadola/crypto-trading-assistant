@@ -7,14 +7,20 @@ import { signedUsd } from '../lib/format';
 interface Metrics { trades: number; wins: number; winRate: number; netUsd: number; profitFactor: number | null; maxDrawdownUsd: number; avgR: number; tradesPerWeek: number }
 interface Settings { minRr: number; maxStopPct: number; minScore: number; fakeoutRvol: number | null; filtersOff: string[] }
 interface Scored { settings: Settings; train: Metrics; test: Metrics }
-interface Result {
-  createdAt: number; from: number; split: number; to: number; minTrainTrades: number;
-  results: { variant: string; label: string; research: { trades: number; confirmed: number; seconds: number; symbols: string[] }; search: { combinations: number; configured: Scored; best: Scored[] } }[];
+interface Period { train: Metrics; test: Metrics }
+interface EverySignal { all: Period; bySession: Record<string, Period>; bySide: Record<string, Period> }
+interface Run {
+  variant: string; label: string; setup?: string; research: { trades: number; confirmed: number; seconds: number; symbols: string[] };
+  search: { combinations: number; configured: Scored; best: Scored[] } | null; everySignal?: EverySignal;
 }
+interface Result { createdAt: number; from: number; split: number; to: number; minTrainTrades: number; results: Run[] }
+
+const SETUP_NAMES: Record<string, string> = { pullback: 'Pullback', orb: 'Opening range', momentum: 'Momentum', meanrev: 'Mean reversion' };
+const SESSION_NAMES: Record<string, string> = { asian: 'Asian', london: 'London', newyork: 'New York', none: 'No session' };
 
 const day = (t: number) => new Date(t).toISOString().slice(0, 10);
 const pf = (m: Metrics) => (m.profitFactor === null ? '∞' : m.profitFactor.toFixed(2));
-const holds = (s: Scored) => s.test.trades >= 10 && s.test.netUsd > 0 && (s.test.profitFactor ?? 99) > 1;
+const holds = (s: Period) => s.test.trades >= 10 && s.test.netUsd > 0 && (s.test.profitFactor ?? 99) > 1;
 
 function describe(s: Settings): string {
   return [
@@ -24,6 +30,12 @@ function describe(s: Settings): string {
     s.fakeoutRvol === null ? 'fakeout filter off' : `trigger volume ≥ ${s.fakeoutRvol}×`,
     s.filtersOff.length ? `off: ${s.filtersOff.map((f) => f.replace('filter_', '')).join(', ')}` : 'all other filters on',
   ].join(' · ');
+}
+
+function Holds({ p }: { p: Period }) {
+  return holds(p)
+    ? <span className="flex items-center gap-1 text-xs text-good"><CheckCircle2 size={14} aria-label="holds" />holds</span>
+    : <span className="flex items-center gap-1 text-xs text-warning"><AlertTriangle size={14} aria-label="does not hold" />not on test</span>;
 }
 
 function Cell({ m }: { m: Metrics }) {
@@ -65,27 +77,56 @@ export function Backtest() {
           </div>
         )}
       </Card>
-      {data?.results.map((r) => (
-        <Card key={r.variant} title={r.label} right={<span className="text-xs text-ink-3">{r.research.confirmed} confirmed setups · {r.research.trades} traded in research · {r.search.combinations.toLocaleString()} combinations</span>}>
-          <Table head={['Settings', 'Tuning period', 'Unseen test period', '']}>
-            <tr className="bg-card-2/40">
-              <td className={`${td} whitespace-normal`}><Badge tone="accent">your current settings</Badge><p className="mt-1 text-xs text-ink-3">{describe(r.search.configured.settings)}</p></td>
-              <td className={td}><Cell m={r.search.configured.train} /></td>
-              <td className={td}><Cell m={r.search.configured.test} /></td>
-              <td className={td}>{holds(r.search.configured) ? <CheckCircle2 size={16} className="text-good" aria-label="holds on test" /> : null}</td>
-            </tr>
-            {r.search.best.map((b, i) => (
-              <tr key={i} className="hover:bg-card-2/60">
-                <td className={`${td} whitespace-normal text-xs text-ink-2`}>{describe(b.settings)}</td>
-                <td className={td}><Cell m={b.train} /></td>
-                <td className={td}><Cell m={b.test} /></td>
-                <td className={td}>{holds(b)
-                  ? <span className="flex items-center gap-1 text-xs text-good"><CheckCircle2 size={14} aria-label="holds" />holds</span>
-                  : <span className="flex items-center gap-1 text-xs text-warning"><AlertTriangle size={14} aria-label="does not hold" />not on test</span>}</td>
+      {data && data.results.some((r) => r.everySignal) && (
+        <Card title="Every signal, side by side" right={<span className="text-xs text-ink-3">no filters or thresholds, portfolio rules applied</span>}>
+          <Table head={['Idea', 'Tuning period', 'Unseen test period', '']}>
+            {data.results.filter((r) => r.everySignal).map((r) => (
+              <tr key={r.variant} className="hover:bg-card-2/60">
+                <td className={`${td} whitespace-normal`}><Badge tone={r.setup && r.setup !== 'pullback' ? 'accent' : 'muted'}>{SETUP_NAMES[r.setup ?? 'pullback'] ?? r.setup}</Badge><p className="mt-1 text-xs text-ink-3">{r.label}</p></td>
+                <td className={td}><Cell m={r.everySignal!.all.train} /></td>
+                <td className={td}><Cell m={r.everySignal!.all.test} /></td>
+                <td className={td}><Holds p={r.everySignal!.all} /></td>
               </tr>
             ))}
           </Table>
-          {!r.search.best.length && <p className="mt-2 text-sm text-warning">No combination made money on the tuning period with at least {data.minTrainTrades} trades.</p>}
+          <p className="mt-2 text-xs text-ink-3">"Holds" means at least 10 trades on the test period, with a profit and a profit factor above 1.</p>
+        </Card>
+      )}
+      {data?.results.map((r) => (
+        <Card key={r.variant} title={r.label} right={<span className="text-xs text-ink-3">{r.research.confirmed} signals · {r.research.trades} traded in research{r.search ? ` · ${r.search.combinations.toLocaleString()} combinations` : ''}</span>}>
+          {r.everySignal && (
+            <Table head={['Every signal', 'Tuning period', 'Unseen test period', '']}>
+              {([['All', r.everySignal.all], ...Object.entries(r.everySignal.bySession).map(([k, v]) => [SESSION_NAMES[k] ?? k, v]), ...Object.entries(r.everySignal.bySide).map(([k, v]) => [k === 'long' ? 'Longs' : 'Shorts', v])] as [string, Period][]).map(([name, p], i) => (
+                <tr key={name} className={i === 0 ? 'bg-card-2/40' : 'hover:bg-card-2/60'}>
+                  <td className={`${td} ${i === 0 ? 'text-ink' : 'text-xs text-ink-2'}`}>{name}{i > 0 && <span className="text-ink-3"> alone</span>}</td>
+                  <td className={td}><Cell m={p.train} /></td>
+                  <td className={td}><Cell m={p.test} /></td>
+                  <td className={td}><Holds p={p} /></td>
+                </tr>
+              ))}
+            </Table>
+          )}
+          {r.search && (
+            <div className={r.everySignal ? 'mt-4' : ''}>
+              <Table head={['Filter settings', 'Tuning period', 'Unseen test period', '']}>
+                <tr className="bg-card-2/40">
+                  <td className={`${td} whitespace-normal`}><Badge tone="accent">your current settings</Badge><p className="mt-1 text-xs text-ink-3">{describe(r.search.configured.settings)}</p></td>
+                  <td className={td}><Cell m={r.search.configured.train} /></td>
+                  <td className={td}><Cell m={r.search.configured.test} /></td>
+                  <td className={td}>{holds(r.search.configured) ? <CheckCircle2 size={16} className="text-good" aria-label="holds on test" /> : null}</td>
+                </tr>
+                {r.search.best.map((b, i) => (
+                  <tr key={i} className="hover:bg-card-2/60">
+                    <td className={`${td} whitespace-normal text-xs text-ink-2`}>{describe(b.settings)}</td>
+                    <td className={td}><Cell m={b.train} /></td>
+                    <td className={td}><Cell m={b.test} /></td>
+                    <td className={td}><Holds p={b} /></td>
+                  </tr>
+                ))}
+              </Table>
+              {!r.search.best.length && <p className="mt-2 text-sm text-warning">No combination made money on the tuning period with at least {data.minTrainTrades} trades.</p>}
+            </div>
+          )}
         </Card>
       ))}
     </div>

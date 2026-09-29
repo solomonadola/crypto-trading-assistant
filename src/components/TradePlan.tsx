@@ -6,16 +6,51 @@ import { price as fmt, pct } from '../lib/format';
 import { Badge, Card, SideBadge, TrendChip } from './ui';
 
 const STATUS: Record<string, { tone: string; label: string }> = {
-  armed: { tone: 'london', label: 'armed by the engine' },
-  in_zone: { tone: 'good', label: 'price in entry area' },
-  wait: { tone: 'muted', label: 'waiting for price' },
+  in_trade: { tone: 'good', label: 'confirmed · in trade' },
+  confirmed: { tone: 'good', label: 'confirmed' },
+  armed: { tone: 'london', label: 'armed · waiting for confirmation' },
+  in_zone: { tone: 'newyork', label: 'retest · waiting for confirmation' },
+  wait: { tone: 'muted', label: 'waiting for retest' },
   no_level: { tone: 'warning', label: 'no entry level' },
 };
 
 export function PlanStatus({ idea }: { idea: TradeIdea }) {
   if (!idea.plan) return <Badge>no trend · wait</Badge>;
+  const c = idea.plan.confirmation;
+  if (idea.plan.status === 'confirmed' && c && !c.taken) return <Badge tone="warning" title={c.reason ?? undefined}>confirmed · skipped</Badge>;
   const s = STATUS[idea.plan.status];
   return <Badge tone={s.tone}>{s.label}</Badge>;
+}
+
+/** Retest → confirmation → confirmed, with the current step highlighted. */
+export function StageTracker({ plan }: { plan: NonNullable<TradeIdea['plan']> }) {
+  if (plan.status === 'no_level') return null;
+  const step = plan.status === 'wait' ? 0 : plan.status === 'in_zone' || plan.status === 'armed' ? 1 : 2;
+  const skipped = plan.confirmation && !plan.confirmation.taken;
+  const steps = [
+    { label: step === 0 ? 'Waiting for retest' : 'Retest', hint: 'price back in the entry area' },
+    { label: step === 1 ? 'Waiting for confirmation' : 'Confirmation', hint: plan.status === 'armed' ? 'armed: next 15m close decides' : '15m close back in the trend' },
+    { label: plan.status === 'in_trade' ? 'Confirmed · in trade' : skipped ? 'Confirmed · skipped' : 'Confirmed', hint: skipped ? (plan.confirmation!.reason ?? '').replace(/_/g, ' ') : plan.confirmation ? `at ${new Date(plan.confirmation.time).toISOString().slice(11, 16)} UTC` : 'entry at market' },
+  ];
+  return (
+    <ol className="grid grid-cols-3 gap-1" aria-label="setup stage">
+      {steps.map((st, i) => {
+        const done = i < step || (i === 2 && step === 2);
+        const current = i === step;
+        const tone = i === 2 && done ? (skipped ? 'border-warning text-warning' : 'border-good text-good')
+          : current ? 'border-accent text-accent' : done ? 'border-good/60 text-good' : 'border-line text-ink-3';
+        return (
+          <li key={i} className={`rounded-lg border-2 px-2 py-1.5 ${tone} ${current ? 'bg-card-2' : ''}`} aria-current={current ? 'step' : undefined}>
+            <p className="flex items-center gap-1 text-xs font-semibold">
+              {done ? <CheckCircle2 size={12} aria-hidden /> : <span className={`h-2 w-2 rounded-full ${current ? 'animate-pulse bg-accent' : 'bg-line'}`} aria-hidden />}
+              {st.label}
+            </p>
+            <p className="truncate text-[11px] text-ink-3">{st.hint}</p>
+          </li>
+        );
+      })}
+    </ol>
+  );
 }
 
 export function TradePlanCard({ idea, compact = false }: { idea: TradeIdea; compact?: boolean }) {
@@ -39,6 +74,7 @@ export function TradePlanCard({ idea, compact = false }: { idea: TradeIdea; comp
           })()}
         </div>
         <p className="text-ink-2">{idea.biasReason}.</p>
+        {plan && <StageTracker plan={plan} />}
 
         {plan && plan.entry !== null && plan.stop !== null && plan.entryLow !== null && plan.entryHigh !== null ? (
           <>

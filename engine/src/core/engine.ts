@@ -15,7 +15,7 @@ import type {
 import { TIMEFRAME_MS } from '../../../shared/types';
 import type { EngineConfig } from '../config';
 import { SessionCalendar, type SessionInfo } from '../sessions';
-import { Portfolio, type CloseOrder, type CloseReason, type EntryFill, type OpenOrder, type Position } from '../portfolio';
+import { Portfolio, type CloseOrder, type CloseReason, type EntryFill, type OpenOrder, type Position, type SetupName } from '../portfolio';
 import { MarketBook, type SymbolAnalysis } from '../analysis/market';
 import { buildContext, lastOf, sign, type Context } from '../strategy/context';
 import { armedStillValid, planTrade, tryArm, tryConfirm, type Armed, type Confirmation, type TradePlan } from '../strategy/pullback';
@@ -25,12 +25,15 @@ import { decideEntry, equityOf, riskAtStop, unrealized, type SymbolRules } from 
 import { manage } from '../exits';
 import { fee, grossPnl, liquidationPrice, marketFill, roundQty, stopFill, targetFill } from '../sim/broker';
 import { tradeIdea } from '../analysis/levels';
+import { meanReversion, momentumContinuation, openingRangeBreakout, type AltSignal, type MeanRevParams, type MomentumParams, type OrbParams } from '../strategy/alternatives';
 
 const DIRECTIONS: Direction[] = ['long', 'short'];
 /** Entry-window blocks that end an armed setup; a funding pause only delays it. */
 const WINDOW_CLOSED = new Set(['outside_sessions', 'session_ending', 'weekend']);
 const FUNDING_EVERY = 8 * 3_600_000;
 const DAY = 86_400_000;
+/** How long a confirmation shows on the trade idea after it happened (longer while in the trade). */
+const CONFIRMED_SHOWN_MS = 3_600_000;
 
 export interface EngineDeps {
   config: EngineConfig;
@@ -41,7 +44,12 @@ export interface EngineDeps {
    * size, whatever its checks said and with no risk limits, so each setup's
    * outcome can be measured and any combination of checks tested afterwards.
    */
-  research?: { notional: number };
+  research?: {
+    notional: number;
+    /** Which setup to research; the default is the pullback. The others are experiments (strategy/alternatives.ts). */
+    setup?: SetupName;
+    params?: OrbParams | MomentumParams | MeanRevParams;
+  };
   /** Compute the chart-reading analysis (default true). */
   analysisExtras?: boolean;
 }
@@ -74,12 +82,16 @@ export class Engine {
   private readonly portfolio: Portfolio;
   private readonly market: MarketBook;
   private readonly armed = new Map<string, Armed>();
+  /** The latest confirmation per symbol|direction, for the trade ideas' stage. */
+  private readonly confirmed = new Map<string, { direction: Direction; time: number; taken: boolean; reason: string | null }>();
   private universe = new Set<string>();
   private readonly funding = new Map<string, number>();
   private readonly rules = new Map<string, SymbolRules>();
   private signals: SignalRecord[] = [];
   private shadows: Shadow[] = [];
   private shadowResults: ShadowResult[] = [];
+  /** Opening-range breakouts already taken, per coin and session. */
+  private readonly orbTaken = new Set<string>();
   private peakEquity: number;
   private dayStart = { day: -1, equity: 0 };
   private readonly cfg: EngineConfig;
@@ -162,8 +174,13 @@ export class Engine {
     // Analysis as of the last 15m close; distances and "in the entry area" from the latest minute's price.
     const live = this.market.recent(symbol, this.cfg.timeframes.exits, 1)[0];
     const ctx = live && live.closeTime > at15.t ? { ...at15, price: live.close } : at15;
+    const open = [...this.portfolio.positions(), ...this.portfolio.pendingEntries()].filter((p) => p.symbol === symbol).map((p) => p.side);
+    const recent = DIRECTIONS.map((d) => this.confirmed.get(`${symbol}|${d}`))
+      .filter((c): c is NonNullable<typeof c> => !!c && (this.clock - c.time <= CONFIRMED_SHOWN_MS || open.includes(c.direction)));
     return tradeIdea(ctx, {
       armed: this.armedSetups().filter((a) => a.symbol === symbol).map((a) => a.direction),
+      confirmed: recent,
+      inTrade: open,
       entryBlock: this.sessions.entryBlock(this.clock || last15.closeTime),
     });
   }
@@ -296,7 +313,8 @@ export class Engine {
       const ctx = buildContext(this.market, c.symbol, t, this.cfg, this.funding.get(c.symbol) ?? null);
       if (!ctx) continue;
       for (const p of managed) out.push(...this.managePosition(ctx, p));
-      if (inUniverse) out.push(...this.evaluate(ctx));
+      const setup = this.deps.research?.setup ?? 'pullback';
+      if (inUniverse) out.push(...(setup === 'pullback' ? this.evaluate(ctx) : this.evaluateAlternative(ctx, setup)));
     }
     return out;
   }
@@ -385,7 +403,7 @@ export class Engine {
     const fill: EntryFill = {
       role: 'entry', side: e.side, qty, price, stop: e.stop, target: e.target,
       fee: fee(qty * price, cfg.sim), session: this.sessions.ownerAt(e.placedAt),
-      leverage: cfg.leverage, liqPrice, chochLevel: e.chochLevel, signalId: e.signalId,
+      leverage: cfg.leverage, liqPrice, chochLevel: e.chochLevel, signalId: e.signalId, setup: e.setup ?? 'pullback',
     };
     // Recorded at the candle's open: the moment the fill happened.
     return [this.emit('order_filled', e.positionId, e.symbol, { ...fill, notional: qty * price, margin: (qty * price) / cfg.leverage }, c.openTime)];
@@ -484,13 +502,45 @@ export class Engine {
       const fresh = tryArm(ctx, dir);
       if (fresh) {
         this.armed.set(key, fresh);
+        this.confirmed.delete(key);
         this.signal(symbol, dir, 'armed', null, {
           armedId: fresh.id, price: fresh.price, factors: fresh.factors, zone: fresh.zone && { id: fresh.zone.id, low: fresh.zone.low, high: fresh.zone.high, status: fresh.zone.status },
           areaLow: fresh.areaLow, areaHigh: fresh.areaHigh, expiresAt: fresh.expiresAt, trendState: ctx.analysis[dir].state,
+          // Entry, stop and target if it confirmed now; the real plan is made at the confirmation close.
+          planEstimate: planTrade(ctx, fresh),
         });
       }
     }
     return out;
+  }
+
+  /** Research only: an alternative setup, under the session rule, recorded like a taken pullback signal. */
+  private evaluateAlternative(ctx: Context, setup: Exclude<SetupName, 'pullback'>): TradeEvent[] {
+    const research = this.deps.research!;
+    if (this.sessions.entryBlock(ctx.t)) return [];
+    const owner = this.sessions.ownerAt(ctx.t);
+    const orbKey = owner ? `${ctx.symbol}|${owner.name}|${owner.openTime}` : '';
+    let sig: AltSignal | null = null;
+    if (setup === 'orb') sig = openingRangeBreakout(ctx, owner, research.params as OrbParams, this.orbTaken.has(orbKey));
+    else if (setup === 'momentum') sig = momentumContinuation(ctx, research.params as MomentumParams);
+    else sig = meanReversion(ctx, research.params as MeanRevParams);
+    if (!sig) return [];
+    if (setup === 'orb') this.orbTaken.add(orbKey);
+    const id = `${ctx.symbol}-${setup}-${ctx.t}`;
+    const risk = Math.abs(ctx.price - sig.stop);
+    const plan = {
+      entry: ctx.price, stop: sig.stop, target: sig.target, targetSource: setup,
+      stopDistancePct: (risk / ctx.price) * 100, rewardRisk: Math.abs(sig.target - ctx.price) / risk,
+    };
+    this.signals.push({
+      time: this.clock, symbol: ctx.symbol, setup: 'pullback', direction: sig.direction, status: 'taken', reason: null,
+      payload: { armedId: id, setup, plan, score: { total: 0, points: {} }, failures: [], filters: [], detail: sig.detail, session: owner?.name ?? null },
+    });
+    const order: OpenOrder = {
+      action: 'open', orderType: 'market', side: sig.direction, notional: research.notional, stop: sig.stop, target: sig.target,
+      chochLevel: sig.level, signalId: id, refPrice: ctx.price, setup,
+    };
+    return [this.emit('order_placed', `${id}-pos`, ctx.symbol, { ...order, plan })];
   }
 
   /** A confirmed setup: session, filters, stop, reward/risk, score, then risk. The first failure is the reason. */
@@ -514,6 +564,7 @@ export class Engine {
     });
     if (risk && !risk.ok) failures.push(risk.reason!);
     const status = failures.length ? 'filtered' : 'taken';
+    this.confirmed.set(`${a.symbol}|${a.direction}`, { direction: a.direction, time: ctx.t, taken: status === 'taken', reason: failures[0] ?? null });
     this.signal(a.symbol, a.direction, status, failures[0] ?? null, {
       armedId: a.id, armedAt: a.armedAt, factors: a.factors, trendState: ctx.analysis[a.direction].state,
       session: this.sessions.ownerAt(ctx.t)?.name ?? null, confirmation: conf, plan, score, filters, failures, risk,

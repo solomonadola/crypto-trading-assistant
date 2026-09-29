@@ -136,7 +136,7 @@ describe('account bookkeeping', () => {
 describe('trade management', () => {
   const pos = (over = {}) => ({
     id: 'p', symbol: 'SOLUSDT', side: 'long' as const, qty: 1, initialQty: 1, entryPrice: 100, stop: 98, initialStop: 98, target: 105,
-    openedAt: u('2026-07-15T10:00Z'), session: null, leverage: 3, liqPrice: 70, chochLevel: null, signalId: null,
+    openedAt: u('2026-07-15T10:00Z'), session: null, leverage: 3, liqPrice: 70, chochLevel: null, signalId: null, setup: 'pullback' as const,
     ladderStep: -1, partialDone: false, fees: 0, funding: 0, realized: 0, pendingClose: null, ...over,
   });
   const ctx = (price: number, over: Partial<Context> = {}): Context => ({

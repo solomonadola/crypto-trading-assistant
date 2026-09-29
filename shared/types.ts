@@ -202,6 +202,8 @@ export interface WatchLevel {
   /** From the current price, percent. */
   distancePct: number;
   why: string;
+  /** If price closes through this level: the next key levels beyond it, nearest first (where it may run to next). */
+  ifBroken?: { price: number; distancePct: number; sources: string[] }[];
 }
 
 /** Advisory: key levels and a suggested plan for one coin. Separate from the engine's own entries. */
@@ -223,8 +225,17 @@ export interface TradeIdea {
   watch: WatchLevel[];
   plan: null | {
     direction: Direction;
-    /** armed: the engine waits for confirmation; in_zone: price is in the entry area; wait: not there yet; no_level: nothing to enter from. */
-    status: 'armed' | 'in_zone' | 'wait' | 'no_level';
+    /**
+     * The stage, first to last: wait (waiting for the retest: price not in the
+     * entry area yet), in_zone (retest: price is there, waiting for the 15m
+     * confirmation close), armed (the engine has armed it and waits for that
+     * close), confirmed (the close came; taken or skipped, see confirmation),
+     * in_trade (confirmed and the engine holds a position). no_level: nothing
+     * to enter from.
+     */
+    status: 'in_trade' | 'confirmed' | 'armed' | 'in_zone' | 'wait' | 'no_level';
+    /** The engine's latest 15m confirmation in this direction, within the last hour or while in the trade. */
+    confirmation: null | { time: number; taken: boolean; reason: string | null };
     entryLow: number | null;
     entryHigh: number | null;
     entry: number | null;
