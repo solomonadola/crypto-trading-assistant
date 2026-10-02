@@ -12,6 +12,12 @@ import type { Context } from '../strategy/context';
 
 export type LiquidityName = 'PDH' | 'PDL' | 'asian_high' | 'asian_low' | 'london_high' | 'london_low' | 'EQH' | 'EQL' | '4h_swing_high' | '4h_swing_low';
 
+export const LIQUIDITY_NAMES: Record<LiquidityName, string> = {
+  PDH: 'previous day high', PDL: 'previous day low', asian_high: 'Asian high', asian_low: 'Asian low',
+  london_high: 'London high', london_low: 'London low', EQH: 'equal highs', EQL: 'equal lows',
+  '4h_swing_high': '4h swing high', '4h_swing_low': '4h swing low',
+};
+
 export interface LiquidityLevel {
   name: LiquidityName;
   /** buy: above the price, where shorts' stops and breakout buys sit (a long's target). sell: below. */

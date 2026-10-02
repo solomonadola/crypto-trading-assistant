@@ -88,19 +88,24 @@ export const INDICATORS = [
   { id: 'profile24h', group: 'Levels', label: 'Volume profile 24h' },
   { id: 'profile7d', group: 'Levels', label: 'Volume profile 7d' },
   { id: 'plan', group: 'Levels', label: 'Plan & key levels' },
+  { id: 'liquidity', group: 'Smart money', label: 'Liquidity (PDH/PDL, Asian, London, equal highs/lows)' },
+  { id: 'orderblocks', group: 'Smart money', label: 'Order blocks (1h)' },
+  { id: 'premium', group: 'Smart money', label: 'Premium / discount (4h range)' },
+  { id: 'killzones', group: 'Smart money', label: 'Killzones (London, New York)' },
   { id: 'volume', group: 'Panels', label: 'Volume' },
   { id: 'rsi', group: 'Panels', label: 'RSI 14' },
   { id: 'trades', group: 'Marks', label: 'My trades' },
   { id: 'positions', group: 'Marks', label: 'Open positions' },
 ] as const;
 export type IndicatorId = (typeof INDICATORS)[number]['id'];
-export const DEFAULT_INDICATORS: IndicatorId[] = ['ema20', 'ema50', 'supertrend', 'sessions', 'zones', 'fvg', 'profile24h', 'plan', 'volume', 'trades', 'positions'];
+export const DEFAULT_INDICATORS: IndicatorId[] = ['ema50', 'ema200', 'zones', 'profile24h', 'plan', 'liquidity', 'orderblocks', 'premium', 'killzones', 'volume', 'trades', 'positions'];
 
 export interface ChartOverlays {
   zones: Zone[];
   fvgs: Fvg[];
   profiles: VolumeProfile[];
   sessions: SessionInstance[];
+  killzones: { name: string; openTime: number; closeTime: number }[];
 }
 
 interface Props {
@@ -292,14 +297,19 @@ export function CandleChart({ viewKey, candles, overlays, trades, positions, tfM
         </div>
       )}
       <div ref={el} className="h-[640px] w-full" />
-      <Overlay chart={chartRef.current} series={candleRef.current} candles={candles} overlays={overlays} show={show} tf={tf} tfMs={tfMs} />
+      <Overlay chart={chartRef.current} series={candleRef.current} candles={candles} overlays={overlays} show={show} tf={tf} tfMs={tfMs} idea={idea ?? null} />
     </div>
   );
 }
 
+const LIQUIDITY_SHORT: Record<string, string> = {
+  PDH: 'PDH', PDL: 'PDL', asian_high: 'Asian high', asian_low: 'Asian low', london_high: 'London high', london_low: 'London low',
+  EQH: 'EQH', EQL: 'EQL', '4h_swing_high': '4h high', '4h_swing_low': '4h low',
+};
+
 /** Session shading, boxes and the volume profile, drawn in SVG over the price panel at the chart's own coordinates. */
-function Overlay({ chart, series, candles, overlays, show, tf, tfMs }: {
-  chart: IChartApi | null; series: ISeriesApi<'Candlestick'> | null; candles: Candle[]; overlays: ChartOverlays; show: Set<IndicatorId>; tf: string; tfMs: number;
+function Overlay({ chart, series, candles, overlays, show, tf, tfMs, idea }: {
+  chart: IChartApi | null; series: ISeriesApi<'Candlestick'> | null; candles: Candle[]; overlays: ChartOverlays; show: Set<IndicatorId>; tf: string; tfMs: number; idea: TradeIdea | null;
 }) {
   if (!chart || !series || !candles.length) return null;
   const width = chart.timeScale().width();
@@ -363,6 +373,64 @@ function Overlay({ chart, series, candles, overlays, show, tf, tfMs }: {
           </g>
         );
       })}
+
+      {show.has('premium') && idea?.dealingRange && (() => {
+        // The 4h dealing range: premium (upper half) tinted with the sell colour, discount with the buy colour.
+        const r = idea.dealingRange;
+        const yh = y(r.high);
+        const yl = y(r.low);
+        const ye = y((r.high + r.low) / 2);
+        if (yh === null || yl === null || ye === null) return null;
+        return (
+          <g>
+            <rect x={0} y={Math.max(0, yh)} width={width} height={Math.max(0, Math.min(height, ye) - Math.max(0, yh))} fill={sell} fillOpacity={0.05} />
+            <rect x={0} y={Math.max(0, ye)} width={width} height={Math.max(0, Math.min(height, yl) - Math.max(0, ye))} fill={buy} fillOpacity={0.05} />
+            {ye > 0 && ye < height && <line x1={0} x2={width} y1={ye} y2={ye} stroke="var(--color-ink-2)" strokeOpacity={0.6} strokeDasharray="2 4" />}
+            {ye > 12 && ye < height && <text x={6} y={ye - 4} fontSize={10} fill="var(--color-ink-2)">equilibrium {fmtPrice((r.high + r.low) / 2)} · premium above, discount below</text>}
+          </g>
+        );
+      })()}
+
+      {show.has('killzones') && tfMs < 14_400_000 && overlays.killzones.map((k) => {
+        const x1 = x(k.openTime);
+        const x2 = x(k.closeTime);
+        if (x2 <= 0 || x1 >= width || x2 - x1 < 2) return null;
+        return (
+          <g key={`kz${k.name}${k.openTime}`}>
+            <rect x={x1} y={0} width={x2 - x1} height={height} fill="var(--color-accent)" fillOpacity={0.07} />
+            <rect x={x1} y={0} width={x2 - x1} height={3} fill="var(--color-accent)" fillOpacity={0.8} />
+            {x2 - x1 > 40 && <text x={x1 + 4} y={14} fontSize={10} fill="var(--color-accent)">{SESSION_LABEL[k.name] ?? k.name} killzone</text>}
+          </g>
+        );
+      })}
+
+      {show.has('orderblocks') && tf !== '1m' && (idea?.orderBlocks ?? []).map((b) => box(
+        `ob${b.side}${b.createdAt}${b.low}`, b.createdAt - 2 * 3_600_000, b.high, b.low,
+        { fill: b.side === 'bullish' ? buy : sell, fillOpacity: 0.1, stroke: b.side === 'bullish' ? buy : sell, strokeOpacity: 0.9, strokeWidth: 1, strokeDasharray: '2 2' },
+        `${b.side} order block`,
+      ))}
+
+      {show.has('liquidity') && (() => {
+        // One line per price: levels at the same price (say the PDL and the Asian low) share a label.
+        const byPrice = new Map<number, { names: string[]; side: 'buy' | 'sell'; intact: boolean }>();
+        for (const l of idea?.liquidity ?? []) {
+          const g = byPrice.get(l.price) ?? { names: [], side: l.side, intact: true };
+          g.names.push(LIQUIDITY_SHORT[l.name] ?? l.name);
+          g.intact = g.intact && l.intact;
+          byPrice.set(l.price, g);
+        }
+        return [...byPrice].map(([p, g]) => {
+          const yy = y(p);
+          if (yy === null || yy < 0 || yy > height) return null;
+          const color = g.side === 'sell' ? buy : sell;   // lows (sell-side) on the buy colour, highs on the sell colour
+          return (
+            <g key={`liq${p}`} opacity={g.intact ? 1 : 0.35}>
+              <line x1={0} x2={width} y1={yy} y2={yy} stroke={color} strokeWidth={1.25} strokeDasharray="8 4" />
+              <text x={6} y={yy - 3} fontSize={10} fill={color}>{g.names.join(' · ')} {fmtPrice(p)}{g.intact ? '' : ' · swept'}</text>
+            </g>
+          );
+        });
+      })()}
 
       {show.has('zones') && overlays.zones.map((z) => box(
         z.id, z.createdAt, z.high, z.low,

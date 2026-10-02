@@ -753,7 +753,11 @@ The existing pullback setup (Section 8.4), tightened:
 - Market page: model and speed badges; a "moving fast" flag for coins whose
   last 15m candle range is at least 3 × ATR(15m). Display only.
 - Trade ideas show the liquidity levels (Asian, London, PDH/PDL, EQH/EQL) and
-  the premium / discount position.
+  the premium / discount position. Their plan follows Model 1 (entry at the
+  nearest zone or order block, stop beyond it, take-profit at liquidity at
+  2R), and the levels to wait for include Model 3's sweep levels.
+- Chart indicators ("Smart money" in the picker): liquidity lines, 1h order
+  blocks, the 4h premium / discount range and the killzones.
 
 ### 18.8 Build order
 

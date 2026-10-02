@@ -151,6 +151,23 @@ export class SessionCalendar {
     return null;
   }
 
+  /** Killzone windows overlapping [from, to), by start (for the chart). */
+  killzonesBetween(from: number, to: number): { name: string; openTime: number; closeTime: number }[] {
+    const out: { name: string; openTime: number; closeTime: number }[] = [];
+    const days = Math.ceil((to - from) / 86_400_000) + 2;
+    for (const k of this.cfg.killzones) {
+      const [sh, sm] = hhmm(k.start);
+      const [eh, em] = hhmm(k.end);
+      for (let i = -1; i < days; i++) {
+        const base = localParts(from + i * 86_400_000, k.tz);
+        const openTime = localToUtc(base.y, base.m, base.d, sh, sm, k.tz);
+        const closeTime = localToUtc(base.y, base.m, base.d, eh, em, k.tz);
+        if (openTime < to && closeTime > from && !out.some((x) => x.name === k.name && x.openTime === openTime)) out.push({ name: k.name, openTime, closeTime });
+      }
+    }
+    return out.sort((a, b) => a.openTime - b.openTime);
+  }
+
   /** Why a new trade may not open at `t`, or null if it may. */
   entryBlock(t: number): EntryBlock | null {
     if (!this.cfg.enabled) return null;

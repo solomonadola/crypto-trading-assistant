@@ -397,6 +397,11 @@ app.get('/api/sessions', (req, res) => {
   const from = Math.max(Number(req.query.from) || to - 86_400_000, to - 60 * 86_400_000);
   res.json(engine.sessions.between(from, to));
 });
+app.get('/api/killzones', (req, res) => {
+  const to = Number(req.query.to) || engine.now() || Date.now();
+  const from = Math.max(Number(req.query.from) || to - 86_400_000, to - 60 * 86_400_000);
+  res.json(engine.sessions.killzonesBetween(from, to));
+});
 app.get('/api/sessions/today', (_req, res) => {
   const t = engine.now() || Date.now();
   const dayStart = Math.floor(t / 86_400_000) * 86_400_000;

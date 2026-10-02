@@ -204,7 +204,7 @@ export interface ChecklistItem {
 }
 
 export interface WatchLevel {
-  kind: 'entry' | 'invalidation' | 'target' | 'breakout' | 'range_top' | 'range_bottom';
+  kind: 'entry' | 'invalidation' | 'target' | 'breakout' | 'range_top' | 'range_bottom' | 'sweep';
   label: string;
   price: number;
   /** From the current price, percent. */
@@ -237,6 +237,8 @@ export interface TradeIdea {
   movingFast: boolean;
   /** The 4h dealing range and where price sits in it: under 0.5 discount, over 0.5 premium. */
   dealingRange: { high: number; low: number; position: number } | null;
+  /** Unmitigated 1h order blocks on both sides (Section 18.5). */
+  orderBlocks: { side: 'bullish' | 'bearish'; low: number; high: number; createdAt: number }[];
   /** Where stops sit (Section 18.3), nearest first; `intact` while no 15m candle has traded through. */
   liquidity: { name: string; side: 'buy' | 'sell'; price: number; distancePct: number; intact: boolean }[];
   /**

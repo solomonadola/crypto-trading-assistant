@@ -132,6 +132,14 @@ describe('entry window', () => {
     expect(cal(kz).killzoneAt(u('2026-01-15T15:30Z'))).toBe('newyork');
   });
 
+  it('killzone windows for the chart, in UTC, following DST', () => {
+    const c = cal({ killzones: loadConfig('engine/config/config.yaml').sessions.killzones });
+    const span = (from: string, to: string) => c.killzonesBetween(u(from), u(to)).map((k) => `${k.name} ${iso(k.openTime)!.slice(11)}-${iso(k.closeTime)!.slice(11)}`);
+    expect(span('2026-07-15T00:00Z', '2026-07-16T00:00Z')).toEqual(['london 06:00Z-09:00Z', 'newyork 11:30Z-15:00Z']);
+    expect(span('2026-01-15T00:00Z', '2026-01-16T00:00Z')).toEqual(['london 07:00Z-10:00Z', 'newyork 12:30Z-16:00Z']);
+    expect(span('2026-07-15T00:00Z', '2026-07-17T00:00Z')).toHaveLength(4);
+  });
+
   it('weekdays only, when configured, uses the session\'s own local day', () => {
     expect(block('2026-09-26T13:00Z', { weekdays_only: true })).toBe('weekend');
     // Monday 00:30 UTC is Monday 09:30 in Tokyo.

@@ -3,19 +3,28 @@ import { CandlestickChart, CheckCircle2, CircleDashed, Crosshair, Layers, Slider
 import { usePoll, usePrices, type AccountSummary, type Analysis, type Candle, type ClosedTradeView, type MarketRow, type SessionInstance } from '../lib/api';
 import { coin, pct, price } from '../lib/format';
 import { Badge, Card, StateBadge, TrendChip } from '../components/ui';
-import { CandleChart, DEFAULT_INDICATORS, INDICATORS, type IndicatorId } from '../components/charts';
+import { CandleChart, DEFAULT_INDICATORS, INDICATORS, type ChartOverlays, type IndicatorId } from '../components/charts';
 import { TradePlanCard } from '../components/TradePlan';
 import type { TradeIdea, WatchLevel } from '../../shared/types';
 
 const TFS = [['15m', 900_000], ['1h', 3_600_000], ['4h', 14_400_000], ['1m', 60_000]] as const;
 const STORE_KEY = 'chart-indicators';
+/** Set once the smart-money indicators have been switched on for a saved choice. */
+const SMART_KEY = 'chart-indicators-smart';
 
 /** The viewer's indicator choice, remembered in this browser (a convenience: defaults when storage is unavailable). */
 function useIndicators(): [Set<IndicatorId>, (id: IndicatorId) => void, () => void] {
   const [ids, setIds] = useState<IndicatorId[]>(() => {
     try {
       const saved = JSON.parse(localStorage.getItem(STORE_KEY) ?? 'null');
-      if (Array.isArray(saved)) return saved.filter((x): x is IndicatorId => INDICATORS.some((i) => i.id === x));
+      if (Array.isArray(saved)) {
+        const kept = saved.filter((x): x is IndicatorId => INDICATORS.some((i) => i.id === x));
+        // Saved before the smart-money items existed: switch those on, once.
+        if (localStorage.getItem(SMART_KEY)) return kept;
+        localStorage.setItem(SMART_KEY, '1');
+        return [...new Set<IndicatorId>([...kept, 'liquidity', 'orderblocks', 'premium', 'killzones'])];
+      }
+      localStorage.setItem(SMART_KEY, '1');   // the defaults already include them
     } catch { /* storage unavailable */ }
     return DEFAULT_INDICATORS;
   });
@@ -69,7 +78,7 @@ function IndicatorPicker({ show, toggle, reset }: { show: Set<IndicatorId>; togg
 }
 
 const WATCH_TONE: Record<WatchLevel['kind'], string> = {
-  entry: 'text-accent', invalidation: 'text-critical', target: 'text-good', breakout: 'text-ink', range_top: 'text-supply', range_bottom: 'text-demand',
+  entry: 'text-accent', invalidation: 'text-critical', target: 'text-good', breakout: 'text-ink', range_top: 'text-supply', range_bottom: 'text-demand', sweep: 'text-warning',
 };
 
 /** Where price may run next if it closes through a level. */
@@ -155,6 +164,7 @@ export function ChartPage({ symbol, setSymbol }: { symbol: string; setSymbol: (s
   const from = candles?.length ? Math.floor(candles[0].openTime / day) * day : null;
   const to = candles?.length ? Math.floor(candles[candles.length - 1].openTime / day) * day + 2 * day : null;
   const { data: sessions } = usePoll<SessionInstance[]>(from && to ? `/api/sessions?from=${from}&to=${to}` : null, 300_000);
+  const { data: killzones } = usePoll<ChartOverlays['killzones']>(from && to ? `/api/killzones?from=${from}&to=${to}` : null, 300_000);
 
   const symbols = useMemo(() => [...new Set([symbol, 'BTCUSDT', ...(market ?? []).map((r) => r.symbol)])], [market, symbol]);
   const mine = useMemo(() => (trades ?? []).filter((t) => t.symbol === symbol), [trades, symbol]);
@@ -186,7 +196,7 @@ export function ChartPage({ symbol, setSymbol }: { symbol: string; setSymbol: (s
           <CandleChart
             viewKey={`${symbol}|${tf}`}
             candles={candles}
-            overlays={{ zones: tf === '1m' ? [] : zones, fvgs: analysis?.fvgs ?? [], profiles: analysis?.profiles ?? [], sessions: sessions ?? [] }}
+            overlays={{ zones: tf === '1m' ? [] : zones, fvgs: analysis?.fvgs ?? [], profiles: analysis?.profiles ?? [], sessions: sessions ?? [], killzones: killzones ?? [] }}
             trades={mine} positions={open} tfMs={tfMs} tf={tf} idea={idea} show={show}
           />
         ) : <div className="grid h-[640px] place-items-center text-sm text-ink-3">Loading candles…</div>}
