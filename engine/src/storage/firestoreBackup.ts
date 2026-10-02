@@ -15,6 +15,8 @@ export interface BackupState {
   clock: number;
   lastEventId: number;
   universe: string[];
+  /** Coins added by hand for analysis only. */
+  watchlist?: string[];
 }
 
 export interface FirebaseTarget {

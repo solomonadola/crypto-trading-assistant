@@ -13,7 +13,7 @@ import {
   type IChartApi, type IPriceLine, type ISeriesApi, type ISeriesMarkersPluginApi, type SeriesMarker, type SeriesType, type Time, type UTCTimestamp,
 } from 'lightweight-charts';
 import type { Candle, ClosedTradeView, EquityPoint, PositionViewLike, TradeIdea, Zone } from './chartTypes';
-import type { Fvg, SessionInstance, VolumeProfile } from '../lib/api';
+import { usePrices, type Fvg, type SessionInstance, type VolumeProfile } from '../lib/api';
 import { bollingerBands, ema, rsi, supertrend, vwapDaily } from '../../engine/src/analysis/indicators';
 import { SESSION_LABEL } from '../lib/format';
 import { price as fmtPrice, usd, dateTime } from '../lib/format';
@@ -139,6 +139,10 @@ export function CandleChart({ viewKey, candles, overlays, trades, positions, tfM
   const [hover, setHover] = useState<Candle | null>(null);
   const [, setView] = useState(0);
   const byTime = useRef(new Map<number, Candle>());
+  /** The newest bar drawn: the last loaded candle, then moved by live prices. */
+  const lastBar = useRef<Candle | null>(null);
+  const [liveBar, setLiveBar] = useState<Candle | null>(null);
+  const live = usePrices();
   const showKey = [...show].sort().join(',');
 
   // Created once per symbol and timeframe.
@@ -161,6 +165,7 @@ export function CandleChart({ viewKey, candles, overlays, trades, positions, tfM
     candleRef.current = s;
     extras.current = [];
     priceLines.current = [];
+    lastBar.current = null;
     needsFit.current = true;
     return () => { ro.disconnect(); c.remove(); chartRef.current = null; candleRef.current = null; markersRef.current = null; };
   }, [viewKey]);
@@ -173,6 +178,8 @@ export function CandleChart({ viewKey, candles, overlays, trades, positions, tfM
     const range = c.timeScale().getVisibleLogicalRange();
     s.setData(candles.map((k) => ({ time: sec(k.openTime), open: k.open, high: k.high, low: k.low, close: k.close })));
     byTime.current = new Map(candles.map((k) => [sec(k.openTime), k]));
+    lastBar.current = candles[candles.length - 1];
+    setLiveBar(null);
 
     for (const x of extras.current) c.removeSeries(x);
     extras.current = [];
@@ -235,6 +242,24 @@ export function CandleChart({ viewKey, candles, overlays, trades, positions, tfM
     setView((x) => x + 1);
   }, [candles, showKey, viewKey]);
 
+  // Live prices (every few seconds) move the last bar, or open the next one when its time comes.
+  // Display only: the loaded candles replace these on the next refetch.
+  useEffect(() => {
+    const s = candleRef.current;
+    const last = lastBar.current;
+    const p = last ? live?.prices[last.symbol] : undefined;
+    if (!s || !last || !live || p === undefined) return;
+    const openTime = Math.floor(live.time / tfMs) * tfMs;
+    if (openTime < last.openTime) return;
+    const bar: Candle = openTime === last.openTime
+      ? { ...last, high: Math.max(last.high, p), low: Math.min(last.low, p), close: p }
+      : { ...last, openTime, closeTime: openTime + tfMs - 1, open: last.close, high: Math.max(last.close, p), low: Math.min(last.close, p), close: p, volume: 0, quoteVolume: 0, trades: 0 };
+    s.update({ time: sec(bar.openTime), open: bar.open, high: bar.high, low: bar.low, close: bar.close });
+    byTime.current.set(sec(bar.openTime), bar);
+    lastBar.current = bar;
+    setLiveBar(bar);
+  }, [live, tfMs]);
+
   // Price lines: open positions, and the plan with the strongest key levels.
   useEffect(() => {
     const s = candleRef.current;
@@ -284,7 +309,7 @@ export function CandleChart({ viewKey, candles, overlays, trades, positions, tfM
       .sort((a, b) => (a.time as number) - (b.time as number)));
   }, [trades, candles, tfMs, showKey, viewKey]);
 
-  const k = hover ?? candles[candles.length - 1];
+  const k = hover ?? liveBar ?? candles[candles.length - 1];
   return (
     <div className="relative">
       {k && (

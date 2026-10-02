@@ -7,6 +7,7 @@ import { scoreSignal } from '../src/scoring';
 import { baseName, prefilter, rank } from '../src/scanner';
 import { openDb } from '../src/storage/db';
 import { SignalLog } from '../src/storage/signals';
+import { resolveSymbol } from '../src/symbols';
 import type { Pivot } from '../src/analysis/indicators';
 import type { Zone } from '../src/analysis/zones';
 import type { Candle } from '../../shared/types';
@@ -305,6 +306,21 @@ describe('scanner', () => {
     expect(baseName('1000PEPE')).toBe('PEPE');
     expect(baseName('1MBABYDOGE')).toBe('BABYDOGE');
     expect(baseName('1INCH')).toBe('1INCH');
+  });
+
+  it('finds the perpetual a typed coin names', () => {
+    const list = [
+      { symbol: 'BTCUSDT', baseAsset: 'BTC' },
+      { symbol: '1000PEPEUSDT', baseAsset: '1000PEPE' },
+      { symbol: '1INCHUSDT', baseAsset: '1INCH' },
+    ];
+    expect(resolveSymbol('btc', list)).toBe('BTCUSDT');
+    expect(resolveSymbol(' BTC/USDT ', list)).toBe('BTCUSDT');
+    expect(resolveSymbol('pepe', list)).toBe('1000PEPEUSDT');
+    expect(resolveSymbol('1000pepeusdt', list)).toBe('1000PEPEUSDT');
+    expect(resolveSymbol('1inch', list)).toBe('1INCHUSDT');
+    expect(resolveSymbol('NOPE', list)).toBeNull();
+    expect(resolveSymbol('  ', list)).toBeNull();
   });
 });
 

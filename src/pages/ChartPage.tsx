@@ -5,6 +5,7 @@ import { coin, pct, price } from '../lib/format';
 import { Badge, Card, StateBadge, TrendChip } from '../components/ui';
 import { CandleChart, DEFAULT_INDICATORS, INDICATORS, type ChartOverlays, type IndicatorId } from '../components/charts';
 import { TradePlanCard } from '../components/TradePlan';
+import { AddCoin } from '../components/AddCoin';
 import type { TradeIdea, WatchLevel } from '../../shared/types';
 
 const TFS = [['15m', 900_000], ['1h', 3_600_000], ['4h', 14_400_000], ['1m', 60_000]] as const;
@@ -180,6 +181,7 @@ export function ChartPage({ symbol, setSymbol }: { symbol: string; setSymbol: (s
         icon={<CandlestickChart size={16} />}
         right={
           <div className="flex flex-wrap items-center gap-2">
+            <AddCoin onAdded={setSymbol} />
             <select value={symbol} onChange={(e) => setSymbol(e.target.value)} className="rounded-lg border border-line bg-card-2 px-2 py-1 text-xs">
               {symbols.map((s) => <option key={s} value={s}>{coin(s)}</option>)}
             </select>
@@ -199,7 +201,7 @@ export function ChartPage({ symbol, setSymbol }: { symbol: string; setSymbol: (s
             overlays={{ zones: tf === '1m' ? [] : zones, fvgs: analysis?.fvgs ?? [], profiles: analysis?.profiles ?? [], sessions: sessions ?? [], killzones: killzones ?? [] }}
             trades={mine} positions={open} tfMs={tfMs} tf={tf} idea={idea} show={show}
           />
-        ) : <div className="grid h-[640px] place-items-center text-sm text-ink-3">Loading candles…</div>}
+        ) : <div className="grid h-[640px] place-items-center text-sm text-ink-3">Loading candles… (a newly added coin takes a few seconds to fetch its history)</div>}
         <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs text-ink-2">
           {lines.map((l) => <span key={l.id}>{l.label}</span>)}
           {show.has('sessions') && <span className="flex items-center gap-1"><span className="h-1 w-3 rounded bg-asian" />Asian<span className="ml-1 h-1 w-3 rounded bg-london" />London<span className="ml-1 h-1 w-3 rounded bg-newyork" />New York</span>}
