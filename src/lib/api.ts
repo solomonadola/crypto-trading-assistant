@@ -29,6 +29,10 @@ export interface Status {
 export interface Direction { state: string; emaAligned: boolean; tradable: boolean }
 export interface MarketRow {
   symbol: string;
+  /** Picked by the scanner: the engine may trade it. */
+  scanned: boolean;
+  /** Added by hand to the watchlist: analysed, not traded unless the scanner also picks it. */
+  watched: boolean;
   price: number | null;
   changePct: number | null;
   quoteVolume: number | null;
@@ -98,8 +102,8 @@ export async function get<T>(url: string): Promise<T> {
   return res.json();
 }
 
-export async function post<T = unknown>(url: string, body?: unknown): Promise<T> {
-  const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(await authHeaders()) }, body: body ? JSON.stringify(body) : undefined });
+export async function post<T = unknown>(url: string, body?: unknown, method = 'POST'): Promise<T> {
+  const res = await fetch(url, { method, headers: { 'Content-Type': 'application/json', ...(await authHeaders()) }, body: body ? JSON.stringify(body) : undefined });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error ?? `${url}: ${res.status}`);
   return data;

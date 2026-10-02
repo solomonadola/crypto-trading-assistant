@@ -11,7 +11,7 @@ import { loadConfig, configHash } from './config';
 import { getKv, openDb, setKv } from './storage/db';
 import { EventLog } from './storage/eventLog';
 import { BinancePublic } from './feed/binancePublic';
-import { CandleStore } from './feed/candleStore';
+import { CandleStore, formingCandle } from './feed/candleStore';
 import { LiveFeed } from './feed/liveFeed';
 import { replayCandles } from './feed/replayFeed';
 import { CommandError, Engine, type EngineCommand } from './core/engine';
@@ -24,8 +24,9 @@ import { unrealized } from './risk';
 import { summarize } from './stats';
 import { noticesFor } from './notices';
 import { scan, type ScanResult } from './scanner';
+import { resolveSymbol } from './symbols';
 import type { SymbolInfo } from './feed/binancePublic';
-import type { Candle, Timeframe } from '../../shared/types';
+import { TIMEFRAME_MS, type Candle, type Timeframe } from '../../shared/types';
 
 dotenv.config({ path: ['.env.local', '.env'], quiet: true });
 
@@ -35,6 +36,8 @@ process.on('unhandledRejection', (err) => console.log(`[engine] unhandled: ${err
 export const ENGINE_VERSION = '0.6.0';
 const CLOCK_KEY = 'engine_clock';
 const UNIVERSE_KEY = 'universe';
+const WATCHLIST_KEY = 'watchlist';
+const MAX_WATCHLIST = 20;
 const SIGNAL_RETENTION_DAYS = 30;
 const isProduction = process.env.NODE_ENV === 'production';
 
@@ -86,6 +89,8 @@ if (backup.target === 'firestore') {
 
 // The universe: the last scan's shortlist, or the configured watch list until the first scan.
 let universe: string[] = JSON.parse(getKv(db, UNIVERSE_KEY) ?? 'null') ?? config.feed.watch_symbols;
+// Coins added from the dashboard: fed and analysed like the universe, but never traded.
+let watchlist: string[] = JSON.parse(getKv(db, WATCHLIST_KEY) ?? '[]');
 
 /** Events in Firestore newer than the local log are added to it (a restore onto an empty disk, or another engine's work). */
 async function pullFromCloud(): Promise<number> {
@@ -98,11 +103,12 @@ async function pullFromCloud(): Promise<number> {
   if (state && state.clock > Number(getKv(db, CLOCK_KEY) ?? 0)) {
     setKv(db, CLOCK_KEY, String(state.clock));
     if (state.universe?.length) { universe = state.universe; setKv(db, UNIVERSE_KEY, JSON.stringify(universe)); }
+    if (state.watchlist) { watchlist = state.watchlist; setKv(db, WATCHLIST_KEY, JSON.stringify(watchlist)); }
   }
   return newer.length;
 }
 
-const backupState = (): BackupState => ({ clock: engine.now(), lastEventId: events.lastId(), universe });
+const backupState = (): BackupState => ({ clock: engine.now(), lastEventId: events.lastId(), universe, watchlist });
 
 async function pushToCloud(): Promise<void> {
   if (!cloud || backup.standby) return;
@@ -120,8 +126,16 @@ async function pushToCloud(): Promise<void> {
 // ---------------------------------------------------------------- engine
 
 engine.setUniverse(universe);
-// Fed: BTC (the filters compare every coin with it), the universe, and any coin with a position or pending entry.
-const symbols = () => [...new Set(['BTCUSDT', ...universe, ...engine.account().positions.map((p) => p.symbol), ...engine.account().pendingEntries.map((p) => p.symbol)])];
+// Coins open on a chart, with when the chart last asked for them: fed while viewed, so the chart stays live.
+const viewing = new Map<string, number>();
+const VIEW_TTL_MS = 10 * 60_000;
+// Fed: BTC (the filters compare every coin with it), the universe, the watchlist, coins on a chart, and any coin with a position or pending entry.
+const symbols = () => {
+  for (const [s, at] of viewing) if (Date.now() - at > VIEW_TTL_MS) viewing.delete(s);
+  return [...new Set(['BTCUSDT', ...universe, ...watchlist, ...viewing.keys(), ...engine.account().positions.map((p) => p.symbol), ...engine.account().pendingEntries.map((p) => p.symbol)])];
+};
+/** The coins the dashboard lists: the scanner's, then the ones added by hand. */
+const listed = () => [...new Set([...universe, ...watchlist])];
 
 /** Runs candles through the engine; its events, signals, results and clock are saved together or not at all. */
 const persist = db.transaction((batch: Candle[]) => {
@@ -156,6 +170,10 @@ function command(cmd: EngineCommand): ReturnType<typeof commandTx> {
 
 function process_(batch: Candle[]): void {
   if (!started || backup.standby) return;
+  // A coin fed again after a while brings a gap of candles older than the engine's clock: the engine
+  // skips those, so they go to the analysis only.
+  const old = batch.filter((c) => c.closeTime < engine.now());
+  if (old.length) engine.seedHistory(old);
   const { produced, sigs } = persist(batch);
   for (const e of produced) console.log(`[engine] ${iso(e.time)} ${e.type} ${e.symbol ?? ''} ${JSON.stringify(e.payload)}`);
   for (const s of sigs) console.log(`[signal] ${iso(s.time)} ${s.symbol} ${s.direction} ${s.status}${s.reason ? ` (${s.reason})` : ''}`);
@@ -412,11 +430,13 @@ app.get('/api/sessions/today', (_req, res) => {
 });
 app.get('/api/market', (_req, res) => {
   const rows = new Map((lastScan?.selected ?? []).map((r) => [r.symbol, r]));
-  res.json(universe.map((symbol) => {
+  res.json(listed().map((symbol) => {
     const a = engine.analysis(symbol);
     const last = store.latest(symbol, '1m', 1)[0];
     return {
       symbol,
+      scanned: universe.includes(symbol),
+      watched: watchlist.includes(symbol),
       price: last?.close ?? null,
       changePct: rows.get(symbol)?.changePct ?? null,
       quoteVolume: rows.get(symbol)?.quoteVolume ?? null,
@@ -449,10 +469,68 @@ app.get('/api/ideas/:symbol', (req, res) => {
   res.json(idea);
 });
 app.get('/api/ideas', (_req, res) => {
-  const ideas = universe.map((s) => ideaFor(s)).filter((x): x is NonNullable<typeof x> => x !== null);
+  const ideas = listed().map((s) => ideaFor(s)).filter((x): x is NonNullable<typeof x> => x !== null);
   // Signals (plans that fit the rules) first, then the rest; each from the largest profit to the take-profit down.
   ideas.sort((a, b) => Number(!!b.plan?.meetsRules) - Number(!!a.plan?.meetsRules) || (b.plan?.targetPct ?? -1) - (a.plan?.targetPct ?? -1));
   res.json(ideas);
+});
+
+/** A coin just added to the feed: its stored candles go to the analysis now, and the feed fetches the rest now rather than at the next minute. */
+function catchUpNow(symbol: string): void {
+  // Candles already stored (a coin the scanner once picked) go to the analysis at once.
+  for (const tf of config.feed.timeframes) {
+    engine.seedHistory(store.latest(symbol, tf, config.feed.history[tf] ?? 500, engine.now() || Date.now()));
+  }
+  // Then fetch the rest (once the feed has started), and tell the pages.
+  if (feed.status().state !== 'stopped') {
+    feed.poll()
+      .then(() => { ideaCache.clear(); broadcast('engine', { clock: engine.now() }); })
+      .catch((err) => console.log(`[feed] ${message(err)}`));
+  }
+}
+
+// The watchlist: coins to analyse besides the scanner's. Analysis only; the engine trades the scanner's coins.
+function saveWatchlist(next: string[]): void {
+  watchlist = next;
+  setKv(db, WATCHLIST_KEY, JSON.stringify(watchlist));
+  ideaCache.clear();
+  broadcast('engine', { clock: engine.now() });
+}
+app.get('/api/watchlist', (_req, res) => {
+  res.json(watchlist);
+});
+app.post('/api/watchlist', async (req, res) => {
+  try {
+    if (!symbolsCache.list.length) {
+      symbolsCache.list = await client.perpetualSymbols();
+      symbolsCache.at = Date.now();
+    }
+  } catch (err) {
+    res.status(502).json({ ok: false, error: `Could not load Binance's coin list: ${message(err)}` });
+    return;
+  }
+  const symbol = resolveSymbol(String(req.body?.symbol ?? ''), symbolsCache.list);
+  if (!symbol) {
+    res.status(400).json({ ok: false, error: `No USDT perpetual on Binance for "${String(req.body?.symbol ?? '')}"` });
+    return;
+  }
+  if (!watchlist.includes(symbol)) {
+    if (watchlist.length >= MAX_WATCHLIST) {
+      res.status(400).json({ ok: false, error: `The watchlist holds at most ${MAX_WATCHLIST} coins; remove one first` });
+      return;
+    }
+    const wasFed = symbols().includes(symbol);
+    saveWatchlist([...watchlist, symbol]);
+    if (!wasFed) catchUpNow(symbol);
+    console.log(`[watchlist] added ${symbol}`);
+  }
+  res.json({ ok: true, symbol, watchlist });
+});
+app.delete('/api/watchlist/:symbol', (req, res) => {
+  const symbol = req.params.symbol.toUpperCase();
+  saveWatchlist(watchlist.filter((s) => s !== symbol));
+  console.log(`[watchlist] removed ${symbol}`);
+  res.json({ ok: true, watchlist });
 });
 app.get('/api/scanner', (_req, res) => {
   res.json({ universe, lastScan });
@@ -491,7 +569,20 @@ app.get('/api/candles/:symbol', (req, res) => {
     return;
   }
   const limit = Math.min(Number(req.query.limit) || 300, 1500);
-  res.json(store.latest(req.params.symbol.toUpperCase(), tf as Timeframe, limit));
+  const symbol = req.params.symbol.toUpperCase();
+  // A coin on a chart is fed while the chart keeps asking for it, even when the scanner has dropped it.
+  if (viewing.has(symbol)) viewing.set(symbol, Date.now());
+  else if (!symbols().includes(symbol) && symbolsCache.list.some((s) => s.symbol === symbol)) {
+    viewing.set(symbol, Date.now());
+    console.log(`[feed] following ${symbol} while it is on a chart`);
+    catchUpNow(symbol);
+  }
+  const closed = store.latest(symbol, tf as Timeframe, limit);
+  // Plus the candle still forming, from the 1m candles closed since it opened, so the chart moves between closes.
+  const lastOpen = closed[closed.length - 1]?.openTime ?? null;
+  const forming = tf === '1m' || lastOpen === null ? null
+    : formingCandle(tf as Timeframe, store.range(symbol, '1m', lastOpen + TIMEFRAME_MS[tf as Timeframe], Date.now()), lastOpen);
+  res.json(forming ? [...closed, forming] : closed);
 });
 
 // Any other /api address: a JSON answer, not the web page.

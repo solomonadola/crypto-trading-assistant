@@ -1,7 +1,8 @@
 import { useMemo, useState } from 'react';
-import { Crosshair, Search, Target } from 'lucide-react';
-import { usePoll, usePrices, type Armed, type MarketRow, type Scanner } from '../lib/api';
+import { Crosshair, Eye, Search, Target, X } from 'lucide-react';
+import { post, usePoll, usePrices, type Armed, type MarketRow, type Scanner } from '../lib/api';
 import { coin, compact, dateTime, duration, hhmm, pct, price, words } from '../lib/format';
+import { AddCoin } from '../components/AddCoin';
 import { Badge, Card, Empty, MovingFastBadge, PdBadge, SideBadge, SpeedBadge, StateBadge, Table, TrendChip, td } from '../components/ui';
 
 type SortKey = 'profit' | 'quality' | 'rr' | 'checks' | 'rank' | 'change' | 'atr' | 'volume';
@@ -29,6 +30,10 @@ export function Market({ go }: { go: (page: string, symbol?: string) => void }) 
   const { data: rows } = usePoll<MarketRow[]>('/api/market', 15_000);
   const { data: scanner } = usePoll<Scanner>('/api/scanner', 60_000);
   const { data: armed } = usePoll<Armed[]>('/api/armed', 15_000);
+  const { data: watchlist, reload: reloadWatchlist } = usePoll<string[]>('/api/watchlist', 60_000);
+  const remove = async (symbol: string) => {
+    try { await post(`/api/watchlist/${symbol}`, undefined, 'DELETE'); reloadWatchlist(); } catch (e) { alert(e instanceof Error ? e.message : String(e)); }
+  };
   const live = usePrices();
   const [q, setQ] = useState('');
   const [sort, setSort] = useState<SortKey>('profit');
@@ -72,6 +77,26 @@ export function Market({ go }: { go: (page: string, symbol?: string) => void }) 
       </Card>
 
       <Card
+        title={`Your coins (${watchlist?.length ?? 0})`}
+        icon={<Eye size={16} />}
+        right={<AddCoin onAdded={(s) => { reloadWatchlist(); go('chart', s); }} />}
+      >
+        {!watchlist?.length ? (
+          <Empty>Add any Binance USDT perpetual to get its analysis, levels and indicators, even if the scanner did not pick it.</Empty>
+        ) : (
+          <div className="flex flex-wrap gap-2">
+            {watchlist.map((s) => (
+              <span key={s} className="inline-flex items-center rounded-lg border border-line bg-card-2 text-sm">
+                <button onClick={() => go('chart', s)} className="px-2.5 py-1 font-semibold hover:text-accent">{coin(s)}</button>
+                <button onClick={() => void remove(s)} title={`Remove ${coin(s)}`} aria-label={`Remove ${coin(s)}`} className="border-l border-line px-1.5 py-1 text-ink-3 hover:text-critical"><X size={13} /></button>
+              </span>
+            ))}
+          </div>
+        )}
+        <p className="mt-3 text-xs text-ink-3">Analysis only: the engine trades a coin only when the scanner picks it. Added coins also appear in the table below, on the chart and in trade ideas.</p>
+      </Card>
+
+      <Card
         title={`Scanner · ${rows?.length ?? 0} coins`}
         icon={<Crosshair size={16} />}
         right={
@@ -95,6 +120,7 @@ export function Market({ go }: { go: (page: string, symbol?: string) => void }) 
                     <span className="font-semibold">{coin(r.symbol)}</span>
                     <SpeedBadge speed={r.setup?.speed} />
                     <MovingFastBadge on={r.setup?.movingFast} />
+                    {r.watched && !r.scanned && <Badge tone="muted" title="Added by you: analysed, not traded">yours</Badge>}
                   </span>
                 </td>
                 <td className={`${td} tabular font-semibold ${r.setup?.meetsRules ? 'text-good' : 'text-ink-3'}`}>
@@ -116,7 +142,7 @@ export function Market({ go }: { go: (page: string, symbol?: string) => void }) 
                 <td className={td}>{r.setup ? <Quality q={r.setup.quality} /> : <span className="text-ink-3">–</span>}</td>
                 <td className={`${td} tabular text-ink-2`}>{r.setup ? `${r.setup.checksMet}/${r.setup.checksDecided}` : '–'}</td>
                 <td className={`${td} tabular`}>{price(live?.prices[r.symbol] ?? r.price)}</td>
-                <td className={`${td} tabular ${(r.changePct ?? 0) >= 0 ? 'text-good' : 'text-critical'}`}>{(r.changePct ?? 0) >= 0 ? '▲' : '▼'} {pct(r.changePct, 1, true)}</td>
+                <td className={`${td} tabular ${r.changePct == null ? 'text-ink-3' : r.changePct >= 0 ? 'text-good' : 'text-critical'}`}>{r.changePct == null ? '–' : `${r.changePct >= 0 ? '▲' : '▼'} ${pct(r.changePct, 1, true)}`}</td>
                 <td className={`${td} tabular text-ink-2`}>{pct(r.atrPct1h, 2)}</td>
                 <td className={`${td} tabular text-ink-2`}>${compact(r.quoteVolume)}</td>
                 <td className={td}><span className="flex gap-1">{(['4h', '1h', '15m'] as const).map((tf) => <TrendChip key={tf} tf={tf} trend={r.trend?.[tf]} />)}</span></td>

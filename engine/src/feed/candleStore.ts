@@ -87,3 +87,30 @@ export class CandleStore {
     return removed;
   }
 }
+
+/**
+ * The `tf` candle still forming, built from the closed 1m candles since it
+ * opened (for charts; the engine acts on closed candles only). Null when no
+ * minute of it has closed yet, or `after` (the newest closed candle's open time) already covers it.
+ */
+export function formingCandle(tf: Timeframe, minutes: Candle[], after: number | null): Candle | null {
+  const last = minutes[minutes.length - 1];
+  if (!last) return null;
+  const tfMs = TIMEFRAME_MS[tf];
+  const openTime = Math.floor(last.openTime / tfMs) * tfMs;
+  if (after !== null && openTime <= after) return null;
+  const parts = minutes.filter((m) => m.openTime >= openTime);
+  return {
+    symbol: last.symbol,
+    tf,
+    openTime,
+    closeTime: openTime + tfMs - 1,
+    open: parts[0].open,
+    high: Math.max(...parts.map((m) => m.high)),
+    low: Math.min(...parts.map((m) => m.low)),
+    close: last.close,
+    volume: parts.reduce((s, m) => s + m.volume, 0),
+    quoteVolume: parts.reduce((s, m) => s + m.quoteVolume, 0),
+    trades: parts.reduce((s, m) => s + m.trades, 0),
+  };
+}

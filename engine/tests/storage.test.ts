@@ -5,6 +5,7 @@ import path from 'node:path';
 import { getKv, openDb, setKv } from '../src/storage/db';
 import { EventLog } from '../src/storage/eventLog';
 import { SignalLog } from '../src/storage/signals';
+import { formingCandle } from '../src/feed/candleStore';
 import type { SignalRecord, TradeEvent } from '../../shared/types';
 
 const event = (over: Partial<TradeEvent> = {}): TradeEvent => ({
@@ -67,5 +68,27 @@ describe('signal outcomes', () => {
     log.append([rec(1, 'taken'), rec(2, 'outcome', -1), rec(3, 'working'), rec(5, 'outcome', 2.5), rec(6, 'outcome', 1)]);
     expect(log.outcomes(4).map((s) => [s.time, s.payload.r])).toEqual([[5, 2.5], [6, 1]]);
     expect(log.outcomes(0)).toHaveLength(3);
+  });
+});
+
+describe('forming candle', () => {
+  const H = Date.UTC(2026, 9, 2, 10, 0);
+  const minute = (i: number, o: number, h: number, l: number, c: number) => ({
+    symbol: 'BTCUSDT', tf: '1m' as const, openTime: H + i * 60_000, closeTime: H + (i + 1) * 60_000 - 1,
+    open: o, high: h, low: l, close: c, volume: 1, quoteVolume: 10, trades: 2,
+  });
+
+  it('builds the 15m candle from the minutes since it opened', () => {
+    // 10:13 and 10:14 belong to the 10:00 candle; 10:15 to 10:16 to the forming 10:15 one.
+    const ms = [minute(13, 1, 2, 0.5, 1.5), minute(14, 1.5, 3, 1, 2), minute(15, 2, 4, 1.8, 3), minute(16, 3, 3.5, 2.5, 2.8)];
+    expect(formingCandle('15m', ms, H)).toEqual({
+      symbol: 'BTCUSDT', tf: '15m', openTime: H + 15 * 60_000, closeTime: H + 30 * 60_000 - 1,
+      open: 2, high: 4, low: 1.8, close: 2.8, volume: 2, quoteVolume: 20, trades: 4,
+    });
+  });
+
+  it('is null when the newest closed candle already covers it, or no minute has closed', () => {
+    expect(formingCandle('15m', [minute(14, 1, 2, 0.5, 1.5)], H)).toBeNull();
+    expect(formingCandle('15m', [], H)).toBeNull();
   });
 });
