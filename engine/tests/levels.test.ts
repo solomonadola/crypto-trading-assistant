@@ -8,6 +8,9 @@ import type { TrendState } from '../src/analysis/trendState';
 import type { Candle } from '../../shared/types';
 
 const cfg = loadConfig('engine/config/config.yaml');
+// Tested at fixed limits, whatever the live config uses.
+cfg.exits.min_rr = 2;
+cfg.exits.max_stop_pct = 2.5;
 const T = Date.UTC(2026, 8, 28, 10, 0);
 const flat = (n: number, v: number) => new Array<number>(n).fill(v);
 const pivot = (type: 'high' | 'low', index: number, price: number): Pivot => ({ type, index, price, confirmedAt: index + 3 });
@@ -68,7 +71,7 @@ describe('trade plan', () => {
     return c;
   };
 
-  it('long: enters from the strongest support below, stop beyond it, targets at resistance with R after costs', () => {
+  it('long: enters from the strongest support below, stop beyond it, one take-profit with R after costs', () => {
     const idea = tradeIdea(longCtx(), { armed: [], entryBlock: null });
     expect(idea.bias).toBe('long');
     const p = idea.plan!;
@@ -78,11 +81,32 @@ describe('trade plan', () => {
     expect(p.entryHigh).toBeCloseTo(97.5, 9);
     expect(p.entry).toBeCloseTo(96.5, 9);
     expect(p.stop).toBeCloseTo(95.5 - cfg.exits.stop_buffer_atr * 2, 9);
-    expect(p.targets.map((t) => Number(t.price.toFixed(2)))).toEqual([104.15, 108]);   // swing high 104 and VWAP 104.3, equal weight
+    // One take-profit: the first level ahead, swing high 104 and VWAP 104.3 (equal weight), however far.
+    expect(p.targets).toHaveLength(1);
+    expect(p.targets.map((t) => Number(t.price.toFixed(2)))).toEqual([104.15]);
+    expect(p.targets[0]).toMatchObject({ label: 'TP', sources: ['1h swing high', 'daily VWAP'] });
+    expect(p.targetPct).toBeCloseTo((p.targets[0].price / 96.5 - 1) * 100, 9);
     const risk = 96.5 - p.stop!;
     const costR = (0.2 / 100) * 96.5 / risk;
-    expect(p.targets[1].r).toBeCloseTo((108 - 96.5) / risk - costR, 9);
-    expect(p.targets[0].sources).toEqual(['1h swing high', 'daily VWAP']);
+    expect(p.targets[0].r).toBeCloseTo((p.targets[0].price - 96.5) / risk - costR, 9);
+  });
+
+  it('with no level ahead, the take-profit is the fixed percentage', () => {
+    const c = ctx({ pivots1h: [pivot('low', 30, 96.2)] });
+    c.analysis.zones = [zone({ type: 'demand', low: 96, high: 97 })];
+    const p = tradeIdea(c, { armed: [], entryBlock: null }).plan!;
+    expect(p.entry).not.toBeNull();
+    expect(p.targets[0].sources).toEqual([`+${cfg.exits.fixed_target_pct}% target`]);
+    expect(p.targets[0].price).toBeCloseTo(p.entry! * (1 + cfg.exits.fixed_target_pct / 100), 9);
+  });
+
+  it('a signal needs the take-profit at least 3% away and at least 2R', () => {
+    const c = longCtx();
+    c.pivots1h = [...c.pivots1h, pivot('high', 55, 98.5)];   // a level 2.07% above the entry (1.25R): the TP
+    const p = tradeIdea(c, { armed: [], entryBlock: null }).plan!;
+    expect(p.meetsRules).toBe(false);
+    expect(p.note).toMatch(/under the 3% minimum/);
+    expect(p.note).toMatch(/Not a signal/);
   });
 
   it('in the entry area when price is inside it; armed when the engine armed that side', () => {
@@ -117,7 +141,7 @@ describe('trade plan', () => {
     expect(p.entryLow).toBeCloseTo(102.5, 9);
     expect(p.entryHigh).toBeCloseTo(104.5, 9);
     expect(p.stop).toBeCloseTo(104.5 + cfg.exits.stop_buffer_atr * 2, 9);
-    expect(p.targets.map((t) => t.price)).toEqual([96, 92]);
+    expect(p.targets.map((t) => t.price)).toEqual([96]);   // one TP: the first support below
   });
 
   it('a short never enters from a demand zone, even with price inside it', () => {

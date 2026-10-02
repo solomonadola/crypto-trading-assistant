@@ -18,6 +18,20 @@ const session = z.object({
   close: hhmm,
 }).strict();
 
+const tzName = z.string().refine((tz) => {
+  try { new Intl.DateTimeFormat('en-US', { timeZone: tz }); return true; } catch { return false; }
+}, 'unknown time zone');
+
+/** Settings for one speed group (Section 18.2). */
+const speedGroup = z.object({
+  risk_pct: pct,
+  stop_buffer_atr_15m: z.number().min(0),
+  max_hold_hours: positive,
+  slippage_pct: z.number().min(0).max(5),
+  /** At most this many open trades of the group; omitted for no limit beyond max_open_trades. */
+  max_open: posInt.optional(),
+}).strict();
+
 export const configSchema = z.object({
   market: z.literal('futures'),
   leverage: z.number().min(1).max(20),
@@ -29,6 +43,7 @@ export const configSchema = z.object({
     timeframes: z.array(timeframe).min(1),
     history: z.object({ '1m': posInt, '5m': posInt.optional(), '15m': posInt, '1h': posInt, '4h': posInt }).strict(),
     watch_symbols: z.array(z.string().regex(/^[A-Z0-9]+USDT$/)).min(1),
+    price_poll_ms: z.number().int().min(1000),
     poll_delay_ms: z.number().int().min(0).max(30_000),
     concurrency: z.number().int().min(1).max(32),
     stall_after_sec: posInt,
@@ -68,6 +83,21 @@ export const configSchema = z.object({
     no_entry_before_end_min: z.number().int().min(0),
     exit_at_session_end: z.boolean(),
     skip_minutes_around_funding: z.number().int().min(0),
+    /** New entries only inside one of these local-time windows (Section 18.1); empty: anywhere inside a session. */
+    killzones: z.array(z.object({ name: z.string().min(1), tz: tzName, start: hhmm, end: hhmm }).strict()),
+  }).strict(),
+
+  /** Which setups the engine trades (Section 18): the pullback (Model 1 once upgraded) and the session sweep (Model 3). */
+  models: z.object({ pullback: z.boolean(), zone_sweep: z.boolean(), session_sweep: z.boolean() }).strict()
+    .refine((m) => !(m.pullback && m.zone_sweep), 'pullback and zone_sweep share the armed setups: switch on one of them'),
+
+  /** Coins grouped by how fast they move: 1h ATR as a percent of price (Section 18.2). */
+  speed: z.object({
+    calm_below_atr_1h_pct: positive,
+    wild_above_atr_1h_pct: positive,
+    groups: z.object({ calm: speedGroup, normal: speedGroup, wild: speedGroup }).strict(),
+    /** Coins with less 1h history than this are skipped (new listings). */
+    min_history_days: z.number().int().min(0),
   }).strict(),
 
   timeframes: z.object({ bias: timeframe, setup: timeframe, trigger: timeframe, exits: timeframe }).strict(),
@@ -135,7 +165,7 @@ export const configSchema = z.object({
     chop: onOff({ adx_min_1h: z.number().min(0), choppiness_max_1h: pct, ema_cross_max_1h: z.number().int().min(0), ema20_slope_min_atr: z.number().min(0), range_lookback_1h: posInt, range_min_pct: pct }),
     squeeze: onOff({ bb_width_percentile_min: pct }),
     stagnation: onOff({ volume_vs_7d_min: z.number().min(0), atr_vs_avg_min: z.number().min(0) }),
-    fakeout: onOff({ close_beyond_atr: z.number().min(0), min_close_position: z.number().min(0).max(1), max_upper_wick_ratio: z.number().min(0).max(1), min_rvol: z.number().min(0), failed_breakout_candles: posInt }),
+    fakeout: onOff({ block_entry: z.boolean(), close_beyond_atr: z.number().min(0), min_close_position: z.number().min(0).max(1), max_upper_wick_ratio: z.number().min(0).max(1), min_rvol: z.number().min(0), failed_breakout_candles: posInt }),
     extension: onOff({ max_distance_ema20_atr_15m: positive }),
     wicks: onOff({ max_avg_wick_body_ratio_1h: positive }),
     room: onOff({ htf_room_min_pct: pct }),
@@ -146,7 +176,8 @@ export const configSchema = z.object({
   scoring: z.object({ min_score: z.number().int().min(0) }).strict(),
 
   allocation: z.object({
-    sizing: z.enum(['flat', 'tiers']),
+    /** risk: the position is sized so the loss at the stop is the speed group's risk_pct of equity (Section 18.1). */
+    sizing: z.enum(['risk', 'flat', 'tiers']),
     flat_capital_pct: pct,
     tiers: z.array(z.object({ min_score: z.number().int().min(0), capital_pct: pct }).strict()).min(1),
     max_open_trades: posInt,
@@ -156,9 +187,17 @@ export const configSchema = z.object({
     max_correlated_trades: posInt,
     correlation_groups: z.record(z.string(), z.array(z.string())),
     max_pct_of_1h_volume: pct,
+    /** A trade whose round-trip costs exceed this percent of the money at risk is skipped (stop too tight). */
+    max_fee_drag_pct: pct,
   }).strict(),
 
   exits: z.object({
+    /**
+     * v3: only the stop, the take-profit, break-even after a new 15m BOS and the
+     * speed group's max hold close a trade (Section 18.6). classic: the ladder
+     * and early exits below (Section 9).
+     */
+    management: z.enum(['v3', 'classic']),
     mode: z.enum(['fixed', 'partial_ladder', 'ladder']),
     fixed_target_pct: positive,
     partial_at_pct: positive,
@@ -167,6 +206,8 @@ export const configSchema = z.object({
     stop_buffer_atr: z.number().min(0),
     max_stop_pct: positive,
     min_rr: z.number().min(0),
+    /** A setup whose target is closer than this (percent from entry) is not signalled. */
+    min_target_pct: z.number().min(0),
     breakeven_fee_buffer_pct: z.number().min(0),
     ladder: z.array(z.object({ trigger_pct: positive, lock_pct: z.number() }).strict()).min(1),
     beyond_last_step: z.object({ lock_fraction_of_peak: z.number().min(0).max(1), or_swing_15m: z.boolean() }).strict(),

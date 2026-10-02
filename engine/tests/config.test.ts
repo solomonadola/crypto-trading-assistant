@@ -13,7 +13,13 @@ describe('engine config', () => {
     expect(c.starting_balance_usdt).toBe(1000);
     expect(c.scanner.min_quote_volume_24h).toBe(50_000_000);
     expect(c.sessions.list.map((s) => s.name)).toEqual(['asian', 'london', 'newyork']);
-    expect(c.allocation.sizing).toBe('flat');
+    // Strategy v3 (ENGINE_PLAN.md Section 18.1).
+    expect(c.allocation.sizing).toBe('risk');
+    expect(c.exits).toMatchObject({ management: 'v3', mode: 'fixed', min_rr: 2, min_target_pct: 3 });
+    expect(c.sessions).toMatchObject({ weekdays_only: true, exit_at_session_end: false });
+    expect(c.sessions.killzones.map((k) => k.name)).toEqual(['london', 'newyork']);
+    expect(c.speed.groups.wild).toMatchObject({ risk_pct: 0.5, max_hold_hours: 24, max_open: 2 });
+    expect(c.speed.min_history_days).toBe(14);
     expect(c.breakout.enabled).toBe(false);
     expect(c.feed.watch_symbols).toContain('BTCUSDT');
   });

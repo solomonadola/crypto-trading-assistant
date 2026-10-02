@@ -6,7 +6,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 
 const CORE = ['engine/src/core', 'engine/src/analysis', 'engine/src/strategy', 'engine/src/sessions.ts', 'engine/src/portfolio.ts', 'engine/src/filters.ts', 'engine/src/scoring.ts',
-  'engine/src/risk.ts', 'engine/src/exits.ts', 'engine/src/sim', 'engine/src/symbols.ts'];
+  'engine/src/risk.ts', 'engine/src/exits.ts', 'engine/src/sim', 'engine/src/symbols.ts', 'engine/src/speed.ts'];
 
 const FORBIDDEN: [RegExp, string][] = [
   [/Date\.now\s*\(/, 'Date.now()'],

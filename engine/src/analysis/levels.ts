@@ -177,7 +177,7 @@ function planIdea(ctx: Context, inputs: IdeaInputs): Planned {
     : l.price >= price - tol && l.band[0] <= price + reach));
   const entryLevel = candidates.sort((x, y) => y.strength - x.strength || Math.abs(x.distancePct) - Math.abs(y.distancePct))[0];
   if (!entryLevel) {
-    return { ...base, plan: { direction: bias, status: 'no_level', confirmation: null, entryLow: null, entryHigh: null, entry: null, stop: null, riskPct: null, targets: [], meetsRules: false, note: `No support${bias === 'short' ? '/resistance' : ''} cluster within ${MAX_ENTRY_ATR} × 1h ATR to enter from; wait for structure to form.` } };
+    return { ...base, plan: { direction: bias, status: 'no_level', confirmation: null, targetPct: null, entryLow: null, entryHigh: null, entry: null, stop: null, riskPct: null, targets: [], meetsRules: false, note: `No support${bias === 'short' ? '/resistance' : ''} cluster within ${MAX_ENTRY_ATR} × 1h ATR to enter from; wait for structure to form.` } };
   }
   const entryLow = Math.min(entryLevel.band[0], entryLevel.price) - tol / 2;
   const entryHigh = Math.max(entryLevel.band[1], entryLevel.price) + tol / 2;
@@ -193,13 +193,16 @@ function planIdea(ctx: Context, inputs: IdeaInputs): Planned {
   const stop = anchor - s * cfg.exits.stop_buffer_atr * atr;
   const risk = s * (entry - stop);
 
+  // One take-profit: the first structural level ahead (past 0.5R), however far; the fixed
+  // percentage only when no level is ahead.
   const costR = (2 * (cfg.sim.taker_fee_pct + cfg.sim.slippage_pct) / 100) * entry / risk;
-  const targets: TradeIdeaTarget[] = levels
+  const fixed = { price: entry * (1 + (s * cfg.exits.fixed_target_pct) / 100), sources: [`+${cfg.exits.fixed_target_pct}% target`] };
+  const level = levels
     .filter((l) => s * (l.price - entry) > 0.5 * risk && l !== entryLevel && l.sources.some(isStructural))
-    .sort((x, y) => s * (x.price - y.price))
-    .slice(0, 3)
-    .map((l, i) => ({ label: `TP${i + 1}`, price: l.price, sources: l.sources, r: (s * (l.price - entry)) / risk - costR }));
-  if (!targets.length) targets.push({ label: 'TP1', price: entry + s * 2 * risk, sources: ['2R (no level ahead)'], r: 2 - costR });
+    .sort((x, y) => s * (x.price - y.price))[0];
+  const tp = level ? { price: level.price, sources: level.sources } : fixed;
+  const targets: TradeIdeaTarget[] = [{ label: 'TP', price: tp.price, sources: tp.sources, r: (s * (tp.price - entry)) / risk - costR }];
+  const targetPct = (s * (tp.price - entry) / entry) * 100;
 
   const inZone = price >= entryLow && price <= entryHigh;
   const riskPct = (risk / entry) * 100;
@@ -209,7 +212,7 @@ function planIdea(ctx: Context, inputs: IdeaInputs): Planned {
   const status: NonNullable<TradeIdea['plan']>['status'] = inTrade ? 'in_trade' : conf ? 'confirmed'
     : inputs.armed.includes(bias) ? 'armed' : inZone ? 'in_zone' : 'wait';
   const skipped = conf && !conf.taken ? `, but the engine skipped it (${(conf.reason ?? 'rule').replace(/_/g, ' ')})` : '';
-  const meetsRules = riskPct <= cfg.exits.max_stop_pct && targets[0].r >= cfg.exits.min_rr;
+  const meetsRules = riskPct <= cfg.exits.max_stop_pct && targets[0].r >= cfg.exits.min_rr && targetPct >= cfg.exits.min_target_pct;
   const noteParts = [
     status === 'in_trade' ? 'Confirmed: the engine is in this trade.'
       : status === 'confirmed' ? `Confirmed: a 15m close came back in the trend direction${skipped}.`
@@ -217,11 +220,13 @@ function planIdea(ctx: Context, inputs: IdeaInputs): Planned {
       : status === 'in_zone' ? 'Retest in progress: price is in the entry area; wait for a 15m close back in the trend direction before entering.'
       : `Waiting for the retest: price has to ${bias === 'long' ? 'pull back down' : 'rally up'} into the entry area.`,
     riskPct > cfg.exits.max_stop_pct ? `Stop is ${riskPct.toFixed(2)}% away, beyond the ${cfg.exits.max_stop_pct}% limit.` : null,
-    targets[0].r < cfg.exits.min_rr ? `First target is ${targets[0].r.toFixed(2)}R, under the ${cfg.exits.min_rr}R minimum.` : null,
+    targets[0].r < cfg.exits.min_rr ? `Take-profit is ${targets[0].r.toFixed(2)}R, under the ${cfg.exits.min_rr}R minimum.` : null,
+    targetPct < cfg.exits.min_target_pct ? `Take-profit is ${targetPct.toFixed(2)}% away, under the ${cfg.exits.min_target_pct}% minimum.` : null,
+    !meetsRules ? 'Not a signal.' : null,
   ].filter(Boolean);
   return {
     ...base,
-    plan: { direction: bias, status, confirmation, entryLow, entryHigh, entry, stop, riskPct, targets, meetsRules, note: noteParts.join(' ') },
+    plan: { direction: bias, status, confirmation, targetPct, entryLow, entryHigh, entry, stop, riskPct, targets, meetsRules, note: noteParts.join(' ') },
   };
 }
 
@@ -250,7 +255,8 @@ function checklist(ctx: Context, idea: Planned, entryBlock: string | null): Chec
         : plan?.status === 'armed' ? 'the engine has armed the setup and is waiting for this close' : 'wait for it inside the entry area; the engine checks every 15m close',
     },
     { label: `Stop within ${cfg.exits.max_stop_pct}%`, ok: plan ? plan.riskPct! <= cfg.exits.max_stop_pct : null, detail: plan ? `stop ${fmt(plan.stop)}, ${plan.riskPct!.toFixed(2)}% away` : '–' },
-    { label: `First target at least ${cfg.exits.min_rr}R`, ok: plan ? plan.targets[0].r >= cfg.exits.min_rr : null, detail: plan ? `${plan.targets[0].label} ${fmt(plan.targets[0].price)} = ${plan.targets[0].r.toFixed(2)}R` : '–' },
+    { label: `Take-profit at least ${cfg.exits.min_rr}R`, ok: plan ? plan.targets[0].r >= cfg.exits.min_rr : null, detail: plan ? `TP ${fmt(plan.targets[0].price)} = ${plan.targets[0].r.toFixed(2)}R` : '–' },
+    { label: `Take-profit at least ${cfg.exits.min_target_pct}% away`, ok: plan ? plan.targetPct! >= cfg.exits.min_target_pct : null, detail: plan ? `${plan.targetPct!.toFixed(2)}% from the entry` : '–' },
     {
       label: 'Funding not against the trade',
       ok: ctx.funding === null ? null : s * ctx.funding * 100 <= cfg.filters.funding.max_against_pct_8h,

@@ -24,7 +24,8 @@ export type EntryBlock =
   | 'session_opening'    // inside entry_delay_min after the owning session opened
   | 'session_ending'     // inside no_entry_before_end_min before the owning session closes
   | 'funding_window'     // within skip_minutes_around_funding of 00:00, 08:00 or 16:00 UTC
-  | 'weekend';           // weekdays_only and the owning session's local day is Saturday or Sunday
+  | 'weekend'            // weekdays_only and the owning session's local day is Saturday or Sunday
+  | 'outside_killzone';  // killzones are set and `t` is in none of them (Section 18.1)
 
 export interface SessionInfo {
   time: number;
@@ -64,6 +65,12 @@ function localParts(t: number, tz: string) {
 function offsetAt(t: number, tz: string): number {
   const p = localParts(t, tz);
   return Date.UTC(p.y, p.m - 1, p.d, p.hh, p.mm, p.ss) - Math.floor(t / 1000) * 1000;
+}
+
+/** The local calendar date of instant `t` in `tz`. */
+export function localDateOf(t: number, tz: string): { y: number; m: number; d: number } {
+  const p = localParts(t, tz);
+  return { y: p.y, m: p.m, d: p.d };
 }
 
 /** UTC instant of a local wall-clock time in `tz`. */
@@ -132,6 +139,18 @@ export class SessionCalendar {
     return upcoming[0] ?? null;
   }
 
+  /** The killzone `t` falls in (local wall-clock window, start inclusive), or null. */
+  killzoneAt(t: number): string | null {
+    for (const k of this.cfg.killzones) {
+      const p = localParts(t, k.tz);
+      const now = p.hh * 60 + p.mm;
+      const [sh, sm] = hhmm(k.start);
+      const [eh, em] = hhmm(k.end);
+      if (now >= sh * 60 + sm && now < eh * 60 + em) return k.name;
+    }
+    return null;
+  }
+
   /** Why a new trade may not open at `t`, or null if it may. */
   entryBlock(t: number): EntryBlock | null {
     if (!this.cfg.enabled) return null;
@@ -144,6 +163,7 @@ export class SessionCalendar {
     }
     if (t < owner.openTime + this.cfg.entry_delay_min * 60_000) return 'session_opening';
     if (t >= owner.closeTime - this.cfg.no_entry_before_end_min * 60_000) return 'session_ending';
+    if (this.cfg.killzones.length && !this.killzoneAt(t)) return 'outside_killzone';
     const sinceFunding = ((t % FUNDING_EVERY) + FUNDING_EVERY) % FUNDING_EVERY;
     const toFunding = Math.min(sinceFunding, FUNDING_EVERY - sinceFunding);
     if (toFunding < this.cfg.skip_minutes_around_funding * 60_000) return 'funding_window';

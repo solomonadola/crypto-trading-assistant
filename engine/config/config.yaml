@@ -19,6 +19,7 @@ feed:
     4h: 500
   # Coins fed before the scanner exists (Phase 4). BTC is always fed: filters use it.
   watch_symbols: [BTCUSDT, ETHUSDT, SOLUSDT]
+  price_poll_ms: 2000           # live prices for the dashboard only; the engine acts on closed candles
   poll_delay_ms: 3000           # wait after each minute closes before asking Binance for it
   concurrency: 8                # requests in flight at once (Binance allows far more)
   stall_after_sec: 120          # no new 1m candle for this long = feed stalled, no new entries
@@ -56,15 +57,35 @@ scanner:
 
 sessions:
   enabled: true
-  weekdays_only: false
+  weekdays_only: true            # no new entries on Saturday and Sunday; open trades keep running
   list:
     - { name: asian,   tz: Asia/Tokyo,       open: "09:00", close: "18:00" }
     - { name: london,  tz: Europe/London,    open: "08:00", close: "17:00" }
     - { name: newyork, tz: America/New_York, open: "08:00", close: "17:00" }
   entry_delay_min: 0
   no_entry_before_end_min: 60
-  exit_at_session_end: true
+  exit_at_session_end: false     # v3: trades are held up to the speed group's max hold, across sessions
   skip_minutes_around_funding: 10   # 00:00, 08:00, 16:00 UTC
+  # New entries only in these windows (local time; DST follows the local clock).
+  killzones:
+    - { name: london,  tz: Europe/London,    start: "07:00", end: "10:00" }
+    - { name: newyork, tz: America/New_York, start: "07:30", end: "11:00" }
+
+# Setups the engine trades (ENGINE_PLAN.md Section 18).
+models:
+  pullback: false         # the classic zone pullback (Section 8.4); off: Model 1 replaces it
+  zone_sweep: true        # Model 1: sweep + CHoCH at a zone or order block (Section 18.5)
+  session_sweep: true     # Model 3: liquidity sweep in a killzone (Section 18.4)
+
+# Coins grouped by speed: 1h ATR(14) as a percent of price (ENGINE_PLAN.md Section 18.2).
+speed:
+  calm_below_atr_1h_pct: 1.0
+  wild_above_atr_1h_pct: 2.5
+  groups:
+    calm:   { risk_pct: 1.0, stop_buffer_atr_15m: 0.3, max_hold_hours: 48, slippage_pct: 0.05 }
+    normal: { risk_pct: 1.0, stop_buffer_atr_15m: 0.3, max_hold_hours: 48, slippage_pct: 0.05 }
+    wild:   { risk_pct: 0.5, stop_buffer_atr_15m: 0.6, max_hold_hours: 24, slippage_pct: 0.15, max_open: 2 }
+  min_history_days: 14           # new listings are skipped until then
 
 timeframes: { bias: 4h, setup: 1h, trigger: 15m, exits: 1m }
 
@@ -125,10 +146,12 @@ trigger:                        # the 15m CHoCH close is always required
   lookback_candles: 3           # engulfing/rejection/RSI-cross may be on the trigger or the 2 candles before
 
 filters:                        # every filter can be switched off individually
-  chop:       { enabled: true, adx_min_1h: 20, choppiness_max_1h: 61.8, ema_cross_max_1h: 2, ema20_slope_min_atr: 0.1, range_lookback_1h: 12, range_min_pct: 3.0 }
-  squeeze:    { enabled: true, bb_width_percentile_min: 20 }
+  # Virtual trading settings (2026-10): chop, squeeze and the fakeout entry check off, so the
+  # engine takes more trades. Set them back on to go strict.
+  chop:       { enabled: false, adx_min_1h: 20, choppiness_max_1h: 61.8, ema_cross_max_1h: 2, ema20_slope_min_atr: 0.1, range_lookback_1h: 12, range_min_pct: 3.0 }
+  squeeze:    { enabled: false, bb_width_percentile_min: 20 }
   stagnation: { enabled: true, volume_vs_7d_min: 0.7, atr_vs_avg_min: 0.7 }
-  fakeout:    { enabled: true, close_beyond_atr: 0.2, min_close_position: 0.7, max_upper_wick_ratio: 0.4, min_rvol: 2.0, failed_breakout_candles: 3 }
+  fakeout:    { enabled: true, block_entry: false, close_beyond_atr: 0.2, min_close_position: 0.7, max_upper_wick_ratio: 0.4, min_rvol: 2.0, failed_breakout_candles: 3 }
   extension:  { enabled: true, max_distance_ema20_atr_15m: 3.0 }
   wicks:      { enabled: true, max_avg_wick_body_ratio_1h: 2.5 }
   room:       { enabled: true, htf_room_min_pct: 2.5 }
@@ -138,7 +161,7 @@ filters:                        # every filter can be switched off individually
 scoring: { min_score: 4 }
 
 allocation:
-  sizing: flat                  # flat | tiers (tiers only after data shows score predicts results)
+  sizing: risk                  # risk: loss at the stop = the speed group's risk_pct | flat | tiers
   flat_capital_pct: 10
   tiers:
     - { min_score: 4, capital_pct: 10 }
@@ -146,17 +169,19 @@ allocation:
     - { min_score: 6, capital_pct: 30 }
     - { min_score: 7, capital_pct: 40 }
   max_open_trades: 5
-  max_total_exposure_pct: 100
+  max_total_exposure_pct: 300   # 3x leverage: margin used is at most the equity
   max_loss_per_trade_pct: 1.0
-  max_open_risk_pct: 3.0
+  max_open_risk_pct: 5.0        # five trades at 1% each
   max_correlated_trades: 2
   correlation_groups:
     memes: [DOGE, SHIB, PEPE, WIF, BONK, FLOKI]
   max_pct_of_1h_volume: 1.0
+  max_fee_drag_pct: 15          # skip when round-trip costs exceed 15% of the money at risk
 
 exits:
-  mode: partial_ladder          # fixed | partial_ladder | ladder
-  fixed_target_pct: 5.0
+  management: v3                # v3: stop, take-profit, break-even after a new 15m BOS, max hold | classic: ladder and early exits
+  mode: fixed                   # fixed | partial_ladder | ladder  (fixed: one take-profit, all out)
+  fixed_target_pct: 10.0        # fixed mode: take-profit when no level is ahead (otherwise the first level, uncapped)
   partial_at_pct: 5.0
   partial_close_pct: 50
   # Where the stop goes: beyond the setup (the zone, or the pullback's extreme
@@ -164,8 +189,9 @@ exits:
   # the confirmation with a 15m-ATR buffer.
   stop_anchor: swing_15m        # setup | swing_15m
   stop_buffer_atr: 0.3
-  max_stop_pct: 2.5
-  min_rr: 2.0
+  max_stop_pct: 15.0            # altcoins pull back far; risk per trade stays at most 1% of the account
+  min_rr: 2.0                   # reward:risk to the take-profit, at least 1:2
+  min_target_pct: 3.0           # the take-profit must be at least 3% from the entry
   breakeven_fee_buffer_pct: 0.2
   ladder:
     - { trigger_pct: 3,  lock_pct: 0.2 }

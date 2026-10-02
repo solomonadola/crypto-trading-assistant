@@ -1,5 +1,6 @@
 // Everything the pullback setup, the filters and the score read for one
 // symbol at one 15m close, computed once from the market book. Pure.
+import { speedOf, type SpeedGroup } from '../speed';
 import { TIMEFRAME_MS, type Candle, type Direction } from '../../../shared/types';
 import type { EngineConfig } from '../config';
 import type { MarketBook, SymbolAnalysis } from '../analysis/market';
@@ -56,6 +57,8 @@ export interface Context {
   btcAnalysis: SymbolAnalysis | null;
   /** Latest funding rate as a fraction per 8h (0.0001 = 0.01%); null if unknown. */
   funding: number | null;
+  /** The coin's speed group now (Section 18.2); absent in older test fixtures, treated as `normal`. */
+  speed?: SpeedGroup;
 }
 
 const last = (s: number[]) => s[s.length - 1];
@@ -74,7 +77,7 @@ export function buildContext(book: MarketBook, symbol: string, t: number, config
   const emaLevels = [...new Set([20, 50, ...config.pullback.ema_levels])];
   // BTC over the hour to `t` on the exits timeframe: the candle closing at t and the one closing an hour earlier
   // (newer candles may already be stored when this is evaluated between 15m closes).
-  // "An hour" is four trigger candles, measured from the candles themselves (it scales in the backtest's slow mode).
+  // "An hour" is four trigger candles, measured from the candles themselves.
   const exitTf = config.timeframes.exits;
   const lastTrigger = m15.candles[m15.candles.length - 1];
   const hour = 4 * (lastTrigger.closeTime - lastTrigger.openTime);
@@ -86,10 +89,11 @@ export function buildContext(book: MarketBook, symbol: string, t: number, config
     ? (btc[atT].close / btc[atT - perHour].close - 1) * 100
     : null;
 
+  const atr1h = atr(h1.high, h1.low, h1.close, 14);
   return {
     symbol, t, config, analysis, h4, h1, m15,
     price: last(m15.close),
-    atr1h: atr(h1.high, h1.low, h1.close, 14),
+    atr1h,
     atr15m: atr(m15.high, m15.low, m15.close, 14),
     ema1h: Object.fromEntries(emaLevels.map((n) => [n, ema(h1.close, n)])),
     ema15m20: ema(m15.close, 20),
@@ -105,6 +109,7 @@ export function buildContext(book: MarketBook, symbol: string, t: number, config
     btcChange1hPct,
     btcAnalysis: book.get('BTCUSDT'),
     funding,
+    speed: speedOf((last(atr1h) / last(m15.close)) * 100, config.speed),
   };
 }
 

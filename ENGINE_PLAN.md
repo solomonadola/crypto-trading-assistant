@@ -21,7 +21,7 @@ account. It is based on the "Crypto Momentum Trading Bot — Implementation Plan
 | Language / stack | TypeScript on Node, React UI, Express, Firebase. One language across the project. |
 | Sessions | New trades only inside the **Asian, London and New York** sessions. |
 | Session exit | Every trade is **closed at the end of its own session**, even in profit. |
-| Backtest | The existing backtest is **removed**. A new one is built later, after the simulator has run for a while. |
+| Backtest | **None.** A backtest was built and tried (2026-09), then removed on 2026-10-02: altcoins move and pull back far more than the backtest's limits allowed, so the app is judged by its live simulation instead. |
 | Storage | **SQLite on the server is the working store.** The UI reads only from the server. On AI Studio, Firestore holds a **backup of the event log only** (Section 4A.4). |
 | Hosting | **AI Studio (Cloud Run) for now**, possibly a VPS later; local runs also supported. |
 | Login | **Firebase Auth** (free, no usage quota). |
@@ -588,7 +588,7 @@ Commands go straight to the engine in the same process, so control always works.
 
 ## 15. Later (not in this rewrite)
 
-- **New backtester**: the replay feed (Section 4A.1) run over stored history through the same engine, so backtest and simulation cannot drift apart. Needs historical futures candles and funding rates, and a universe rebuilt per day from historical volume.
+- ~~**New backtester**~~: dropped (2026-10-02, see Section 0). The live simulation is the record.
 - **Live trading** with exchange-side stops, reconciliation and the safety rules above.
 
 ---
@@ -626,3 +626,141 @@ Commands go straight to the engine in the same process, so control always works.
 6. **Old UI**: rebuilt from scratch; nothing has to be kept.
 7. **Old data**: not needed; Firestore collections and local state files are deleted without export (the Firestore deletion is confirmed separately at the time, since it cannot be undone).
 8. **Hosting**: AI Studio (Cloud Run) for now, with the Firestore backup, candle replay and engine lock in Section 4A.4; local runs supported; a VPS later needs only `backup.target: file`.
+
+## 18. Strategy v3: session sweep and SMC pullback (decided 2026-10-02)
+
+Altcoins, held up to 1–2 days, one take-profit. Two setups, both built on the
+same idea: price takes out a level where stops sit (a **sweep**), closes back
+inside, and the trade goes the other way, in the direction of the bigger trend.
+Source: the Photon / JeaFx SMC notes (`README (2).md`, Sections 3–5 and 11),
+adapted for altcoins and slower holds. The win rates claimed there are not
+evidence; the live simulation is the record (per-model results on the Signals
+page). No backtest.
+
+### 18.1 Decisions
+
+| Topic | Rule |
+|---|---|
+| Minimum reward:risk | **2R** to the take-profit, after costs. Higher R ranks first. |
+| Minimum profit | Take-profit at least **3%** from the entry. |
+| Take-profit | **One**, all out. No partials, no ladder. |
+| Entries | Only inside the **killzones**: London 07:00–10:00 (Europe/London time) and New York 07:30–11:00 (America/New_York time). DST follows the local clocks. |
+| Weekends | **No new entries** Saturday and Sunday (UTC). Open trades keep running. |
+| Max hold | **48 h** (wild coins **24 h**), then closed at market. |
+| Exits | Stop, take-profit, max hold, and break-even after a new structure break (18.6). The session-end exit, 3 h time stop, failed-breakout, trend-state, stagnation and counter-CHoCH exits are **off**. |
+| Coin speed | Measured, not listed (18.2). |
+| New listings | Skipped until the coin has **14 days** of 1h candles. |
+| Fee check | Skipped if round-trip costs exceed **15%** of the money at risk (stop too tight for the fees). |
+| Risk | 1% of the account per trade (wild coins 0.5%); 3× leverage; at most 5 open, one per coin, at most 2 wild. |
+
+### 18.2 Speed groups
+
+Each coin's 1h ATR(14) as a percent of price, measured at every 15m close:
+
+| Group | 1h ATR % | Risk / trade | Stop buffer | Max hold | Simulated slippage | Max open |
+|---|---|---|---|---|---|---|
+| calm | < 1.0 | 1.0% | 0.3 × ATR(15m) | 48 h | 0.05% | – |
+| normal | 1.0 – 2.5 | 1.0% | 0.3 × ATR(15m) | 48 h | 0.05% | – |
+| wild | > 2.5 | 0.5% | 0.6 × ATR(15m) | 24 h | 0.15% | 2 |
+
+A position keeps the group it opened with. Thresholds and settings are in
+`config.yaml` (`speed:`).
+
+### 18.3 Shared building blocks
+
+**Trend (bias).** Long bias when all hold, short mirrored:
+- 1h: close > EMA200, EMA50 > EMA200, and EMA50 rising (above its value 5 candles ago).
+- 4h structure is not `down` (Section 8.2).
+
+**Premium / discount.** The 4h dealing range is the latest confirmed 4h swing
+high H and swing low L (Section 8.2 pivots). Position p = (price − L) / (H − L).
+Longs need p ≤ 0.48 (discount), shorts p ≥ 0.52 (premium). Between 0.48 and
+0.52 (equilibrium) nothing is taken. Price beyond the range counts as p > 1 or
+p < 0.
+
+**Liquidity levels** (recomputed at every 15m close):
+- PDH / PDL: the previous UTC day's high and low.
+- Asian high / low: 00:00–08:00 UTC of the current day (complete once 08:00 has passed).
+- London high / low: 07:00–11:00 Europe/London time of the current day (complete once 11:00 has passed).
+- Equal highs / lows (EQH / EQL): two or more confirmed 1h swing highs (lows) in the last 48 h within 0.1 × ATR(1h) of each other; the level is their highest high (lowest low).
+- 4h swing highs / lows: the last confirmed ones.
+
+A level is **intact** while no candle has traded through it since it formed.
+A level that has been swept is used for that day.
+
+**Sweep.** For a long: within the last 4 closed 15m candles, a low went below an
+intact sell-side level (PDL, Asian low, London low, EQL, 4h swing low), and the
+current 15m candle closes back above that level. Short mirrored with the highs.
+The sweep extreme is the lowest low (highest high) of those candles.
+
+**Displacement.** The confirming 15m candle closes in the trade's direction,
+its range is at least 1.0 × ATR(15m), and its body is at least 50% of its range.
+
+**Take-profit.** The nearest opposite liquidity level (PDH, Asian high, London
+high, EQH, 4h swing high for a long; mirrored for a short) that is at least 2R
+away. If that level is under 3% away, or no level qualifies, there is no signal.
+
+**Stop.** Beyond the sweep extreme, plus the group's ATR buffer (18.2).
+
+### 18.4 Model 3: session sweep (built first)
+
+At each 15m close inside a killzone, for each coin in the universe, each direction:
+
+1. Bias agrees (18.3) and premium / discount allows the direction.
+2. A sweep of an intact liquidity level completes on this candle (18.3).
+3. The candle is a displacement candle (18.3).
+4. Plan: entry at market (next 1m open, as now), stop and take-profit per 18.3.
+5. Checks: 2R, 3%, max stop 15%, fee check, funding filter (Section 8.6), speed-group limits, risk (Section 10).
+6. Passed: the trade opens. Failed: the signal is recorded as skipped with the first failing rule.
+
+Confluence, for ranking and the score (not required): the sweep went below VAL
+(above VAH for a short) of the 24h volume profile and the close is back inside
+the value area; the close is beyond EMA50 on 15m; funding is in the trade's
+favour.
+
+### 18.5 Model 1: sweep + CHoCH at a zone (built second)
+
+The existing pullback setup (Section 8.4), tightened:
+
+1. Bias agrees and the price is in discount (long) or premium (short).
+2. Points of interest: fresh or tested 1h demand zones (Section 8.3) and **order
+   blocks**: the last opposite-coloured 1h candle before a displacement leg that
+   closed beyond the prior 1h swing and left a fair value gap; unmitigated
+   (price has not traded back into it since).
+3. Armed when price trades into a point of interest (as now).
+4. **Sweep required**: since arming, price swept the inducement (the latest
+   15m swing low above the point of interest) or a liquidity level (18.3).
+5. Confirmed by the 15m CHoCH (as now) on a displacement candle, inside a killzone.
+6. Stop beyond the lowest low since arming plus the group's buffer; take-profit per 18.3.
+7. Same checks as Model 3.
+
+### 18.6 Trade management
+
+- Stop and take-profit checked on every 1m candle (as now).
+- **Break-even**: after a 15m close beyond the latest 15m swing high (long) that
+  formed after the entry (a new BOS in the trade's direction), the stop moves to
+  the entry plus round-trip costs. Only once, never back.
+- **Max hold**: 48 h (wild 24 h), then closed at market.
+- Nothing else closes a trade.
+
+### 18.7 Recording and dashboard
+
+- Every signal carries its **model** (`zone_sweep` for Model 1, `session_sweep` for Model 3), the
+  coin's speed group, the level swept, and the confluence points.
+- Confirmed signals are followed as now: "going our way" at +1R, then the
+  outcome (take-profit, stop, max hold) with times.
+- Signals page: results per model and per speed group (trades, win rate, average R).
+- Market page: model and speed badges; a "moving fast" flag for coins whose
+  last 15m candle range is at least 3 × ATR(15m). Display only.
+- Trade ideas show the liquidity levels (Asian, London, PDH/PDL, EQH/EQL) and
+  the premium / discount position.
+
+### 18.8 Build order
+
+1. **Foundations**: speed groups, killzones, weekend rule, new exits, liquidity
+   levels, premium / discount, fee check, new-listing check.
+2. **Model 3**.
+3. **Model 1**.
+4. **Dashboard** (18.7).
+
+Each step ships with tests; the engine stays pure (Section 4A).

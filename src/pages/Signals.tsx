@@ -18,7 +18,11 @@ interface Plan { entry: number; stop: number; target: number; rewardRisk: number
 interface Setup {
   key: string; symbol: string; direction: 'long' | 'short';
   records: SignalRecord[];      // oldest first
-  last: SignalRecord;
+  last: SignalRecord;           // the latest stage: armed, taken, filtered or expired
+  confirmedAt: number | null;
+  working: SignalRecord | null; // first moved 1R our way
+  outcome: SignalRecord | null; // reached the take-profit, the stop or the session end
+  latest: number;               // newest record of any kind
   plan: Plan | null;
   estimate: boolean;            // the plan is the estimate made when it armed
   score: number | null;
@@ -32,13 +36,20 @@ function toSetups(signals: SignalRecord[]): Setup[] {
   }
   return [...by.entries()].map(([key, rs]) => {
     const records = [...rs].sort((a, b) => a.time - b.time || (a.id ?? 0) - (b.id ?? 0));
-    const last = records[records.length - 1];
+    const stages = records.filter((r) => r.status !== 'working' && r.status !== 'outcome');
+    const last = stages[stages.length - 1] ?? records[records.length - 1];
     const confirmed = records.find((r) => r.status === 'taken' || r.status === 'filtered');
     const p = (confirmed?.payload ?? {}) as Record<string, any>;
     const armed = records.find((r) => r.status === 'armed')?.payload as Record<string, any> | undefined;
     const plan = (p.plan ?? armed?.planEstimate ?? null) as Plan | null;
-    return { key, symbol: last.symbol, direction: last.direction, records, last, plan, estimate: !p.plan && !!plan, score: p.score?.total ?? null };
-  }).sort((a, b) => b.last.time - a.last.time);
+    return {
+      key, symbol: last.symbol, direction: last.direction, records, last, plan, estimate: !p.plan && !!plan, score: p.score?.total ?? null,
+      confirmedAt: confirmed?.time ?? null,
+      working: records.find((r) => r.status === 'working') ?? null,
+      outcome: records.find((r) => r.status === 'outcome') ?? null,
+      latest: records[records.length - 1].time,
+    };
+  }).sort((a, b) => b.latest - a.latest);
 }
 
 const STAGE: Record<string, { tone: string; label: string }> = {
@@ -59,6 +70,34 @@ function reasonOf(s: Setup): string {
 function Reason({ s }: { s: Setup }) {
   const tone = s.last.status === 'filtered' ? 'text-warning' : s.last.status === 'taken' ? 'text-good' : 'text-ink-2';
   return <td className={`${td} whitespace-normal text-xs ${tone}`}>{reasonOf(s)}</td>;
+}
+
+const OUTCOME: Record<string, { tone: string; label: string }> = {
+  target: { tone: 'text-good', label: 'take-profit hit' },
+  stop: { tone: 'text-critical', label: 'stopped out' },
+  session_end: { tone: 'text-ink-2', label: 'closed at session end' },
+};
+
+/** When it confirmed. */
+function ConfirmedCell({ s }: { s: Setup }) {
+  return (
+    <td className={`${td} tabular`}>
+      {s.confirmedAt ? dateTime(s.confirmedAt) : <span className="text-xs text-ink-3">not yet</span>}
+    </td>
+  );
+}
+
+/** After confirming: when it started going our way (1R in favour), and how it ended. */
+function ProgressCell({ s }: { s: Setup }) {
+  if (!s.confirmedAt) return <td className={`${td} text-ink-3`}>–</td>;
+  const o = s.outcome?.payload as { outcome: string; r: number } | undefined;
+  const oc = o ? OUTCOME[o.outcome] ?? { tone: 'text-ink-2', label: words(o.outcome) } : null;
+  return (
+    <td className={`${td} whitespace-normal text-xs`}>
+      {s.working ? <p className="text-good">going our way since {dateTime(s.working.time)}</p> : !o && <p className="text-ink-3">not 1R in favour yet</p>}
+      {o && oc && <p className={oc.tone}>{oc.label} {dateTime(s.outcome!.time)} · <span className="tabular font-semibold">{o.r >= 0 ? '+' : ''}{o.r.toFixed(2)}R</span></p>}
+    </td>
+  );
 }
 
 function Stage({ s }: { s: Setup }) {
@@ -136,7 +175,7 @@ export function Signals({ go }: { go: (page: string, symbol?: string) => void })
         }
       >
         {!coins.size ? <Empty>No signals{status === 'all' ? '' : ` with status ${status}`} yet.</Empty> : (
-          <Table head={['', 'Coin', 'Side', 'Stage', 'Reason', 'Time (UTC)', 'Score', 'Entry', 'Stop', 'Target', 'R', '']}>
+          <Table head={['', 'Coin', 'Side', 'Stage', 'Reason', 'Confirmed (UTC)', 'Since then', 'Score', 'Entry', 'Stop', 'Target', 'R', '']}>
             {[...coins.entries()].map(([symbol, list]) => {
               const s = list[0];
               const isOpen = open === symbol;
@@ -148,12 +187,13 @@ export function Signals({ go }: { go: (page: string, symbol?: string) => void })
                     <td className={td}><SideBadge side={s.direction} /></td>
                     <td className={td}><Stage s={s} /></td>
                     <Reason s={s} />
-                    <td className={`${td} tabular text-ink-2`}>{dateTime(s.last.time)}</td>
+                    <ConfirmedCell s={s} />
+                    <ProgressCell s={s} />
                     <PlanCells s={s} />
                     <td className={`${td} text-xs text-ink-3`}>{list.length > 1 ? `+${list.length - 1} earlier` : ''}</td>
                   </tr>
                   {isOpen && (
-                    <tr><td colSpan={12} className="bg-card-2/40 px-4 py-4"><CoinDetail symbol={symbol} setups={list} /></td></tr>
+                    <tr><td colSpan={13} className="bg-card-2/40 px-4 py-4"><CoinDetail symbol={symbol} setups={list} /></td></tr>
                   )}
                 </Fragment>
               );
@@ -171,7 +211,7 @@ function CoinDetail({ symbol, setups }: { symbol: string; setups: Setup[] }) {
   const [shown, setShown] = useState(setups[0].key);
   const { data: idea } = usePoll<TradeIdea>(`/api/ideas/${symbol}`, 60_000);
   const current = setups.find((s) => s.key === shown) ?? setups[0];
-  const detail = [...current.records].reverse().find((r) => r.status !== 'expired') ?? current.last;
+  const detail = [...current.records].reverse().find((r) => r.status === 'taken' || r.status === 'filtered' || r.status === 'armed') ?? current.last;
   const breaks = (idea?.watch ?? []).filter((w) => w.ifBroken?.length);
   return (
     <div className="space-y-4">
@@ -205,13 +245,14 @@ function CoinDetail({ symbol, setups }: { symbol: string; setups: Setup[] }) {
       {setups.length > 1 && (
         <div>
           <h3 className="mb-1 text-xs uppercase tracking-wider text-ink-3">All setups on {coin(symbol)}</h3>
-          <Table head={['Side', 'Stage', 'Reason', 'Time (UTC)', 'Score', 'Entry', 'Stop', 'Target', 'R']}>
+          <Table head={['Side', 'Stage', 'Reason', 'Confirmed (UTC)', 'Since then', 'Score', 'Entry', 'Stop', 'Target', 'R']}>
             {setups.map((s) => (
               <tr key={s.key} onClick={() => setShown(s.key)} className={`cursor-pointer ${s.key === current.key ? 'bg-card-2' : 'hover:bg-card-2/60'}`}>
                 <td className={td}><SideBadge side={s.direction} /></td>
                 <td className={td}><Stage s={s} /></td>
                 <Reason s={s} />
-                <td className={`${td} tabular text-ink-2`}>{dateTime(s.last.time)}</td>
+                <ConfirmedCell s={s} />
+                    <ProgressCell s={s} />
                 <PlanCells s={s} />
               </tr>
             ))}

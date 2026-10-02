@@ -1,8 +1,8 @@
 // The engine core (ENGINE_PLAN.md Section 4A). It never reads the system
 // clock, the network or timers: time is the close time of the newest candle it
 // has been given. Given the same events, candles and commands, it returns the
-// same trade events every time, which is what makes replay, restart recovery
-// and the later backtest trustworthy.
+// same trade events every time, which is what makes replay and restart
+// recovery trustworthy.
 //
 // At each close time, in this order: market analysis; time rules (session
 // ends, funding, stale entries); 1m candles (fills, stops, targets); the
@@ -15,17 +15,21 @@ import type {
 import { TIMEFRAME_MS } from '../../../shared/types';
 import type { EngineConfig } from '../config';
 import { SessionCalendar, type SessionInfo } from '../sessions';
-import { Portfolio, type CloseOrder, type CloseReason, type EntryFill, type OpenOrder, type Position, type SetupName } from '../portfolio';
+import { Portfolio, type CloseOrder, type CloseReason, type EntryFill, type OpenOrder, type Position } from '../portfolio';
 import { MarketBook, type SymbolAnalysis } from '../analysis/market';
 import { buildContext, lastOf, sign, type Context } from '../strategy/context';
 import { armedStillValid, planTrade, tryArm, tryConfirm, type Armed, type Confirmation, type TradePlan } from '../strategy/pullback';
-import { runFilters } from '../filters';
+import { funding, runFilters } from '../filters';
 import { scoreSignal } from '../scoring';
 import { decideEntry, equityOf, riskAtStop, unrealized, type SymbolRules } from '../risk';
 import { manage } from '../exits';
 import { fee, grossPnl, liquidationPrice, marketFill, roundQty, stopFill, targetFill } from '../sim/broker';
 import { tradeIdea } from '../analysis/levels';
-import { meanReversion, momentumContinuation, openingRangeBreakout, type AltSignal, type MeanRevParams, type MomentumParams, type OrbParams } from '../strategy/alternatives';
+import { sessionSweep } from '../strategy/sessionSweep';
+import { armZoneSweep, confirmZoneSweep, zoneSweepStillValid, type ZoneSweepConfirmation } from '../strategy/zoneSweep';
+import { liquidityPlan } from '../strategy/smc';
+import { liquidityLevels, type LiquidityLevel } from '../analysis/liquidity';
+import { costsFor, roundTripPct, speedSettings, type SpeedGroup } from '../speed';
 
 const DIRECTIONS: Direction[] = ['long', 'short'];
 /** Entry-window blocks that end an armed setup; a funding pause only delays it. */
@@ -33,9 +37,21 @@ const WINDOW_CLOSED = new Set(['outside_sessions', 'session_ending', 'weekend'])
 const FUNDING_EVERY = 8 * 3_600_000;
 const DAY = 86_400_000;
 
-interface Checked {
-  ctx: Context; a: Armed; conf: Confirmation; filters: ReturnType<typeof runFilters>;
-  plan: TradePlan; score: ReturnType<typeof scoreSignal>; failures: string[];
+/** A confirmed signal of any model, checked, waiting for risk and the order. */
+interface Candidate {
+  ctx: Context;
+  /** The setup's id: the armed setup's for a pullback; joins its signal records. */
+  id: string;
+  direction: Direction;
+  setup: SignalRecord['setup'];
+  plan: TradePlan;
+  /** Ranks clean signals after reward:risk: the pullback's score, the sweep's confluence count. */
+  score: number;
+  failures: string[];
+  /** The level the confirmation closed through (classic management's failed-breakout exit). */
+  level: number | null;
+  /** Model-specific detail for the signal record. */
+  payload: Record<string, unknown>;
 }
 /** How long a confirmation shows on the trade idea after it happened (longer while in the trade). */
 const CONFIRMED_SHOWN_MS = 3_600_000;
@@ -44,19 +60,6 @@ export interface EngineDeps {
   config: EngineConfig;
   configHash: string;
   engineVersion: string;
-  /**
-   * Backtest research: every confirmed setup becomes a trade of this fixed
-   * size, whatever its checks said and with no risk limits, so each setup's
-   * outcome can be measured and any combination of checks tested afterwards.
-   */
-  research?: {
-    notional: number;
-    /** Which setup to research; the default is the pullback. The others are experiments (strategy/alternatives.ts). */
-    setup?: SetupName;
-    params?: OrbParams | MomentumParams | MeanRevParams;
-  };
-  /** Compute the chart-reading analysis (default true). */
-  analysisExtras?: boolean;
 }
 
 export type EngineCommand =
@@ -72,13 +75,18 @@ export type EngineCommand =
 export class CommandError extends Error {}
 
 interface Shadow {
+  armedId: string;
+  /** Price has moved 1R in the trade's favour (recorded once). */
+  working: boolean;
   signalTime: number;
   symbol: string;
   direction: Direction;
   signalStatus: 'taken' | 'filtered';
   signalReason: string | null;
   plan: TradePlan;
+  /** Followed until this time: the session's end, or the speed group's max hold (Section 18.6). */
   sessionClose: number;
+  speed: SpeedGroup;
 }
 
 export class Engine {
@@ -88,7 +96,9 @@ export class Engine {
   private readonly market: MarketBook;
   private readonly armed = new Map<string, Armed>();
   /** Signals that passed every check at this 15m close, waiting to be ranked. */
-  private clean: Checked[] = [];
+  private clean: Candidate[] = [];
+  /** Liquidity levels a sweep signal came from, with when: one signal per level and direction. */
+  private readonly sweepsUsed = new Map<string, number>();
   /** The latest confirmation per symbol|direction, for the trade ideas' stage. */
   private readonly confirmed = new Map<string, { direction: Direction; time: number; taken: boolean; reason: string | null }>();
   private universe = new Set<string>();
@@ -98,7 +108,6 @@ export class Engine {
   private shadows: Shadow[] = [];
   private shadowResults: ShadowResult[] = [];
   /** Opening-range breakouts already taken, per coin and session. */
-  private readonly orbTaken = new Set<string>();
   private peakEquity: number;
   private dayStart = { day: -1, equity: 0 };
   private readonly cfg: EngineConfig;
@@ -106,7 +115,7 @@ export class Engine {
   constructor(private readonly deps: EngineDeps) {
     this.cfg = deps.config;
     this.sessions = new SessionCalendar(deps.config.sessions);
-    this.market = new MarketBook(deps.config, deps.analysisExtras ?? true);
+    this.market = new MarketBook(deps.config, true);
     this.portfolio = new Portfolio(deps.config.starting_balance_usdt, deps.config.risk.losing_streak_size_cut);
     this.peakEquity = deps.config.starting_balance_usdt;
   }
@@ -309,7 +318,7 @@ export class Engine {
       this.clock = t;
       out.push(...this.onTime());
     }
-    // The exits timeframe (1m live; 5m in a backtest on 5m data) drives fills, stops and targets.
+    // The exits timeframe (1m) drives fills, stops and targets.
     for (const c of candles) if (c.tf === this.cfg.timeframes.exits) out.push(...this.onMinute(c));
     out.push(...this.guardrails());
     for (const c of candles) {
@@ -320,11 +329,13 @@ export class Engine {
       const ctx = buildContext(this.market, c.symbol, t, this.cfg, this.funding.get(c.symbol) ?? null);
       if (!ctx) continue;
       for (const p of managed) out.push(...this.managePosition(ctx, p));
-      const setup = this.deps.research?.setup ?? 'pullback';
-      if (inUniverse) out.push(...(setup === 'pullback' ? this.evaluate(ctx) : this.evaluateAlternative(ctx, setup)));
+      if (inUniverse) {
+        if (this.cfg.models.pullback || this.cfg.models.zone_sweep) out.push(...this.evaluate(ctx));
+        out.push(...this.evaluateSweep(ctx));
+      }
     }
-    // Clean signals from this close, best first: highest score, then reward:risk.
-    const clean = this.clean.sort((x, y) => y.score.total - x.score.total || y.plan.rewardRisk - x.plan.rewardRisk);
+    // Clean signals from this close, best first: highest reward:risk, then score (Section 18.1).
+    const clean = this.clean.sort((x, y) => y.plan.rewardRisk - x.plan.rewardRisk || y.score - x.score);
     this.clean = [];
     for (const c of clean) out.push(...this.finish(c));
     return out;
@@ -362,12 +373,12 @@ export class Engine {
 
   private onMinute(c: Candle): TradeEvent[] {
     const out: TradeEvent[] = [];
-    const costs = this.cfg.sim;
     for (const e of this.portfolio.pendingEntries()) {
       if (e.symbol === c.symbol && e.placedAt <= c.openTime) out.push(...this.fillEntry(e, c));
     }
     for (const p of this.portfolio.positions()) {
       if (p.symbol !== c.symbol) continue;
+      const costs = costsFor(this.cfg, p.speed);
       if (p.pendingClose && p.pendingClose.placedAt <= c.openTime) {
         out.push(this.closePosition(p, marketFill(p.side, 'close', c.open, costs), p.pendingClose.reason));
         continue;
@@ -394,7 +405,8 @@ export class Engine {
 
   private fillEntry(e: ReturnType<Portfolio['pendingEntries']>[number], c: Candle): TradeEvent[] {
     const cfg = this.cfg;
-    const price = marketFill(e.side, 'open', c.open, cfg.sim);
+    const costs = costsFor(cfg, e.speed);
+    const price = marketFill(e.side, 'open', c.open, costs);
     const s = sign(e.side);
     const cancel = (reason: string, extra: Record<string, unknown> = {}) =>
       [this.emit('order_cancelled', e.positionId, e.symbol, { reason, price, ...extra })];
@@ -402,10 +414,11 @@ export class Engine {
 
     // Size from the fill: the loss at the stop must still fit the cap.
     const equity = equityOf(this.portfolio, (x) => this.priceOf(x));
-    const lossPct = (Math.abs(price - e.stop) / price) * 100 + 2 * (cfg.sim.taker_fee_pct + cfg.sim.slippage_pct);
-    const maxNotional = ((cfg.allocation.max_loss_per_trade_pct / 100) * equity / lossPct) * 100;
+    const lossPct = (Math.abs(price - e.stop) / price) * 100 + roundTripPct(costs);
+    const riskPct = Math.min(cfg.allocation.max_loss_per_trade_pct, speedSettings(cfg, e.speed).risk_pct);
+    const maxNotional = ((riskPct / 100) * equity / lossPct) * 100;
     const rules = this.rules.get(e.symbol);
-    const qty = roundQty((this.deps.research ? e.notional : Math.min(e.notional, maxNotional)) / price, rules?.stepSize ?? 0);
+    const qty = roundQty(Math.min(e.notional, maxNotional) / price, rules?.stepSize ?? 0);
     if (qty <= 0 || qty < (rules?.minQty ?? 0) || qty * price < (rules?.minNotional ?? 5)) return cancel('size_too_small', { qty });
 
     const liqPrice = liquidationPrice(e.side, price, cfg.leverage, cfg.sim.maintenance_margin_pct);
@@ -414,7 +427,7 @@ export class Engine {
     const fill: EntryFill = {
       role: 'entry', side: e.side, qty, price, stop: e.stop, target: e.target,
       fee: fee(qty * price, cfg.sim), session: this.sessions.ownerAt(e.placedAt),
-      leverage: cfg.leverage, liqPrice, chochLevel: e.chochLevel, signalId: e.signalId, setup: e.setup ?? 'pullback',
+      leverage: cfg.leverage, liqPrice, chochLevel: e.chochLevel, signalId: e.signalId, speed: e.speed ?? 'normal',
     };
     // Recorded at the candle's open: the moment the fill happened.
     return [this.emit('order_filled', e.positionId, e.symbol, { ...fill, notional: qty * price, margin: (qty * price) / cfg.leverage }, c.openTime)];
@@ -446,7 +459,6 @@ export class Engine {
 
   /** Daily loss limit bookkeeping and the drawdown kill switch. */
   private guardrails(): TradeEvent[] {
-    if (this.deps.research) return [];
     const equity = equityOf(this.portfolio, (s) => this.priceOf(s));
     const today = Math.floor(this.clock / DAY);
     if (this.dayStart.day !== today) this.dayStart = { day: today, equity };
@@ -478,28 +490,44 @@ export class Engine {
       else if (a.type === 'stop') out.push(this.emit('stop_moved', p.id, p.symbol, { stop: a.stop, reason: a.reason, ...(a.ladderStep !== undefined ? { ladderStep: a.ladderStep } : {}) }));
       else if (a.type === 'close_half') {
         const qty = roundQty(p.qty / 2, this.rules.get(p.symbol)?.stepSize ?? 0);
-        const price = marketFill(p.side, 'close', ctx.price, this.cfg.sim);
+        const price = marketFill(p.side, 'close', ctx.price, costsFor(this.cfg, p.speed));
         if (qty > 0) out.push(this.emit('partial_closed', p.id, p.symbol, { qty, price, pnl: grossPnl(p.side, p.entryPrice, price, qty), fee: fee(qty * price, this.cfg.sim), reason: a.reason }));
       }
     }
     return out;
   }
 
-  /** The pullback setup for one symbol at a 15m close: expire, confirm, or arm. */
+  /**
+   * The zone setup for one symbol at a 15m close: expire, confirm, or arm. With
+   * models.zone_sweep, Model 1's rules (Section 18.5); with models.pullback,
+   * the classic pullback (Section 8.4).
+   */
   private evaluate(ctx: Context): TradeEvent[] {
     const out: TradeEvent[] = [];
     const { symbol, t } = ctx;
+    const m1 = this.cfg.models.zone_sweep;
+    const setup = m1 ? 'zone_sweep' : 'pullback';
     const block = this.sessions.entryBlock(t);
     const windowClosed = block !== null && WINDOW_CLOSED.has(block);
-    const busy = !this.deps.research && (this.portfolio.positions().some((p) => p.symbol === symbol) || this.portfolio.pendingEntries().some((e) => e.symbol === symbol));
+    // New listings: too little history to read structure (Section 18.1).
+    const newListing = ctx.h1.candles.length < this.cfg.speed.min_history_days * 24;
+    const busy = (this.portfolio.positions().some((p) => p.symbol === symbol) || this.portfolio.pendingEntries().some((e) => e.symbol === symbol));
     for (const dir of DIRECTIONS) {
       const key = `${symbol}|${dir}`;
       const armed = this.armed.get(key);
       if (armed) {
-        const why = armedStillValid(ctx, armed, windowClosed);
+        const why = m1 ? zoneSweepStillValid(ctx, armed, windowClosed) : armedStillValid(ctx, armed, windowClosed);
         if (why) {
           this.armed.delete(key);
-          this.signal(symbol, dir, 'expired', why, { armedId: armed.id, price: ctx.price });
+          this.signal(symbol, dir, 'expired', why, { armedId: armed.id, price: ctx.price }, setup);
+        } else if (m1) {
+          const levels = liquidityLevels(ctx);
+          const conf = confirmZoneSweep(ctx, armed, levels);
+          if (conf) {
+            this.armed.delete(key);
+            out.push(...this.checkZoneSweep(ctx, armed, conf, block, levels));
+          }
+          continue;
         } else {
           const conf = tryConfirm(ctx, armed);
           if (conf) {
@@ -509,8 +537,8 @@ export class Engine {
           continue;
         }
       }
-      if (windowClosed || busy) continue;
-      const fresh = tryArm(ctx, dir);
+      if (windowClosed || busy || newListing) continue;
+      const fresh = m1 ? armZoneSweep(ctx, dir) : tryArm(ctx, dir);
       if (fresh) {
         this.armed.set(key, fresh);
         this.confirmed.delete(key);
@@ -518,43 +546,14 @@ export class Engine {
           armedId: fresh.id, price: fresh.price, factors: fresh.factors, zone: fresh.zone && { id: fresh.zone.id, low: fresh.zone.low, high: fresh.zone.high, status: fresh.zone.status },
           areaLow: fresh.areaLow, areaHigh: fresh.areaHigh, expiresAt: fresh.expiresAt, trendState: ctx.analysis[dir].state,
           // Entry, stop and target if it confirmed now; the real plan is made at the confirmation close.
-          planEstimate: planTrade(ctx, fresh),
-        });
+          planEstimate: m1 ? this.zonePlan(ctx, fresh, dir === 'long' ? fresh.areaLow : fresh.areaHigh, liquidityLevels(ctx))?.plan ?? null : planTrade(ctx, fresh),
+        }, setup);
       }
     }
     return out;
   }
 
-  /** Research only: an alternative setup, under the session rule, recorded like a taken pullback signal. */
-  private evaluateAlternative(ctx: Context, setup: Exclude<SetupName, 'pullback'>): TradeEvent[] {
-    const research = this.deps.research!;
-    if (this.sessions.entryBlock(ctx.t)) return [];
-    const owner = this.sessions.ownerAt(ctx.t);
-    const orbKey = owner ? `${ctx.symbol}|${owner.name}|${owner.openTime}` : '';
-    let sig: AltSignal | null = null;
-    if (setup === 'orb') sig = openingRangeBreakout(ctx, owner, research.params as OrbParams, this.orbTaken.has(orbKey));
-    else if (setup === 'momentum') sig = momentumContinuation(ctx, research.params as MomentumParams);
-    else sig = meanReversion(ctx, research.params as MeanRevParams);
-    if (!sig) return [];
-    if (setup === 'orb') this.orbTaken.add(orbKey);
-    const id = `${ctx.symbol}-${setup}-${ctx.t}`;
-    const risk = Math.abs(ctx.price - sig.stop);
-    const plan = {
-      entry: ctx.price, stop: sig.stop, target: sig.target, targetSource: setup,
-      stopDistancePct: (risk / ctx.price) * 100, rewardRisk: Math.abs(sig.target - ctx.price) / risk,
-    };
-    this.signals.push({
-      time: this.clock, symbol: ctx.symbol, setup: 'pullback', direction: sig.direction, status: 'taken', reason: null,
-      payload: { armedId: id, setup, plan, score: { total: 0, points: {} }, failures: [], filters: [], detail: sig.detail, session: owner?.name ?? null },
-    });
-    const order: OpenOrder = {
-      action: 'open', orderType: 'market', side: sig.direction, notional: research.notional, stop: sig.stop, target: sig.target,
-      chochLevel: sig.level, signalId: id, refPrice: ctx.price, setup,
-    };
-    return [this.emit('order_placed', `${id}-pos`, ctx.symbol, { ...order, plan })];
-  }
-
-  /** A confirmed setup: session, filters, stop, reward/risk, score, then risk. The first failure is the reason. */
+  /** A confirmed pullback: session, filters, stop, reward/risk, score, then risk. The first failure is the reason. */
   private check(ctx: Context, a: Armed, conf: Confirmation, block: string | null): TradeEvent[] {
     const cfg = this.cfg;
     const filters = runFilters(ctx, a, conf);
@@ -562,79 +561,171 @@ export class Engine {
     const score = scoreSignal(ctx, a, conf, plan);
     const failures = [
       ...(block ? [`session_${block}`] : []),
-      ...filters.filter((f) => !f.pass).map((f) => `filter_${f.name}`),
-      ...(plan.stopDistancePct > 0 && plan.stopDistancePct <= cfg.exits.max_stop_pct ? [] : ['stop_too_wide']),
-      ...(plan.rewardRisk >= cfg.exits.min_rr ? [] : ['rr_too_low']),
+      // The fakeout check can be recorded without blocking (its failed-breakout exit stays on).
+      ...filters.filter((f) => !f.pass && !(f.name === 'fakeout' && !cfg.filters.fakeout.block_entry)).map((f) => `filter_${f.name}`),
+      ...this.planFailures(ctx, plan),
       ...(score.total >= cfg.scoring.min_score ? [] : ['score_too_low']),
     ];
-    const checked: Checked = { ctx, a, conf, filters, plan, score, failures };
-    // A clean signal waits for the other coins closing now: the best are sized first when slots are short.
-    if (!failures.length && !this.deps.research) {
-      this.clean.push(checked);
-      return [];
-    }
-    return this.finish(checked);
+    return this.submit({
+      ctx, id: a.id, direction: a.direction, setup: 'pullback', plan, score: score.total, failures, level: conf.level,
+      payload: { armedAt: a.armedAt, factors: a.factors, trendState: ctx.analysis[a.direction].state, confirmation: conf, score, filters },
+    });
   }
 
-  /** Risk, the signal record, the shadow trade and the order for one checked signal. */
-  private finish({ ctx, a, conf, filters, plan, score, failures }: Checked): TradeEvent[] {
+  /** Model 1's plan: stop beyond `extreme` plus the speed group's buffer, take-profit at opposite liquidity. */
+  private zonePlan(ctx: Context, a: Armed, extreme: number, levels: LiquidityLevel[]) {
+    const s = sign(a.direction);
+    const buffer = speedSettings(this.cfg, ctx.speed).stop_buffer_atr_15m * lastOf(ctx.atr15m);
+    return liquidityPlan(ctx, a.direction, ctx.price, extreme - s * buffer, levels);
+  }
+
+  /** A confirmed Model 1 setup: the sweep is required; then the shared plan rules, funding and risk. */
+  private checkZoneSweep(ctx: Context, a: Armed, conf: ZoneSweepConfirmation, block: string | null, levels: LiquidityLevel[]): TradeEvent[] {
+    const planned = this.zonePlan(ctx, a, conf.extreme, levels);
+    const detail = {
+      armedAt: a.armedAt, factors: a.factors, poi: { low: a.areaLow, high: a.areaHigh }, chochLevel: conf.level, sweep: conf.sweep, extreme: conf.extreme,
+      target: planned && { name: planned.target.name, price: planned.target.price },
+    };
+    if (!planned) {
+      this.signals.push({ time: this.clock, symbol: ctx.symbol, setup: 'zone_sweep', direction: a.direction, status: 'filtered', reason: 'no_target', payload: { armedId: a.id, model: 'zone_sweep', ...detail, failures: ['no_target'], speed: ctx.speed ?? 'normal' } });
+      return [];
+    }
+    const fundingCheck = funding(ctx, a.direction);
+    const failures = [
+      ...(block ? [`session_${block}`] : []),
+      ...(conf.sweep ? [] : ['no_sweep']),
+      ...this.planFailures(ctx, planned.plan),
+      ...(fundingCheck.pass ? [] : ['filter_funding']),
+    ];
+    return this.submit({
+      ctx, id: a.id, direction: a.direction, setup: 'zone_sweep', plan: planned.plan, score: a.factors.length, failures, level: conf.level,
+      payload: { ...detail, filters: [fundingCheck] },
+    });
+  }
+
+  /** The plan rules every model shares: stop distance, reward:risk, minimum profit, and costs against the risk. */
+  private planFailures(ctx: Context, plan: TradePlan): string[] {
     const cfg = this.cfg;
-    const lastHour = this.market.recent(a.symbol, '1h', 1)[0];
-    const risk = failures.length || this.deps.research ? null : decideEntry({
-      config: cfg, t: ctx.t, symbol: a.symbol, side: a.direction, entry: plan.entry, stop: plan.stop,
+    return [
+      ...(plan.stopDistancePct > 0 && plan.stopDistancePct <= cfg.exits.max_stop_pct ? [] : ['stop_too_wide']),
+      ...(plan.rewardRisk >= cfg.exits.min_rr ? [] : ['rr_too_low']),
+      ...(Math.abs(plan.target - plan.entry) / plan.entry * 100 >= cfg.exits.min_target_pct ? [] : ['profit_too_small']),
+      // Fees and slippage would eat too much of the money at risk: the stop is too tight for the costs.
+      ...(plan.stopDistancePct > 0 && (roundTripPct(costsFor(cfg, ctx.speed)) / plan.stopDistancePct) * 100 > cfg.allocation.max_fee_drag_pct ? ['fees_too_high'] : []),
+    ];
+  }
+
+  /** A clean signal waits for the other coins closing now: the best are sized first when slots are short. */
+  private submit(c: Candidate): TradeEvent[] {
+    if (!c.failures.length) {
+      this.clean.push(c);
+      return [];
+    }
+    return this.finish(c);
+  }
+
+  /** Risk, the signal record, the shadow trade and the order for one checked signal of any model. */
+  private finish({ ctx, id, direction, setup, plan, score, failures, level, payload }: Candidate): TradeEvent[] {
+    const cfg = this.cfg;
+    const symbol = ctx.symbol;
+    const lastHour = this.market.recent(symbol, '1h', 1)[0];
+    const risk = failures.length ? null : decideEntry({
+      config: cfg, t: ctx.t, symbol, side: direction, entry: plan.entry, stop: plan.stop,
       portfolio: this.portfolio, priceOf: (s) => this.priceOf(s), dayStartEquity: this.dayStart.equity || this.portfolio.balance,
-      lastHourVolume: lastHour ? lastHour.quoteVolume : null, rules: this.rules.get(a.symbol) ?? null, score: score.total,
+      lastHourVolume: lastHour ? lastHour.quoteVolume : null, rules: this.rules.get(symbol) ?? null, score, speed: ctx.speed,
     });
     if (risk && !risk.ok) failures.push(risk.reason!);
     const status = failures.length ? 'filtered' : 'taken';
-    this.confirmed.set(`${a.symbol}|${a.direction}`, { direction: a.direction, time: ctx.t, taken: status === 'taken', reason: failures[0] ?? null });
-    this.signal(a.symbol, a.direction, status, failures[0] ?? null, {
-      armedId: a.id, armedAt: a.armedAt, factors: a.factors, trendState: ctx.analysis[a.direction].state,
-      session: this.sessions.ownerAt(ctx.t)?.name ?? null, confirmation: conf, plan, score, filters, failures, risk,
+    this.confirmed.set(`${symbol}|${direction}`, { direction, time: ctx.t, taken: status === 'taken', reason: failures[0] ?? null });
+    this.signals.push({
+      time: this.clock, symbol, setup, direction, status, reason: failures[0] ?? null,
+      payload: { armedId: id, model: setup, ...payload, session: this.sessions.ownerAt(ctx.t)?.name ?? null, plan, failures, risk, speed: ctx.speed ?? 'normal' },
     });
 
     // Every confirmed signal with a sane plan is followed as a shadow trade.
     const owner = this.sessions.ownerAt(ctx.t);
     if (plan.stopDistancePct > 0) {
       this.shadows.push({
-        signalTime: ctx.t, symbol: a.symbol, direction: a.direction, signalStatus: status, signalReason: failures[0] ?? null, plan,
-        sessionClose: owner?.closeTime ?? ctx.t + DAY,
+        armedId: id, working: false,
+        signalTime: ctx.t, symbol, direction, signalStatus: status, signalReason: failures[0] ?? null, plan,
+        sessionClose: cfg.sessions.exit_at_session_end ? owner?.closeTime ?? ctx.t + DAY : ctx.t + speedSettings(cfg, ctx.speed).max_hold_hours * 3_600_000,
+        speed: ctx.speed ?? 'normal',
       });
-    }
-    if (this.deps.research) {
-      if (!(plan.stopDistancePct > 0) || block) return [];
-      const order: OpenOrder = {
-        action: 'open', orderType: 'market', side: a.direction, notional: this.deps.research.notional, stop: plan.stop,
-        target: cfg.exits.mode === 'ladder' ? null : plan.target, chochLevel: conf.level, signalId: a.id, refPrice: plan.entry,
-      };
-      return [this.emit('order_placed', `${a.id}-pos`, a.symbol, { ...order, plan, score: score.total })];
     }
     if (status !== 'taken') return [];
 
     const target = cfg.exits.mode === 'ladder' ? null : plan.target;
     const order: OpenOrder = {
-      action: 'open', orderType: 'market', side: a.direction, notional: risk!.notional, stop: plan.stop, target,
-      chochLevel: conf.level, signalId: a.id, refPrice: plan.entry,
+      action: 'open', orderType: 'market', side: direction, notional: risk!.notional, stop: plan.stop, target,
+      chochLevel: level, signalId: id, refPrice: plan.entry, speed: ctx.speed ?? 'normal',
     };
-    return [this.emit('order_placed', `${a.id}-pos`, a.symbol, { ...order, plan, score: score.total })];
+    return [this.emit('order_placed', `${id}-pos`, symbol, { ...order, plan, score })];
+  }
+
+  /**
+   * Model 3, the session sweep (Section 18.4), for one coin at a 15m close.
+   * Only inside an entry window (killzone, weekday); each swept level gives
+   * at most one signal per direction.
+   */
+  private evaluateSweep(ctx: Context): TradeEvent[] {
+    const cfg = this.cfg;
+    if (!cfg.models.session_sweep || this.sessions.entryBlock(ctx.t)) return [];
+    const { symbol, t } = ctx;
+    if (ctx.h1.candles.length < cfg.speed.min_history_days * 24) return [];
+    if (this.portfolio.positions().some((p) => p.symbol === symbol) || this.portfolio.pendingEntries().some((e) => e.symbol === symbol)) return [];
+    const out: TradeEvent[] = [];
+    for (const dir of DIRECTIONS) {
+      const sig = sessionSweep(ctx, dir);
+      if (!sig) continue;
+      const key = `${symbol}|${dir}|${sig.swept.name}|${sig.swept.formedAt}`;
+      if (this.sweepsUsed.has(key)) continue;
+      this.sweepsUsed.set(key, t);
+      const id = `${symbol}-sweep-${dir}-${t}`;
+      const detail = {
+        swept: { name: sig.swept.name, price: sig.swept.price }, sweptAll: sig.sweptAll.map((l) => l.name), extreme: sig.extreme,
+        target: sig.targetLevel && { name: sig.targetLevel.name, price: sig.targetLevel.price }, confluence: sig.confluence,
+      };
+      if (!sig.plan) {
+        // No opposite level ahead: nothing to aim at. Recorded so the Signals page shows why.
+        this.signals.push({ time: this.clock, symbol, setup: 'session_sweep', direction: dir, status: 'filtered', reason: 'no_target', payload: { armedId: id, model: 'session_sweep', ...detail, failures: ['no_target'], speed: ctx.speed ?? 'normal' } });
+        continue;
+      }
+      const fundingCheck = funding(ctx, dir);
+      const failures = [...this.planFailures(ctx, sig.plan), ...(fundingCheck.pass ? [] : ['filter_funding'])];
+      out.push(...this.submit({
+        ctx, id, direction: dir, setup: 'session_sweep', plan: sig.plan, score: sig.confluence.length, failures, level: sig.swept.price,
+        payload: { ...detail, filters: [fundingCheck] },
+      }));
+    }
+    // Forget levels from more than two days ago.
+    for (const [k, at] of this.sweepsUsed) if (t - at > 2 * DAY) this.sweepsUsed.delete(k);
+    return out;
   }
 
   // ---------------------------------------------------------------- shadow trades
 
   private resolveShadows(c: Candle): void {
-    const costs = this.cfg.sim;
-    const costPct = 2 * (costs.taker_fee_pct + costs.slippage_pct);
     this.shadows = this.shadows.filter((sh) => {
       if (sh.symbol !== c.symbol || c.openTime < sh.signalTime) return true;
+      const costPct = roundTripPct(costsFor(this.cfg, sh.speed));
       const { entry, stop, target } = sh.plan;
       const s = sign(sh.direction);
       const risk = Math.abs(entry - stop);
       let outcome: ShadowResult['outcome'] | null = null;
       let exit = 0;
-      if (sh.direction === 'long' ? c.low <= stop : c.high >= stop) { outcome = 'stop'; exit = stop; }
+      const stopHit = sh.direction === 'long' ? c.low <= stop : c.high >= stop;
+      const best = sh.direction === 'long' ? c.high : c.low;
+      // Going our way: the first candle that reaches 1R in favour (not one that also hits the stop: order unknown, stop first).
+      if (!sh.working && !stopHit && s * (best - entry) >= risk) {
+        sh.working = true;
+        this.signal(sh.symbol, sh.direction, 'working', null, { armedId: sh.armedId, price: entry + s * risk, r: 1, signalStatus: sh.signalStatus });
+      }
+      if (stopHit) { outcome = 'stop'; exit = stop; }
       else if (sh.direction === 'long' ? c.high >= target : c.low <= target) { outcome = 'target'; exit = target; }
-      else if (c.closeTime >= sh.sessionClose) { outcome = 'session_end'; exit = c.close; }
+      else if (c.closeTime >= sh.sessionClose) { outcome = this.cfg.sessions.exit_at_session_end ? 'session_end' : 'max_hold'; exit = c.close; }
       if (!outcome) return true;
+      const r = (s * (exit - entry) - (costPct / 100) * entry) / risk;
+      this.signal(sh.symbol, sh.direction, 'outcome', outcome, { armedId: sh.armedId, outcome, exit, r, signalStatus: sh.signalStatus });
       this.shadowResults.push({
         time: c.closeTime, signalTime: sh.signalTime, symbol: sh.symbol, direction: sh.direction,
         signalStatus: sh.signalStatus, signalReason: sh.signalReason, entry, stop, target, exit, outcome,
@@ -657,8 +748,8 @@ export class Engine {
     return this.emit('order_placed', p.id, p.symbol, { ...payload, session: p.session?.name ?? null });
   }
 
-  private signal(symbol: string, direction: Direction, status: SignalRecord['status'], reason: string | null, payload: Record<string, unknown>): void {
-    this.signals.push({ time: this.clock, symbol, setup: 'pullback', direction, status, reason, payload });
+  private signal(symbol: string, direction: Direction, status: SignalRecord['status'], reason: string | null, payload: Record<string, unknown>, setup: SignalRecord['setup'] = 'pullback'): void {
+    this.signals.push({ time: this.clock, symbol, setup, direction, status, reason, payload });
   }
 
   /** Records an event the engine produced and applies it to its own state. */

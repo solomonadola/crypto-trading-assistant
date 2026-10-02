@@ -4,6 +4,7 @@
 import type { EngineConfig } from './config';
 import type { Position, PendingEntry, Portfolio, Side } from './portfolio';
 import { coinOf } from './symbols';
+import { costsFor, roundTripPct, speedSettings, type SpeedGroup } from './speed';
 
 export interface SymbolRules {
   stepSize: number;
@@ -28,6 +29,8 @@ export interface RiskInput {
   rules: SymbolRules | null;
   /** The signal's score: picks the capital tier when allocation.sizing is `tiers`. */
   score: number;
+  /** The coin's speed group: its risk, slippage and open-trade limit (Section 18.2). */
+  speed?: SpeedGroup;
 }
 
 export interface RiskDecision {
@@ -37,7 +40,6 @@ export interface RiskDecision {
   detail: Record<string, number | string | boolean | null>;
 }
 
-const roundTripCostPct = (c: EngineConfig) => 2 * (c.sim.taker_fee_pct + c.sim.slippage_pct);
 
 export function unrealized(p: Position, price: number | null): number {
   if (price === null) return 0;
@@ -77,14 +79,22 @@ export function decideEntry(i: RiskInput): RiskDecision {
   if (lastLoss !== null && i.t - lastLoss < c.risk.cooldown_after_loss_min * 60_000) {
     return no('risk_cooldown_after_loss', { minutesSinceLoss: Math.round((i.t - lastLoss) / 60_000), cooldown: c.risk.cooldown_after_loss_min });
   }
+  const speed = speedSettings(c, i.speed);
+  if (speed.max_open !== undefined) {
+    const same = [...positions, ...pending].filter((x) => (x.speed ?? 'normal') === (i.speed ?? 'normal')).length;
+    if (same >= speed.max_open) return no('risk_max_speed_group', { group: i.speed ?? 'normal', open: same, max: speed.max_open });
+  }
   const group = Object.entries(a.correlation_groups).find(([, members]) => members.includes(coinOf(i.symbol)));
   if (group) {
     const inGroup = [...positions, ...pending].filter((x) => group[1].includes(coinOf(x.symbol))).length;
     if (inGroup >= a.max_correlated_trades) return no('risk_correlated', { group: group[0], open: inGroup, max: a.max_correlated_trades });
   }
 
-  // Size: the tier (flat by default), then every cap in order.
-  let capitalPct = a.flat_capital_pct;
+  // Size: by risk (the loss at the stop is the group's risk), flat, or the score's tier; then every cap in order.
+  const stopPct = (Math.abs(i.entry - i.stop) / i.entry) * 100;
+  const lossPct = stopPct + roundTripPct(costsFor(c, i.speed));
+  const riskPct = Math.min(a.max_loss_per_trade_pct, speed.risk_pct);
+  let capitalPct = a.sizing === 'risk' ? (riskPct / lossPct) * 100 : a.flat_capital_pct;
   if (a.sizing === 'tiers') {
     const tier = [...a.tiers].reverse().find((x) => i.score >= x.min_score);
     if (!tier) return no('risk_score_below_tiers', { score: i.score });
@@ -94,9 +104,7 @@ export function decideEntry(i: RiskInput): RiskDecision {
   const caps: string[] = [];
   if (pf.sizeCutActive) { notional *= c.risk.losing_streak_size_cut.size_mult; caps.push('losing_streak'); }
 
-  const stopPct = (Math.abs(i.entry - i.stop) / i.entry) * 100;
-  const lossPct = stopPct + roundTripCostPct(c);
-  const maxLoss = (a.max_loss_per_trade_pct / 100) * equity;
+  const maxLoss = (riskPct / 100) * equity;
   if ((notional * lossPct) / 100 > maxLoss) { notional = (maxLoss / lossPct) * 100; caps.push('loss_cap'); }
 
   const exposure = positions.reduce((s, p) => s + p.qty * (i.priceOf(p.symbol) ?? p.entryPrice), 0) + pending.reduce((s, p) => s + p.notional, 0);

@@ -75,14 +75,19 @@ export type Direction = 'long' | 'short';
  * confluence area; expired without confirmation; or confirmed and then
  * taken (every check passed) or filtered (the first failing check is the reason).
  */
-export type SignalStatus = 'armed' | 'expired' | 'taken' | 'filtered';
+/**
+ * After a confirmation (taken or filtered) the setup is followed: "working"
+ * when price first moves 1R in its favour, "outcome" when it reaches its
+ * take-profit, its stop or the session end.
+ */
+export type SignalStatus = 'armed' | 'expired' | 'taken' | 'filtered' | 'working' | 'outcome';
 
 export interface SignalRecord {
   id?: number;
   /** Engine clock. */
   time: number;
   symbol: string;
-  setup: 'pullback' | 'breakout';
+  setup: 'pullback' | 'breakout' | 'session_sweep' | 'zone_sweep';
   direction: Direction;
   status: SignalStatus;
   reason: string | null;
@@ -109,7 +114,7 @@ export interface ShadowResult {
   stop: number;
   target: number;
   exit: number;
-  outcome: 'stop' | 'target' | 'session_end';
+  outcome: 'stop' | 'target' | 'session_end' | 'max_hold';
   /** Result in multiples of the planned risk, after costs. */
   r: number;
 }
@@ -240,6 +245,8 @@ export interface TradeIdea {
      * to enter from.
      */
     status: 'in_trade' | 'confirmed' | 'armed' | 'in_zone' | 'wait' | 'no_level';
+    /** Profit to the take-profit, percent from the entry (null without an entry). */
+    targetPct: number | null;
     /** The engine's latest 15m confirmation in this direction, within the last hour or while in the trade. */
     confirmation: null | { time: number; taken: boolean; reason: string | null };
     entryLow: number | null;

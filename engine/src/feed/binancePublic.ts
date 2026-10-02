@@ -145,6 +145,12 @@ export class BinancePublic {
       });
   }
 
+  /** The latest trade price of every symbol, one light request. */
+  async tickerPrices(): Promise<Map<string, number>> {
+    const rows = await this.get<{ symbol: string; price: string }[]>('/fapi/v1/ticker/price');
+    return new Map(rows.map((r) => [r.symbol, Number(r.price)]));
+  }
+
   async tickers24h(): Promise<Ticker24h[]> {
     const rows = await this.get<Record<string, string>[]>('/fapi/v1/ticker/24hr');
     return rows.map((r) => ({

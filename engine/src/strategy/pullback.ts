@@ -6,7 +6,7 @@ import { fibLevel, type Pivot } from '../analysis/indicators';
 import type { Zone } from '../analysis/zones';
 import { lastOf, sign, type Context } from './context';
 
-export type FactorName = 'zone' | 'ema' | 'fib' | 'vwap' | 'breakout_level';
+export type FactorName = 'zone' | 'order_block' | 'ema' | 'fib' | 'vwap' | 'breakout_level';
 
 export interface Factor {
   name: FactorName;
@@ -115,6 +115,23 @@ export function armedStillValid(ctx: Context, a: Armed, entryWindowClosed: boole
   return null;
 }
 
+/**
+ * The 15m change of character for `dir`: the 15m made lower highs (long), and
+ * this candle is the first to close above the latest of them. Returns that
+ * swing, or null. Mirrored for a short.
+ */
+export function choch(ctx: Context, dir: Direction): Pivot | null {
+  const s = sign(dir);
+  const m = ctx.m15;
+  const n = m.close.length - 1;
+  const swings = ctx.pivots15m.filter((x) => x.type === (dir === 'long' ? 'high' : 'low'));
+  if (swings.length < 2) return null;
+  const [prev, latest] = swings.slice(-2);
+  if (!(s * (prev.price - latest.price) > 0)) return null;
+  if (!(s * (m.close[n] - latest.price) > 0 && s * (m.close[n - 1] - latest.price) <= 0)) return null;
+  return latest;
+}
+
 export interface Confirmation {
   /** The 15m swing the close went through (the CHoCH level). */
   level: number;
@@ -139,14 +156,8 @@ export function tryConfirm(ctx: Context, a: Armed): Confirmation | null {
   const m = ctx.m15;
   const n = m.close.length - 1;
   if (ctx.t <= a.armedAt) return null;
-
-  const type = a.direction === 'long' ? 'high' : 'low';
-  const swings = ctx.pivots15m.filter((x) => x.type === type);
-  if (swings.length < 2) return null;
-  const [prev, latest] = swings.slice(-2);
-  // Lower highs (long) / higher lows (short) during the pullback.
-  if (!(s * (prev.price - latest.price) > 0)) return null;
-  if (!(s * (m.close[n] - latest.price) > 0 && s * (m.close[n - 1] - latest.price) <= 0)) return null;
+  const latest = choch(ctx, a.direction);
+  if (!latest) return null;
 
   const from = Math.max(1, n - cfg.lookback_candles + 1);
   let engulfing = false;
@@ -226,20 +237,22 @@ export function planTrade(ctx: Context, a: Armed): TradePlan {
     const swing = [...ctx.pivots15m].reverse()
       .find((p) => p.type === (a.direction === 'long' ? 'low' : 'high') && p.index < n && s * (entry - p.price) > 0);
     anchor = swing ? swing.price : pullbackExtreme();
-    buffer = cfg.exits.stop_buffer_atr * lastOf(ctx.atr15m);
+    // The coin's speed group sets the buffer (wild coins overshoot further); fixtures without one use the exits setting.
+    buffer = (ctx.speed ? cfg.speed.groups[ctx.speed].stop_buffer_atr_15m : cfg.exits.stop_buffer_atr) * lastOf(ctx.atr15m);
   } else {
     anchor = a.zone ? (a.direction === 'long' ? a.zone.low : a.zone.high) : pullbackExtreme();
     buffer = cfg.exits.stop_buffer_atr * lastOf(ctx.atr1h);
   }
   const stop = anchor - s * buffer;
 
+  // fixed: one take-profit at the first level in the way, however far (altcoins run); the fixed
+  // percentage only when no level is ahead. The other modes cap their first target at it.
   const targetPct = cfg.exits.mode === 'fixed' ? cfg.exits.fixed_target_pct : cfg.exits.partial_at_pct;
   let target = entry * (1 + (s * targetPct) / 100);
   let targetSource = `${cfg.exits.mode} +${targetPct}%`;
   const opposing = opposingLevels(ctx, a.direction).filter((l) => s * (l.price - entry) > 0);
-  for (const l of opposing) {
-    if (s * (l.price - target) < 0) { target = l.price; targetSource = l.name; }
-  }
+  const nearest = opposing.sort((x, y) => s * (x.price - y.price))[0];
+  if (nearest && (cfg.exits.mode === 'fixed' || s * (nearest.price - target) < 0)) { target = nearest.price; targetSource = nearest.name; }
   const risk = s * (entry - stop);
   return {
     entry, stop, stopDistancePct: (risk / entry) * 100, target, targetSource,

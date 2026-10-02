@@ -6,12 +6,12 @@ import { coin } from '../lib/format';
 import { Card, Empty } from '../components/ui';
 import { TradePlanCard } from '../components/TradePlan';
 
-const SHOW = [['active', 'with a plan'], ['all', 'all coins']] as const;
+const SHOW = [['signals', 'signals'], ['active', 'with a plan'], ['all', 'all coins']] as const;
 
 export function Ideas({ go }: { go: (page: string, symbol?: string) => void }) {
   const { data } = usePoll<TradeIdea[]>('/api/ideas', 30_000);
-  const [show, setShow] = useState<(typeof SHOW)[number][0]>('active');
-  const ideas = (data ?? []).filter((i) => show === 'all' || (i.plan && i.plan.status !== 'no_level'));
+  const [show, setShow] = useState<(typeof SHOW)[number][0]>('signals');
+  const ideas = (data ?? []).filter((i) => show === 'all' || (show === 'signals' ? !!i.plan?.meetsRules : !!i.plan && i.plan.status !== 'no_level'));
 
   return (
     <div className="space-y-5">
@@ -27,11 +27,11 @@ export function Ideas({ go }: { go: (page: string, symbol?: string) => void }) {
         }
       >
         <p className="max-w-3xl text-sm text-ink-2">
-          For every scanned coin: the trend, the key support and resistance levels, and a suggested entry area, stop and targets in the trend's
-          direction. Coins the engine has armed and coins whose price is in the entry area come first. Click a card to see it on the chart.
+          For every scanned coin: the trend, the key levels, and a plan in the trend's direction with one take-profit. A signal needs the
+          take-profit at least 3% away and at least 2R. Signals come first, from the largest profit down. Click a card to see it on the chart.
         </p>
       </Card>
-      {!data ? <Empty>Loading…</Empty> : !ideas.length ? <Empty>No coin has a plan right now. Switch to “all coins” to see their levels.</Empty> : (
+      {!data ? <Empty>Loading…</Empty> : !ideas.length ? <Empty>{show === 'signals' ? 'No coin has a signal right now (3% and 2R minimum). Switch to “with a plan” to see the rest.' : 'No coin has a plan right now. Switch to “all coins” to see their levels.'}</Empty> : (
         <div className="grid gap-4 md:grid-cols-2 2xl:grid-cols-3">
           {ideas.map((i) => (
             <button key={i.symbol} onClick={() => go('chart', i.symbol)} className="text-left transition hover:-translate-y-0.5">

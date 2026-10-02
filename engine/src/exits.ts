@@ -2,7 +2,7 @@
 // ladder, the time stop and the early exits. Stops, targets and session ends
 // are handled on 1m candles by the engine. The stop only ever moves in the
 // trade's favour, and never closer than min_gap_atr_15m x 15m ATR to price.
-import { TREND_SETUPS, type Position, type CloseReason } from './portfolio';
+import type { Position, CloseReason } from './portfolio';
 import { lastOf, sign, type Context } from './strategy/context';
 
 export type ManageAction =
@@ -28,12 +28,11 @@ export function manage(i: ManageInput): ManageAction[] {
   const price = ctx.price;
   const atr15 = lastOf(ctx.atr15m);
   const state = ctx.analysis[pos.side].state;
+  if (cfg.management === 'v3') return manageV3(i);
 
   // Closes, most fundamental first.
-  // Trend-state exits only for trend setups: a range or reversion trade is not wrong because there is no trend.
-  const trendTrade = TREND_SETUPS.includes(pos.setup ?? 'pullback');
-  if (trendTrade && (state === 'transition' || state === 'reversed' || state === 'none') && early.on_4h_state_change === 'close') return [{ type: 'close', reason: 'early_exit_4h' }];
-  if (trendTrade && state === 'weakening' && early.on_1h_protected_level_break === 'close') return [{ type: 'close', reason: 'early_exit_1h' }];
+  if ((state === 'transition' || state === 'reversed' || state === 'none') && early.on_4h_state_change === 'close') return [{ type: 'close', reason: 'early_exit_4h' }];
+  if (state === 'weakening' && early.on_1h_protected_level_break === 'close') return [{ type: 'close', reason: 'early_exit_1h' }];
   if (ctx.config.filters.fakeout.enabled && pos.chochLevel !== null && i.candlesSinceEntry <= ctx.config.filters.fakeout.failed_breakout_candles
     && s * (price - pos.chochLevel) < 0) return [{ type: 'close', reason: 'failed_breakout' }];
   const st = early.stagnation;
@@ -80,6 +79,26 @@ export function manage(i: ManageInput): ManageAction[] {
   }
   if (best) actions.push({ type: 'stop', ...best });
   return actions;
+}
+
+/**
+ * Strategy v3 (Section 18.6): only the max hold and break-even after a new
+ * 15m BOS in the trade's direction. The stop and take-profit run on 1m.
+ */
+function manageV3({ ctx, pos }: ManageInput): ManageAction[] {
+  const cfg = ctx.config;
+  const s = sign(pos.side);
+  const maxHold = cfg.speed.groups[pos.speed ?? 'normal'].max_hold_hours * 3_600_000;
+  if (ctx.t - pos.openedAt >= maxHold) return [{ type: 'close', reason: 'max_hold' }];
+  // A swing formed after the entry, closed through: structure broke in our favour.
+  const m = ctx.m15;
+  const n = m.close.length - 1;
+  const swing = [...ctx.pivots15m].reverse()
+    .find((p) => p.type === (pos.side === 'long' ? 'high' : 'low') && p.index < n && m.candles[p.index].openTime >= pos.openedAt);
+  if (!swing || s * (m.close[n] - swing.price) <= 0) return [];
+  const breakeven = pos.entryPrice * (1 + (s * cfg.exits.breakeven_fee_buffer_pct) / 100);
+  if (s * (breakeven - pos.stop) <= 1e-12) return [];       // already there or better
+  return [{ type: 'stop', stop: breakeven, reason: 'break-even after a new 15m BOS' }];
 }
 
 /** Against a long: the 15m had made a higher low, and this candle is the first to close below it. Mirrored for a short. */

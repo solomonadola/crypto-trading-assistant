@@ -87,7 +87,7 @@ export function TradePlanCard({ idea, compact = false }: { idea: TradeIdea; comp
               {plan.targets.map((t) => (
                 <div key={t.label} className="flex items-center justify-between gap-2 rounded-lg bg-card-2 px-3 py-1.5" title={t.sources.join(', ')}>
                   <span className="font-semibold text-good">{t.label}</span>
-                  <span className="tabular">{fmt(t.price)}</span>
+                  <span className="tabular">{fmt(t.price)} {plan.targetPct !== null && <span className={`text-xs ${plan.targetPct >= 3 ? 'text-good' : 'text-warning'}`}>+{plan.targetPct.toFixed(2)}%</span>}</span>
                   <span className="truncate text-xs text-ink-3">{t.sources.slice(0, 2).join(' · ')}</span>
                   <span className={`tabular font-semibold ${t.r >= 2 ? 'text-good' : t.r >= 1 ? 'text-ink' : 'text-warning'}`}>{t.r.toFixed(2)}R</span>
                 </div>

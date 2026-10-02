@@ -9,6 +9,10 @@ import { Engine } from '../src/core/engine';
 import type { Candle, TradeEvent } from '../../shared/types';
 
 const cfg = loadConfig('engine/config/config.yaml');
+// These tests cover flat sizing, the classic exits and the half-at-first-target mode, whatever the live config uses.
+cfg.exits.mode = 'partial_ladder';
+cfg.exits.management = 'classic';
+cfg.allocation.sizing = 'flat';
 const costs = cfg.sim;   // taker 0.05%, slippage 0.05%
 const u = (iso: string) => Date.parse(iso);
 const iso = (t: number) => new Date(t).toISOString().slice(0, 16) + 'Z';
@@ -136,7 +140,7 @@ describe('account bookkeeping', () => {
 describe('trade management', () => {
   const pos = (over = {}) => ({
     id: 'p', symbol: 'SOLUSDT', side: 'long' as const, qty: 1, initialQty: 1, entryPrice: 100, stop: 98, initialStop: 98, target: 105,
-    openedAt: u('2026-07-15T10:00Z'), session: null, leverage: 3, liqPrice: 70, chochLevel: null, signalId: null, setup: 'pullback' as const,
+    openedAt: u('2026-07-15T10:00Z'), session: null, leverage: 3, liqPrice: 70, chochLevel: null, signalId: null, speed: 'normal' as const,
     ladderStep: -1, partialDone: false, fees: 0, funding: 0, realized: 0, pendingClose: null, ...over,
   });
   const ctx = (price: number, over: Partial<Context> = {}): Context => ({
@@ -262,5 +266,32 @@ describe('simulated trading, end to end', () => {
     expect(e.onCommand({ type: 'resume' }).map((x) => x.type)).toEqual(['engine_resumed']);
     expect(e.onCommand({ type: 'reset_balance', balance: 500 })[0].payload).toEqual({ balance: 500 });
     expect(e.account().balance).toBe(500);
+  });
+
+  it('a confirmed signal is followed: "working" at 1R in favour, then its outcome, with times', () => {
+    const e = engine();
+    // A confirmed long at 100, stop 98 (1R = 2), take-profit 104, as check() records it.
+    (e as unknown as { shadows: unknown[] }).shadows.push({
+      armedId: 'a1', working: false, signalTime: T, symbol: 'SOLUSDT', direction: 'long', signalStatus: 'taken', signalReason: null,
+      plan: { entry: 100, stop: 98, stopDistancePct: 2, target: 104, targetSource: 't', rewardRisk: 2 }, sessionClose: T + 86_400_000,
+    });
+    e.onCandles([minute(0, 100, 101, 99.5, 100.8)]);            // +0.5R: nothing yet
+    e.onCandles([minute(1, 100.8, 102.1, 100.5, 102)]);         // reaches +1R
+    e.onCandles([minute(2, 102, 103, 101.5, 102.5)]);           // still going: no second "working"
+    e.onCandles([minute(3, 102.5, 104.2, 102.4, 104)]);         // take-profit
+    const sigs = e.takeSignals().filter((s) => s.status === 'working' || s.status === 'outcome');
+    expect(sigs.map((s) => [s.status, s.time])).toEqual([['working', T + 2 * 60_000], ['outcome', T + 4 * 60_000]]);
+    expect(sigs[0].payload).toMatchObject({ armedId: 'a1', r: 1, price: 102 });
+    expect(sigs[1]).toMatchObject({ reason: 'target', payload: { armedId: 'a1', outcome: 'target', exit: 104 } });
+  });
+
+  it('a candle that reaches 1R and the stop counts as stopped, not working', () => {
+    const e = engine();
+    (e as unknown as { shadows: unknown[] }).shadows.push({
+      armedId: 'a2', working: false, signalTime: T, symbol: 'SOLUSDT', direction: 'long', signalStatus: 'filtered', signalReason: 'profit_too_small',
+      plan: { entry: 100, stop: 98, stopDistancePct: 2, target: 104, targetSource: 't', rewardRisk: 2 }, sessionClose: T + 86_400_000,
+    });
+    e.onCandles([minute(0, 100, 102.5, 97.5, 99)]);
+    expect(e.takeSignals().map((s) => [s.status, s.reason])).toEqual([['outcome', 'stop']]);
   });
 });

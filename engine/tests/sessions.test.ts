@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { SessionCalendar, localToUtc } from '../src/sessions';
 import { loadConfig, type EngineConfig } from '../src/config';
 
-const base = loadConfig('engine/config/config.yaml').sessions;
+// The calendar tests use whole sessions, no weekend rule and no killzones; each case switches on what it tests.
+const base = { ...loadConfig('engine/config/config.yaml').sessions, weekdays_only: false, exit_at_session_end: true, killzones: [] };
 const cal = (over: Partial<EngineConfig['sessions']> = {}) => new SessionCalendar({ ...base, ...over });
 const u = (iso: string) => Date.parse(iso);
 const iso = (t: number | undefined) => (t === undefined ? undefined : new Date(t).toISOString().slice(0, 16) + 'Z');
@@ -113,6 +114,22 @@ describe('entry window', () => {
   it('entry delay after a session opens, when configured', () => {
     expect(block('2026-07-15T07:10Z', { entry_delay_min: 15 })).toBe('session_opening');
     expect(block('2026-07-15T07:15Z', { entry_delay_min: 15 })).toBeNull();
+  });
+
+  it('killzones: entries only in London 07:00-10:00 and New York 07:30-11:00 local time, DST included', () => {
+    const kz = { killzones: loadConfig('engine/config/config.yaml').sessions.killzones };
+    // Summer: London 07:00-10:00 BST = 06:00-09:00 UTC; New York 07:30-11:00 EDT = 11:30-15:00 UTC.
+    expect(block('2026-07-15T05:50Z', kz)).toBe('outside_killzone');
+    expect(block('2026-07-15T06:10Z', kz)).toBeNull();                 // before London opens, in the Asian session
+    expect(block('2026-07-15T09:00Z', kz)).toBe('outside_killzone');   // the end is not included
+    expect(block('2026-07-15T11:45Z', kz)).toBeNull();
+    expect(block('2026-07-15T15:30Z', kz)).toBe('outside_killzone');
+    // Winter: London 07:00-10:00 GMT = UTC; New York 07:30-11:00 EST = 12:30-16:00 UTC.
+    expect(block('2026-01-15T06:30Z', kz)).toBe('outside_killzone');
+    expect(block('2026-01-15T07:30Z', kz)).toBeNull();
+    expect(block('2026-01-15T12:15Z', kz)).toBe('outside_killzone');
+    expect(block('2026-01-15T15:30Z', kz)).toBeNull();
+    expect(cal(kz).killzoneAt(u('2026-01-15T15:30Z'))).toBe('newyork');
   });
 
   it('weekdays only, when configured, uses the session\'s own local day', () => {

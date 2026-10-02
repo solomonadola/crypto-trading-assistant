@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { CandlestickChart, CheckCircle2, CircleDashed, Crosshair, Layers, SlidersHorizontal, XCircle } from 'lucide-react';
-import { usePoll, type AccountSummary, type Analysis, type Candle, type ClosedTradeView, type MarketRow, type SessionInstance } from '../lib/api';
+import { usePoll, usePrices, type AccountSummary, type Analysis, type Candle, type ClosedTradeView, type MarketRow, type SessionInstance } from '../lib/api';
 import { coin, pct, price } from '../lib/format';
 import { Badge, Card, StateBadge, TrendChip } from '../components/ui';
 import { CandleChart, DEFAULT_INDICATORS, INDICATORS, type IndicatorId } from '../components/charts';
@@ -87,9 +87,14 @@ export function IfBroken({ w }: { w: TradeIdea['watch'][number] }) {
   );
 }
 
+function LivePrice({ symbol, fallback }: { symbol: string; fallback: number }) {
+  const live = usePrices();
+  return <span className="text-xs text-ink-3 tabular">now {price(live?.prices[symbol] ?? fallback)}</span>;
+}
+
 function WatchCard({ idea }: { idea: TradeIdea }) {
   return (
-    <Card title="Levels to wait for" icon={<Crosshair size={16} />} right={<span className="text-xs text-ink-3 tabular">now {price(idea.price)}</span>} className="h-full">
+    <Card title="Levels to wait for" icon={<Crosshair size={16} />} right={<LivePrice symbol={idea.symbol} fallback={idea.price} />} className="h-full">
       {!idea.watch.length ? <p className="text-sm text-ink-3">No level within reach yet.</p> : (
         <ul className="space-y-2">
           {idea.watch.map((w) => (

@@ -13,6 +13,9 @@ import type { Candle } from '../../shared/types';
 
 const T = Date.UTC(2026, 8, 28, 10, 0);
 const cfg = loadConfig('engine/config/config.yaml');
+// The filters are tested switched on, whatever the live config does with them.
+for (const f of Object.values(cfg.filters)) f.enabled = true;
+cfg.filters.fakeout.block_entry = true;
 
 const flat = (n: number, v: number) => new Array<number>(n).fill(v);
 const pivot = (type: 'high' | 'low', index: number, price: number): Pivot => ({ type, index, price, confirmedAt: index + 3 });
@@ -182,18 +185,26 @@ const lowH1 = () => series(Array.from({ length: 60 }, (_, i) => candle(i, 99, 99
 describe('trade plan', () => {
   const setupAnchor = { ...cfg, exits: { ...cfg.exits, stop_anchor: 'setup' as const } };
 
-  it('stop_anchor setup: below the zone plus a 1h-ATR buffer; target at the first objective or nearer resistance', () => {
-    const c = ctx({ h1: lowH1() }, setupAnchor);
+  it('stop_anchor setup: below the zone plus a 1h-ATR buffer; one take-profit at the first level, uncapped', () => {
+    const c = ctx({ h1: lowH1() }, { ...setupAnchor, exits: { ...setupAnchor.exits, mode: 'fixed', fixed_target_pct: 10 } });
     const a = armedAt(c, { zone: zone() });
     const plan = planTrade(c, a);
     expect(plan.stop).toBeCloseTo(98 - cfg.exits.stop_buffer_atr * 2, 9);
-    expect(plan.target).toBeCloseTo(105, 9);                      // +5% (partial_at_pct)
-    expect(plan.rewardRisk).toBeCloseTo(5 / (100 - plan.stop), 9);
+    expect(plan.target).toBeCloseTo(110, 9);                      // no level ahead: the fixed +10%
+    expect(plan.rewardRisk).toBeCloseTo(10 / (100 - plan.stop), 9);
 
+    c.analysis.zones = [zone({ id: 'far', type: 'supply', low: 130, high: 131 }), zone({ id: 'sup', type: 'supply', low: 123, high: 124 })];
+    const far = planTrade(c, a);
+    expect(far.target).toBe(123);                                 // the first level ahead, even past +10%
+    expect(far.targetSource).toBe('supply zone');
+  });
+
+  it('partial_ladder: the first target is the fixed objective or a nearer level', () => {
+    const c = ctx({ h1: lowH1() }, { ...setupAnchor, exits: { ...setupAnchor.exits, mode: 'partial_ladder', partial_at_pct: 5 } });
+    const a = armedAt(c, { zone: zone() });
+    expect(planTrade(c, a).target).toBeCloseTo(105, 9);
     c.analysis.zones = [zone({ id: 'sup', type: 'supply', low: 103, high: 104 })];
-    const capped = planTrade(c, a);
-    expect(capped.target).toBe(103);
-    expect(capped.targetSource).toBe('supply zone');
+    expect(planTrade(c, a)).toMatchObject({ target: 103, targetSource: 'supply zone' });
   });
 
   it('with stop_anchor swing_15m: beyond the last 15m swing low, with a 15m-ATR buffer', () => {

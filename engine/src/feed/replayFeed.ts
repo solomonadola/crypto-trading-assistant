@@ -1,6 +1,6 @@
 // Stored candles, handed out in the same order the live feed uses
-// (compareCandles). Used by tests, by restart recovery and, later, by the
-// backtest: the engine cannot tell replayed candles from live ones.
+// (compareCandles). Used by tests and by restart recovery: the engine cannot
+// tell replayed candles from live ones.
 import { TIMEFRAME_MS, compareCandles, type Candle, type Timeframe } from '../../../shared/types';
 import type { CandleStore } from './candleStore';
 

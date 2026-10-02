@@ -9,6 +9,9 @@ const iso = (t: number) => new Date(t).toISOString().slice(0, 16) + 'Z';
 
 function engine(over: (c: EngineConfig) => void = () => {}) {
   const config = loadConfig('engine/config/config.yaml');
+  // These tests cover the session-end exit and whole-session entries.
+  config.sessions = { ...config.sessions, exit_at_session_end: true, weekdays_only: false, killzones: [] };
+  config.exits.management = 'classic';
   over(config);
   return new Engine({ config, configHash: 'test', engineVersion: 'test' });
 }

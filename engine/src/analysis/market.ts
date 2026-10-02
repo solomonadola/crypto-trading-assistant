@@ -42,7 +42,7 @@ export class MarketBook {
   private readonly candles = new Map<string, Map<Timeframe, Candle[]>>();
   private readonly analysis = new Map<string, SymbolAnalysis>();
 
-  /** `extras`: the chart-reading analysis (FVGs, volume profiles, trend meter). Trading does not use it; the backtest skips it for speed. */
+  /** `extras`: the chart-reading analysis (FVGs, volume profiles, trend meter). Trading does not use it. */
   constructor(private readonly config: EngineConfig, private readonly extras = true) {}
 
   /** Adds candles; returns the symbols whose analysis changed. Older or duplicate candles are ignored or replaced. */

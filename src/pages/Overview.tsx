@@ -1,12 +1,12 @@
 import { Activity, Briefcase, LineChart, Radio, X } from 'lucide-react';
-import { post, usePoll, type AccountSummary, type ClosedTradeView, type EquityPoint, type SignalRecord } from '../lib/api';
+import { post, usePoll, usePrices, type AccountSummary, type ClosedTradeView, type EquityPoint, type SignalRecord } from '../lib/api';
 import { coin, dateTime, duration, hhmm, pct, price, signedUsd, usd, words } from '../lib/format';
 import { Badge, Card, Empty, Kpi, Pnl, SessionBadge, SideBadge, Table, td } from '../components/ui';
 import { SessionTimeline } from '../components/SessionTimeline';
 import { EquityChart } from '../components/charts';
 
 export function StatusBadge({ status }: { status: string }) {
-  const tone = status === 'taken' ? 'good' : status === 'filtered' ? 'warning' : status === 'armed' ? 'london' : 'muted';
+  const tone = status === 'taken' || status === 'working' ? 'good' : status === 'filtered' ? 'warning' : status === 'armed' ? 'london' : 'muted';
   return <Badge tone={tone}>{status}</Badge>;
 }
 
@@ -19,7 +19,11 @@ export function Overview({ go }: { go: (page: string, symbol?: string) => void }
   const wins = trades?.filter((t) => t.pnl > 0).length ?? 0;
   const total = trades?.length ?? 0;
   const net = trades?.reduce((s, t) => s + t.pnl, 0) ?? 0;
-  const ret = acct ? ((acct.equity / acct.startingBalance) - 1) * 100 : 0;
+  // Open positions at the live price (every few seconds) rather than the last closed minute.
+  const live = usePrices();
+  const at = (p: AccountSummary['positions'][number]) => live?.positions[p.id] ?? { price: p.price, unrealized: p.unrealized, pnlPct: p.pnlPct };
+  const equityNow = acct ? acct.equity + acct.positions.reduce((s, p) => s + at(p).unrealized - p.unrealized, 0) : null;
+  const ret = acct && equityNow !== null ? ((equityNow / acct.startingBalance) - 1) * 100 : 0;
 
   const close = async (id: string) => {
     if (!confirm('Close this position at market?')) return;
@@ -30,7 +34,7 @@ export function Overview({ go }: { go: (page: string, symbol?: string) => void }
     <div className="space-y-5">
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-6">
         <div className="col-span-2">
-          <Kpi label="Equity" value={usd(acct?.equity)} sub={acct ? <>{pct(ret, 2, true)} since start · balance {usd(acct.balance)}</> : null}
+          <Kpi label="Equity" value={usd(equityNow)} sub={acct ? <>{pct(ret, 2, true)} since start · balance {usd(acct.balance)}</> : null}
             accent="linear-gradient(90deg, var(--color-accent), var(--color-london))" tone={ret > 0.005 ? 'good' : ret < -0.005 ? 'critical' : null} />
         </div>
         <Kpi label="Today" value={acct ? signedUsd(acct.dayPnl) : '–'} tone={acct && acct.dayPnl > 0.004 ? 'good' : acct && acct.dayPnl < -0.004 ? 'critical' : null} accent="var(--color-newyork)" sub="realized + open, since 00:00 UTC" />
@@ -74,10 +78,10 @@ export function Overview({ go }: { go: (page: string, symbol?: string) => void }
                 <td className={td}><button className="font-semibold hover:text-accent" onClick={() => go('chart', p.symbol)}>{coin(p.symbol)}</button></td>
                 <td className={td}><SideBadge side={p.side} /></td>
                 <td className={`${td} tabular`}>{price(p.entryPrice)}</td>
-                <td className={`${td} tabular`}>{price(p.price)}</td>
+                <td className={`${td} tabular`}>{price(at(p).price)}</td>
                 <td className={`${td} tabular text-critical/90`} title={p.ladderStep >= 0 ? `ladder step ${p.ladderStep + 1}` : 'initial stop'}>{price(p.stop)}{p.ladderStep >= 0 && <span className="ml-1 text-[10px] text-accent">L{p.ladderStep + 1}</span>}</td>
                 <td className={`${td} tabular text-good/90`}>{p.target !== null && !p.partialDone ? price(p.target) : p.partialDone ? 'half taken' : 'ladder'}</td>
-                <td className={td}><Pnl value={p.unrealized + p.realized - p.fees + p.funding} percent={p.pnlPct} /></td>
+                <td className={td}><Pnl value={at(p).unrealized + p.realized - p.fees + p.funding} percent={at(p).pnlPct} /></td>
                 <td className={td}><SessionBadge name={p.sessionName} /> <span className="text-xs text-ink-3">ends {hhmm(p.sessionClose)}</span></td>
                 <td className={`${td} text-ink-2 tabular`} title={dateTime(p.openedAt)}>{duration((acct.time || Date.now()) - p.openedAt)}</td>
                 <td className={td}>

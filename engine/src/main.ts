@@ -3,7 +3,7 @@
 // (behind sign-in when ALLOWED_EMAILS is set) and the web page.
 import dotenv from 'dotenv';
 import express from 'express';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
 import path from 'node:path';
@@ -20,6 +20,7 @@ import { SignalLog } from './storage/signals';
 import { FirestoreBackup, type BackupState } from './storage/firestoreBackup';
 import { backupToFile } from './storage/fileBackup';
 import { authSettings, requireSignIn } from './api/auth';
+import { unrealized } from './risk';
 import { scan, type ScanResult } from './scanner';
 import type { SymbolInfo } from './feed/binancePublic';
 import type { Candle, Timeframe } from '../../shared/types';
@@ -139,17 +140,65 @@ const persist = db.transaction((batch: Candle[]) => {
 });
 
 /** Runs a control command; its events are saved before the answer. */
-const command = db.transaction((cmd: EngineCommand) => {
+const commandTx = db.transaction((cmd: EngineCommand) => {
   const produced = engine.onCommand(cmd);
   events.append(produced);
   return produced;
 });
+function command(cmd: EngineCommand): ReturnType<typeof commandTx> {
+  const produced = commandTx(cmd);
+  ideaCache.clear();
+  broadcast('engine', { clock: engine.now() });
+  return produced;
+}
 
 function process_(batch: Candle[]): void {
   if (!started || backup.standby) return;
   const { produced, sigs } = persist(batch);
   for (const e of produced) console.log(`[engine] ${iso(e.time)} ${e.type} ${e.symbol ?? ''} ${JSON.stringify(e.payload)}`);
   for (const s of sigs) console.log(`[signal] ${iso(s.time)} ${s.symbol} ${s.direction} ${s.status}${s.reason ? ` (${s.reason})` : ''}`);
+  ideaCache.clear();
+  broadcast('engine', { clock: engine.now() });
+}
+
+// ---------------------------------------------------------------- live updates
+// The dashboard keeps one stream open: "engine" when the engine has processed
+// new candles (pages refetch at once), "prices" every few seconds with the
+// latest trade prices and open positions' P&L at those prices. Display only:
+// the engine still acts on closed candles.
+
+const streams = new Set<express.Response>();
+function broadcast(event: string, data: unknown): void {
+  const msg = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  for (const res of streams) res.write(msg);
+}
+
+let livePrices: Record<string, number> = {};
+function pricesMessage() {
+  const positions = Object.fromEntries(engine.positions().map((p) => {
+    const price = livePrices[p.symbol] ?? null;
+    return [p.id, { price, unrealized: unrealized(p, price), pnlPct: price === null ? 0 : (p.side === 'long' ? 1 : -1) * (price / p.entryPrice - 1) * 100 }];
+  }));
+  return { time: Date.now(), prices: livePrices, positions };
+}
+async function pollPrices(): Promise<void> {
+  if (streams.size) {
+    try {
+      const all = await client.tickerPrices();
+      livePrices = Object.fromEntries(symbols().filter((s) => all.has(s)).map((s) => [s, all.get(s)!]));
+      broadcast('prices', pricesMessage());
+    } catch (err) {
+      console.log(`[prices] ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  setTimeout(() => void pollPrices(), config.feed.price_poll_ms);
+}
+
+/** Trade ideas only change when candles close: cached until the engine next processes some. */
+const ideaCache = new Map<string, ReturnType<typeof engine.tradeIdea>>();
+function ideaFor(symbol: string) {
+  if (!ideaCache.has(symbol)) ideaCache.set(symbol, engine.tradeIdea(symbol));
+  return ideaCache.get(symbol)!;
 }
 
 // Restart (ENGINE_PLAN.md Section 4A.3): state from the event log, then any
@@ -239,6 +288,8 @@ async function rescan(): Promise<void> {
     engine.setUniverse(universe);
     signals.append(engine.takeSignals());
     setKv(db, UNIVERSE_KEY, JSON.stringify(universe));
+    ideaCache.clear();
+    broadcast('engine', { clock: engine.now() });
     console.log(`[scanner] ${universe.length} coins: ${universe.join(' ')}`);
   } catch (err) {
     console.log(`[scanner] failed, keeping ${universe.length} coins: ${message(err)}`);
@@ -263,6 +314,15 @@ app.get('/api/auth/config', (_req, res) => {
   res.json({ required: auth.allowed.length > 0 });
 });
 app.use('/api', requireSignIn(auth));
+
+app.get('/api/stream', (req, res) => {
+  res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
+  res.flushHeaders();
+  streams.add(res);
+  res.write(`event: prices\ndata: ${JSON.stringify(pricesMessage())}\n\n`);
+  const ping = setInterval(() => res.write(': ping\n\n'), 20_000);
+  req.on('close', () => { clearInterval(ping); streams.delete(res); });
+});
 
 app.get('/api/status', (_req, res) => {
   const status = feed.status();
@@ -331,21 +391,6 @@ app.post('/api/control/pause', control(() => ({ type: 'pause', reason: 'paused f
 app.post('/api/control/resume', control(() => ({ type: 'resume' })));
 app.post('/api/control/reset', control((req) => ({ type: 'reset_balance', balance: Number(req.body?.balance) || undefined })));
 
-// Backtest results written by `npm run backtest` (data/backtest/results).
-const RESULTS_DIR = path.resolve('data/backtest/results');
-app.get('/api/backtests', (_req, res) => {
-  const files = existsSync(RESULTS_DIR) ? readdirSync(RESULTS_DIR).filter((f) => f.endsWith('.json')).sort().reverse() : [];
-  res.json(files);
-});
-app.get('/api/backtests/:file', (req, res) => {
-  const file = path.basename(req.params.file);
-  const full = path.join(RESULTS_DIR, file);
-  if (!file.endsWith('.json') || !existsSync(full)) {
-    res.status(404).json({ error: 'No such backtest' });
-    return;
-  }
-  res.type('json').send(readFileSync(full, 'utf8'));
-});
 app.get('/api/sessions', (req, res) => {
   const to = Number(req.query.to) || engine.now() || Date.now();
   const from = Math.max(Number(req.query.from) || to - 86_400_000, to - 60 * 86_400_000);
@@ -373,12 +418,12 @@ app.get('/api/market', (_req, res) => {
       zones: a?.zones.length ?? 0,
       armed: engine.armedSetups().filter((x) => x.symbol === symbol).map((x) => x.direction),
       setup: (() => {
-        const idea = engine.tradeIdea(symbol);
+        const idea = ideaFor(symbol);
         if (!idea) return null;
         const decided = idea.checklist.filter((c) => c.ok !== null);
         return {
           bias: idea.bias, stage: idea.plan?.status ?? null, skipped: !!idea.plan?.confirmation && !idea.plan.confirmation.taken,
-          rr: idea.plan?.targets[0]?.r ?? null, meetsRules: idea.plan?.meetsRules ?? false,
+          rr: idea.plan?.targets[0]?.r ?? null, meetsRules: idea.plan?.meetsRules ?? false, targetPct: idea.plan?.targetPct ?? null,
           checksMet: decided.filter((c) => c.ok).length, checksDecided: decided.length, quality: idea.quality,
         };
       })(),
@@ -386,7 +431,7 @@ app.get('/api/market', (_req, res) => {
   }));
 });
 app.get('/api/ideas/:symbol', (req, res) => {
-  const idea = engine.tradeIdea(req.params.symbol.toUpperCase());
+  const idea = ideaFor(req.params.symbol.toUpperCase());
   if (!idea) {
     res.status(404).json({ error: `Not enough history for ${req.params.symbol} yet` });
     return;
@@ -394,9 +439,9 @@ app.get('/api/ideas/:symbol', (req, res) => {
   res.json(idea);
 });
 app.get('/api/ideas', (_req, res) => {
-  const ideas = universe.map((s) => engine.tradeIdea(s)).filter((x): x is NonNullable<typeof x> => x !== null);
-  const rank = { in_trade: 0, confirmed: 1, armed: 2, in_zone: 3, wait: 4, no_level: 5 } as const;
-  ideas.sort((a, b) => (a.plan ? rank[a.plan.status] : 6) - (b.plan ? rank[b.plan.status] : 6));
+  const ideas = universe.map((s) => ideaFor(s)).filter((x): x is NonNullable<typeof x> => x !== null);
+  // Signals (plans that fit the rules) first, then the rest; each from the largest profit to the take-profit down.
+  ideas.sort((a, b) => Number(!!b.plan?.meetsRules) - Number(!!a.plan?.meetsRules) || (b.plan?.targetPct ?? -1) - (a.plan?.targetPct ?? -1));
   res.json(ideas);
 });
 app.get('/api/scanner', (_req, res) => {
@@ -447,6 +492,7 @@ const port = Number(process.env.PORT || 3009);
 const server = app.listen(port, '0.0.0.0', () => {
   console.log(`[engine] v${ENGINE_VERSION} config ${hash}, database ${dbPath}, backup ${cloud ? `firestore (${namespace})` : 'file only'}, sign-in ${auth.allowed.length ? 'on' : 'off'}; open http://localhost:${port}`);
   void rescan().then(() => feed.start());
+  void pollPrices();
 });
 
 // Cloud Run allows 10 seconds after SIGTERM: save to Firestore and free the lock first.

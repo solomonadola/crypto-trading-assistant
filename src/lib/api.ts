@@ -40,7 +40,7 @@ export interface MarketRow {
   armed: string[];
   setup: null | {
     bias: 'long' | 'short' | 'none'; stage: string | null; skipped: boolean;
-    rr: number | null; meetsRules: boolean; checksMet: number; checksDecided: number; quality: number;
+    rr: number | null; meetsRules: boolean; targetPct: number | null; checksMet: number; checksDecided: number; quality: number;
   };
 }
 
@@ -104,18 +104,97 @@ export async function post<T = unknown>(url: string, body?: unknown): Promise<T>
   return data;
 }
 
-/** Fetches `url` now and every `ms`; `reload` refetches immediately. Keeps the last good value on errors. */
+// ---------------------------------------------------------------- live stream
+// One connection to /api/stream for the whole page: "engine" when the engine
+// has processed new candles, "prices" every few seconds. Reconnects on its own.
+
+export interface LivePrices {
+  time: number;
+  prices: Record<string, number>;
+  positions: Record<string, { price: number | null; unrealized: number; pnlPct: number }>;
+}
+type StreamListener = (data: unknown) => void;
+const listeners = new Map<string, Set<StreamListener>>();
+let lastPrices: LivePrices | null = null;
+let connected = false;
+let everOpened = false;
+
+function emit(event: string, data: unknown): void {
+  if (event === 'prices') lastPrices = data as LivePrices;
+  for (const l of listeners.get(event) ?? []) l(data);
+}
+
+async function connect(): Promise<void> {
+  if (connected) return;
+  connected = true;
+  for (;;) {
+    try {
+      const res = await fetch('/api/stream', { headers: await authHeaders() });
+      if (!res.ok || !res.body) throw new Error(`stream ${res.status}`);
+      if (everOpened) emit('open', null);   // a reconnect: pages catch up on anything missed
+      everOpened = true;
+      const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+      let buf = '';
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += value;
+        let end: number;
+        while ((end = buf.indexOf('\n\n')) >= 0) {
+          const block = buf.slice(0, end);
+          buf = buf.slice(end + 2);
+          const event = /^event: (.*)$/m.exec(block)?.[1];
+          const data = /^data: (.*)$/m.exec(block)?.[1];
+          if (event && data) emit(event, JSON.parse(data));
+        }
+      }
+    } catch {
+      // dropped or refused: try again shortly
+    }
+    await new Promise((r) => setTimeout(r, 3000));
+  }
+}
+
+/** Calls `cb` on every stream event of this type (and opens the stream if needed). */
+export function useStream(event: string, cb: StreamListener): void {
+  const ref = useRef(cb);
+  ref.current = cb;
+  useEffect(() => {
+    void connect();
+    const l: StreamListener = (d) => ref.current(d);
+    if (!listeners.has(event)) listeners.set(event, new Set());
+    listeners.get(event)!.add(l);
+    return () => { listeners.get(event)!.delete(l); };
+  }, [event]);
+}
+
+/** Live trade prices and open positions' P&L, updated every few seconds. */
+export function usePrices(): LivePrices | null {
+  const [p, setP] = useState<LivePrices | null>(lastPrices);
+  useStream('prices', (d) => setP(d as LivePrices));
+  return p;
+}
+
+/**
+ * Fetches `url` now, again as soon as the engine processes new candles (pushed
+ * over the stream), and every `ms` as a fallback. `reload` refetches at once.
+ * Keeps the last good value on errors.
+ */
 export function usePoll<T>(url: string | null, ms: number): { data: T | null; error: string | null; reload: () => void } {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<string | null>(null);
   const alive = useRef(true);
+  const busy = useRef(false);
   const load = useCallback(async () => {
-    if (!url) return;
+    if (!url || busy.current) return;
+    busy.current = true;
     try {
       const d = await get<T>(url);
       if (alive.current) { setData(d); setError(null); }
     } catch (e) {
       if (alive.current) setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      busy.current = false;
     }
   }, [url]);
   useEffect(() => {
@@ -125,5 +204,7 @@ export function usePoll<T>(url: string | null, ms: number): { data: T | null; er
     const timer = setInterval(load, ms);
     return () => { alive.current = false; clearInterval(timer); };
   }, [load, ms]);
+  useStream('engine', () => void load());
+  useStream('open', () => void load());
   return { data, error, reload: load };
 }

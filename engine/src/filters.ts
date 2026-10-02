@@ -135,7 +135,7 @@ function room(ctx: Context, dir: Direction): FilterResult {
 }
 
 /** Longs pay positive funding, shorts negative. */
-function funding(ctx: Context, dir: Direction): FilterResult {
+export function funding(ctx: Context, dir: Direction): FilterResult {
   const max = ctx.config.filters.funding.max_against_pct_8h;
   if (ctx.funding === null) return { name: 'funding', pass: true, detail: { note: 'funding rate unknown' } };
   const against = sign(dir) * ctx.funding * 100;
