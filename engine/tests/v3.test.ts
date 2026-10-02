@@ -6,6 +6,7 @@ import { decideEntry, type RiskInput } from '../src/risk';
 import { Portfolio, type EntryFill } from '../src/portfolio';
 import { manage } from '../src/exits';
 import { speedOf } from '../src/speed';
+import { summarize } from '../src/stats';
 import { series, type Context } from '../src/strategy/context';
 import type { Pivot } from '../src/analysis/indicators';
 import type { Candle, TradeEvent } from '../../shared/types';
@@ -58,7 +59,7 @@ describe('v3 trade management', () => {
   const T0 = u('2026-07-15T10:00Z');
   const pos = (over = {}) => ({
     id: 'p', symbol: 'SOLUSDT', side: 'long' as const, qty: 1, initialQty: 1, entryPrice: 100, stop: 96, initialStop: 96, target: 110,
-    openedAt: T0, session: null, leverage: 3, liqPrice: 70, chochLevel: null, signalId: null, speed: 'normal' as const,
+    openedAt: T0, session: null, leverage: 3, liqPrice: 70, chochLevel: null, signalId: null, speed: 'normal' as const, setup: null,
     ladderStep: -1, partialDone: false, fees: 0, funding: 0, realized: 0, pendingClose: null, ...over,
   });
   /** 15m candles: 30 before the entry, then `after` since; the last closes at `price`. */
@@ -99,5 +100,20 @@ describe('v3 trade management', () => {
     expect(manage({ ctx: ctx(101.5, at, [swingHigh(25, 101)]), pos: pos(), peakPct: 1.5, candlesSinceEntry: 12 })).toEqual([]);
     // Already at break-even: no second move.
     expect(manage({ ctx: ctx(101.5, at, [swingHigh(34, 101)]), pos: pos({ stop: 100.2 }), peakPct: 1.5, candlesSinceEntry: 12 })).toEqual([]);
+  });
+});
+
+describe('results per model and speed group', () => {
+  it('counts trades, wins, win rate and average R, overall and per group', () => {
+    const r = summarize([
+      { setup: 'zone_sweep', speed: 'normal', r: 2 },
+      { setup: 'zone_sweep', speed: 'wild', r: -1 },
+      { setup: 'session_sweep', speed: 'normal', r: 3 },
+      { setup: 'session_sweep', speed: 'normal', r: -1 },
+    ]);
+    expect(r.all).toEqual({ key: 'all', trades: 4, wins: 2, winRate: 0.5, avgR: 0.75, totalR: 3 });
+    expect(r.byModel.map((x) => [x.key, x.trades, x.avgR])).toEqual([['session_sweep', 2, 1], ['zone_sweep', 2, 0.5]]);
+    expect(r.bySpeed.map((x) => [x.key, x.trades, x.wins])).toEqual([['normal', 3, 2], ['wild', 1, 0]]);
+    expect(summarize([]).all).toEqual({ key: 'all', trades: 0, wins: 0, winRate: 0, avgR: 0, totalR: 0 });
   });
 });

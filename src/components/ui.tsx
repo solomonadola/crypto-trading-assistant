@@ -1,7 +1,7 @@
 // Small building blocks shared by every page.
 import type { ReactNode } from 'react';
 import { ArrowDownRight, ArrowUpRight, Minus } from 'lucide-react';
-import { SESSION_LABEL, signedUsd, pct } from '../lib/format';
+import { MODEL_LABEL, SESSION_LABEL, signedUsd, pct } from '../lib/format';
 
 export function Card({ title, icon, right, children, className = '' }: { title?: ReactNode; icon?: ReactNode; right?: ReactNode; children: ReactNode; className?: string }) {
   return (
@@ -113,3 +113,27 @@ export function Table({ head, children }: { head: ReactNode[]; children: ReactNo
 }
 
 export const td = 'whitespace-nowrap px-3 py-2.5';
+
+export function ModelBadge({ setup }: { setup: string | null | undefined }) {
+  if (!setup) return null;
+  return <Badge tone="accent">{MODEL_LABEL[setup] ?? setup}</Badge>;
+}
+
+/** The coin's speed group; wild coins stand out (half risk, 24 h max hold). */
+export function SpeedBadge({ speed }: { speed: string | null | undefined }) {
+  if (!speed) return null;
+  return <Badge tone={speed === 'wild' ? 'warning' : 'muted'} title={`speed group: ${speed} (1h ATR as % of price)`}>{speed}</Badge>;
+}
+
+/** Where price sits in the 4h dealing range: discount (longs), premium (shorts), or equilibrium (neither). */
+export function PdBadge({ position }: { position: number | null | undefined }) {
+  if (position === null || position === undefined) return null;
+  const pctText = `${Math.round(position * 100)}%`;
+  if (position <= 0.48) return <Badge tone="london" title="lower half of the 4h range: longs allowed">discount {pctText}</Badge>;
+  if (position >= 0.52) return <Badge tone="asian" title="upper half of the 4h range: shorts allowed">premium {pctText}</Badge>;
+  return <Badge title="middle of the 4h range: no trades">equilibrium</Badge>;
+}
+
+export function MovingFastBadge({ on }: { on: boolean | undefined }) {
+  return on ? <Badge tone="critical" title="last 15m candle at least 3x its usual size: don't chase">moving fast</Badge> : null;
+}

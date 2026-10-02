@@ -87,6 +87,7 @@ interface Shadow {
   /** Followed until this time: the session's end, or the speed group's max hold (Section 18.6). */
   sessionClose: number;
   speed: SpeedGroup;
+  setup: SignalRecord['setup'];
 }
 
 export class Engine {
@@ -427,7 +428,7 @@ export class Engine {
     const fill: EntryFill = {
       role: 'entry', side: e.side, qty, price, stop: e.stop, target: e.target,
       fee: fee(qty * price, cfg.sim), session: this.sessions.ownerAt(e.placedAt),
-      leverage: cfg.leverage, liqPrice, chochLevel: e.chochLevel, signalId: e.signalId, speed: e.speed ?? 'normal',
+      leverage: cfg.leverage, liqPrice, chochLevel: e.chochLevel, signalId: e.signalId, speed: e.speed ?? 'normal', setup: e.setup,
     };
     // Recorded at the candle's open: the moment the fill happened.
     return [this.emit('order_filled', e.positionId, e.symbol, { ...fill, notional: qty * price, margin: (qty * price) / cfg.leverage }, c.openTime)];
@@ -649,7 +650,7 @@ export class Engine {
         armedId: id, working: false,
         signalTime: ctx.t, symbol, direction, signalStatus: status, signalReason: failures[0] ?? null, plan,
         sessionClose: cfg.sessions.exit_at_session_end ? owner?.closeTime ?? ctx.t + DAY : ctx.t + speedSettings(cfg, ctx.speed).max_hold_hours * 3_600_000,
-        speed: ctx.speed ?? 'normal',
+        speed: ctx.speed ?? 'normal', setup,
       });
     }
     if (status !== 'taken') return [];
@@ -657,7 +658,7 @@ export class Engine {
     const target = cfg.exits.mode === 'ladder' ? null : plan.target;
     const order: OpenOrder = {
       action: 'open', orderType: 'market', side: direction, notional: risk!.notional, stop: plan.stop, target,
-      chochLevel: level, signalId: id, refPrice: plan.entry, speed: ctx.speed ?? 'normal',
+      chochLevel: level, signalId: id, refPrice: plan.entry, speed: ctx.speed ?? 'normal', setup,
     };
     return [this.emit('order_placed', `${id}-pos`, symbol, { ...order, plan, score })];
   }
@@ -718,14 +719,14 @@ export class Engine {
       // Going our way: the first candle that reaches 1R in favour (not one that also hits the stop: order unknown, stop first).
       if (!sh.working && !stopHit && s * (best - entry) >= risk) {
         sh.working = true;
-        this.signal(sh.symbol, sh.direction, 'working', null, { armedId: sh.armedId, price: entry + s * risk, r: 1, signalStatus: sh.signalStatus });
+        this.signal(sh.symbol, sh.direction, 'working', null, { armedId: sh.armedId, price: entry + s * risk, r: 1, signalStatus: sh.signalStatus, speed: sh.speed }, sh.setup);
       }
       if (stopHit) { outcome = 'stop'; exit = stop; }
       else if (sh.direction === 'long' ? c.high >= target : c.low <= target) { outcome = 'target'; exit = target; }
       else if (c.closeTime >= sh.sessionClose) { outcome = this.cfg.sessions.exit_at_session_end ? 'session_end' : 'max_hold'; exit = c.close; }
       if (!outcome) return true;
       const r = (s * (exit - entry) - (costPct / 100) * entry) / risk;
-      this.signal(sh.symbol, sh.direction, 'outcome', outcome, { armedId: sh.armedId, outcome, exit, r, signalStatus: sh.signalStatus });
+      this.signal(sh.symbol, sh.direction, 'outcome', outcome, { armedId: sh.armedId, outcome, exit, r, signalStatus: sh.signalStatus, speed: sh.speed }, sh.setup);
       this.shadowResults.push({
         time: c.closeTime, signalTime: sh.signalTime, symbol: sh.symbol, direction: sh.direction,
         signalStatus: sh.signalStatus, signalReason: sh.signalReason, entry, stop, target, exit, outcome,

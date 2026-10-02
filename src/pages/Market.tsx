@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import { Crosshair, Search, Target } from 'lucide-react';
 import { usePoll, usePrices, type Armed, type MarketRow, type Scanner } from '../lib/api';
 import { coin, compact, dateTime, duration, hhmm, pct, price, words } from '../lib/format';
-import { Badge, Card, Empty, SideBadge, StateBadge, Table, TrendChip, td } from '../components/ui';
+import { Badge, Card, Empty, MovingFastBadge, PdBadge, SideBadge, SpeedBadge, StateBadge, Table, TrendChip, td } from '../components/ui';
 
 type SortKey = 'profit' | 'quality' | 'rr' | 'checks' | 'rank' | 'change' | 'atr' | 'volume';
 
@@ -90,7 +90,13 @@ export function Market({ go }: { go: (page: string, symbol?: string) => void }) 
           <Table head={['Coin', 'Profit to TP', 'R:R', 'Setup', 'Quality', 'Checks', 'Price', '24h', '1h ATR', 'Volume', 'Trend 4h / 1h / 15m', 'Long', 'Short', 'Zones']}>
             {shown.map((r) => (
               <tr key={r.symbol} className="cursor-pointer hover:bg-card-2/60" onClick={() => go('chart', r.symbol)}>
-                <td className={`${td} font-semibold`}>{coin(r.symbol)}</td>
+                <td className={td}>
+                  <span className="flex items-center gap-1.5">
+                    <span className="font-semibold">{coin(r.symbol)}</span>
+                    <SpeedBadge speed={r.setup?.speed} />
+                    <MovingFastBadge on={r.setup?.movingFast} />
+                  </span>
+                </td>
                 <td className={`${td} tabular font-semibold ${r.setup?.meetsRules ? 'text-good' : 'text-ink-3'}`}>
                   {r.setup?.targetPct != null ? `+${r.setup.targetPct.toFixed(2)}%` : '–'}
                   {r.setup?.meetsRules && <Badge tone="good">signal</Badge>}
@@ -102,6 +108,7 @@ export function Market({ go }: { go: (page: string, symbol?: string) => void }) 
                   {r.setup && r.setup.bias !== 'none' ? (
                     <span className="flex items-center gap-1">
                       <SideBadge side={r.setup.bias} />
+                      <PdBadge position={r.setup.pdPosition} />
                       {r.setup.stage && (r.setup.skipped ? <Badge tone="warning">skipped</Badge> : <Badge tone={STAGE[r.setup.stage]?.tone ?? 'muted'}>{STAGE[r.setup.stage]?.label ?? r.setup.stage}</Badge>)}
                     </span>
                   ) : <span className="text-xs text-ink-3">no trend</span>}

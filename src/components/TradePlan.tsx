@@ -2,8 +2,8 @@
 // engine trades on (that needs the full pullback setup, filters and risk rules).
 import { AlertTriangle, CheckCircle2, Compass } from 'lucide-react';
 import type { TradeIdea } from '../../shared/types';
-import { price as fmt, pct } from '../lib/format';
-import { Badge, Card, SideBadge, TrendChip } from './ui';
+import { liquidityName, price as fmt, pct } from '../lib/format';
+import { Badge, Card, MovingFastBadge, PdBadge, SideBadge, SpeedBadge, TrendChip } from './ui';
 
 const STATUS: Record<string, { tone: string; label: string }> = {
   in_trade: { tone: 'good', label: 'confirmed · in trade' },
@@ -66,6 +66,9 @@ export function TradePlanCard({ idea, compact = false }: { idea: TradeIdea; comp
         <div className="flex flex-wrap items-center gap-2">
           {idea.bias === 'none' ? <Badge>no bias</Badge> : <SideBadge side={idea.bias} />}
           {(['4h', '1h', '15m'] as const).map((tf) => <TrendChip key={tf} tf={tf} trend={idea.trend[tf]} />)}
+          <PdBadge position={idea.dealingRange?.position} />
+          <SpeedBadge speed={idea.speed} />
+          <MovingFastBadge on={idea.movingFast} />
           {compact && <PlanStatus idea={idea} />}
           {compact && idea.checklist && (() => {
             const met = idea.checklist.filter((c) => c.ok === true).length;
@@ -102,6 +105,25 @@ export function TradePlanCard({ idea, compact = false }: { idea: TradeIdea; comp
           <p className="text-xs text-warning">{plan.note}</p>
         ) : (
           <p className="text-xs text-ink-3">No plan while neither side has a trend. Key levels below still show where price may react.</p>
+        )}
+
+        {!compact && idea.liquidity.length > 0 && (
+          <div>
+            <h3 className="mb-1 text-xs uppercase tracking-wider text-ink-3">Liquidity: where stops sit, nearest first</h3>
+            <ul className="space-y-1">
+              {idea.liquidity.slice(0, 8).map((l) => (
+                <li key={`${l.name}${l.price}`} className="flex items-center gap-2 text-xs">
+                  <span className={`w-32 font-medium ${l.side === 'sell' ? 'text-demand' : 'text-supply'}`}>{liquidityName(l.name)}</span>
+                  <span className="w-24 tabular">{fmt(l.price)}</span>
+                  <span className="w-14 tabular text-ink-3">{pct(l.distancePct, 1, true)}</span>
+                  {l.intact
+                    ? <Badge tone="muted" title="no 15m candle has traded through it yet: a sweep target">intact</Badge>
+                    : <Badge tone="warning" title="already traded through today">swept</Badge>}
+                </li>
+              ))}
+            </ul>
+            <p className="mt-1 text-[11px] text-ink-3">Models trade a sweep of an intact level that closes back inside; the take-profit is the nearest intact level on the other side.</p>
+          </div>
         )}
 
         {!compact && (

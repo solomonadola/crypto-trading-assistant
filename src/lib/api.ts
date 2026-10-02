@@ -40,7 +40,8 @@ export interface MarketRow {
   armed: string[];
   setup: null | {
     bias: 'long' | 'short' | 'none'; stage: string | null; skipped: boolean;
-    rr: number | null; meetsRules: boolean; targetPct: number | null; checksMet: number; checksDecided: number; quality: number;
+    rr: number | null; meetsRules: boolean; targetPct: number | null;
+    speed: 'calm' | 'normal' | 'wild'; movingFast: boolean; pdPosition: number | null; checksMet: number; checksDecided: number; quality: number;
   };
 }
 

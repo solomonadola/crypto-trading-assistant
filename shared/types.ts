@@ -171,6 +171,9 @@ export interface ClosedTradeView {
   session: string | null;
   signalId?: string | null;
   riskUsd?: number;
+  /** The model that opened it and the coin's speed group then (absent on trades from before v3). */
+  setup?: SignalRecord['setup'];
+  speed?: 'calm' | 'normal' | 'wild';
 }
 
 /** A price level where several sources agree. */
@@ -228,6 +231,14 @@ export interface TradeIdea {
   checklist: ChecklistItem[];
   /** The prices to wait for, nearest first. */
   watch: WatchLevel[];
+  /** The coin's speed group (Section 18.2). */
+  speed: 'calm' | 'normal' | 'wild';
+  /** The last 15m candle was at least 3 x ATR(15m) long. Display only. */
+  movingFast: boolean;
+  /** The 4h dealing range and where price sits in it: under 0.5 discount, over 0.5 premium. */
+  dealingRange: { high: number; low: number; position: number } | null;
+  /** Where stops sit (Section 18.3), nearest first; `intact` while no 15m candle has traded through. */
+  liquidity: { name: string; side: 'buy' | 'sell'; price: number; distancePct: number; intact: boolean }[];
   /**
    * Setup quality, 0 to 100: share of the checklist met (50), reward:risk to
    * the first target up to 3R (25), stage (15), fits the stop and R rules (10).

@@ -1,10 +1,10 @@
-import { Fragment, useState } from 'react';
+import { Fragment, useState, type ReactNode } from 'react';
 import { CheckCircle2, ChevronDown, ChevronRight, Radio, XCircle } from 'lucide-react';
 import { usePoll, type SignalRecord } from '../lib/api';
-import { coin, dateTime, pct, price, words } from '../lib/format';
+import { coin, dateTime, liquidityName, pct, price, words } from '../lib/format';
 import type { TradeIdea } from '../../shared/types';
 import { IfBroken } from './ChartPage';
-import { Badge, Card, Empty, SessionBadge, SideBadge, Table, td } from '../components/ui';
+import { Badge, Card, Empty, ModelBadge, SessionBadge, SideBadge, SpeedBadge, Table, td } from '../components/ui';
 import { StatusBadge } from './Overview';
 
 const FILTERS = ['all', 'taken', 'filtered', 'armed', 'expired'] as const;
@@ -26,6 +26,8 @@ interface Setup {
   plan: Plan | null;
   estimate: boolean;            // the plan is the estimate made when it armed
   score: number | null;
+  model: string;                // zone_sweep, session_sweep, pullback
+  speed: string | null;
 }
 
 function toSetups(signals: SignalRecord[]): Setup[] {
@@ -48,6 +50,8 @@ function toSetups(signals: SignalRecord[]): Setup[] {
       working: records.find((r) => r.status === 'working') ?? null,
       outcome: records.find((r) => r.status === 'outcome') ?? null,
       latest: records[records.length - 1].time,
+      model: String(p.model ?? last.setup),
+      speed: (p.speed ?? null) as string | null,
     };
   }).sort((a, b) => b.latest - a.latest);
 }
@@ -60,8 +64,14 @@ const STAGE: Record<string, { tone: string; label: string }> = {
 };
 
 /** Why it is at this stage: the failed rule or expiry reason, else the factors that armed it. */
+const SWEEP_WORDS: Record<string, string> = { inducement: 'the inducement', zone_wick: 'a wick through the zone' };
+
 function reasonOf(s: Setup): string {
   if (s.last.reason) return words(s.last.reason);
+  // v3 models: what was swept, and where the take-profit is.
+  const p = (s.records.find((r) => r.status === 'taken' || r.status === 'filtered')?.payload ?? {}) as Record<string, any>;
+  const swept = p.swept?.name ?? p.sweep;
+  if (swept) return `swept ${SWEEP_WORDS[swept] ?? liquidityName(swept)}${p.target ? ` · take-profit at the ${liquidityName(p.target.name).toLowerCase()}` : ''}`;
   const armed = s.records.find((r) => r.status === 'armed')?.payload as Record<string, any> | undefined;
   const factors = ((armed?.factors ?? (s.last.payload as Record<string, any>).factors ?? []) as { name: string }[]).map((f) => words(f.name)).join(' + ');
   return s.last.status === 'taken' ? `passed all checks${factors ? ` · ${factors}` : ''}` : factors;
@@ -76,6 +86,7 @@ const OUTCOME: Record<string, { tone: string; label: string }> = {
   target: { tone: 'text-good', label: 'take-profit hit' },
   stop: { tone: 'text-critical', label: 'stopped out' },
   session_end: { tone: 'text-ink-2', label: 'closed at session end' },
+  max_hold: { tone: 'text-ink-2', label: 'closed at the max hold' },
 };
 
 /** When it confirmed. */
@@ -143,6 +154,8 @@ export function Signals({ go }: { go: (page: string, symbol?: string) => void })
         ))}
       </div>
 
+      <ResultsCard />
+
       {reasons.length > 0 && (
         <Card title="Why setups did not become trades (24h)">
           <div className="space-y-2">
@@ -175,7 +188,7 @@ export function Signals({ go }: { go: (page: string, symbol?: string) => void })
         }
       >
         {!coins.size ? <Empty>No signals{status === 'all' ? '' : ` with status ${status}`} yet.</Empty> : (
-          <Table head={['', 'Coin', 'Side', 'Stage', 'Reason', 'Confirmed (UTC)', 'Since then', 'Score', 'Entry', 'Stop', 'Target', 'R', '']}>
+          <Table head={['', 'Coin', 'Side', 'Model', 'Stage', 'Reason', 'Confirmed (UTC)', 'Since then', 'Score', 'Entry', 'Stop', 'Target', 'R', '']}>
             {[...coins.entries()].map(([symbol, list]) => {
               const s = list[0];
               const isOpen = open === symbol;
@@ -185,6 +198,8 @@ export function Signals({ go }: { go: (page: string, symbol?: string) => void })
                     <td className={`${td} text-ink-3`}>{isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</td>
                     <td className={td}><button className="font-semibold hover:text-accent" onClick={(e) => { e.stopPropagation(); go('chart', symbol); }}>{coin(symbol)}</button></td>
                     <td className={td}><SideBadge side={s.direction} /></td>
+                <td className={td}><span className="flex flex-wrap gap-1"><ModelBadge setup={s.model} /><SpeedBadge speed={s.speed} /></span></td>
+                    <td className={td}><span className="flex flex-wrap gap-1"><ModelBadge setup={s.model} /><SpeedBadge speed={s.speed} /></span></td>
                     <td className={td}><Stage s={s} /></td>
                     <Reason s={s} />
                     <ConfirmedCell s={s} />
@@ -193,7 +208,7 @@ export function Signals({ go }: { go: (page: string, symbol?: string) => void })
                     <td className={`${td} text-xs text-ink-3`}>{list.length > 1 ? `+${list.length - 1} earlier` : ''}</td>
                   </tr>
                   {isOpen && (
-                    <tr><td colSpan={13} className="bg-card-2/40 px-4 py-4"><CoinDetail symbol={symbol} setups={list} /></td></tr>
+                    <tr><td colSpan={14} className="bg-card-2/40 px-4 py-4"><CoinDetail symbol={symbol} setups={list} /></td></tr>
                   )}
                 </Fragment>
               );
@@ -245,7 +260,7 @@ function CoinDetail({ symbol, setups }: { symbol: string; setups: Setup[] }) {
       {setups.length > 1 && (
         <div>
           <h3 className="mb-1 text-xs uppercase tracking-wider text-ink-3">All setups on {coin(symbol)}</h3>
-          <Table head={['Side', 'Stage', 'Reason', 'Confirmed (UTC)', 'Since then', 'Score', 'Entry', 'Stop', 'Target', 'R']}>
+          <Table head={['Side', 'Model', 'Stage', 'Reason', 'Confirmed (UTC)', 'Since then', 'Score', 'Entry', 'Stop', 'Target', 'R']}>
             {setups.map((s) => (
               <tr key={s.key} onClick={() => setShown(s.key)} className={`cursor-pointer ${s.key === current.key ? 'bg-card-2' : 'hover:bg-card-2/60'}`}>
                 <td className={td}><SideBadge side={s.direction} /></td>
@@ -298,5 +313,62 @@ function SignalDetail({ s }: { s: SignalRecord }) {
         ))}
       </div>
     </div>
+  );
+}
+
+interface ResultLine { key: string; trades: number; wins: number; winRate: number; avgR: number; totalR: number }
+interface Results { since: number; trades: Summary3; followed: Summary3; skipped: Summary3 }
+interface Summary3 { all: ResultLine; byModel: ResultLine[]; bySpeed: ResultLine[] }
+
+function ResultCell({ l }: { l: ResultLine | undefined }) {
+  if (!l || !l.trades) return <span className="text-ink-3">–</span>;
+  return (
+    <span className="tabular">
+      <span className="text-ink">{l.trades}</span> <span className="text-ink-3">·</span> {(l.winRate * 100).toFixed(0)}% <span className="text-ink-3">won ·</span>{' '}
+      <span className={l.avgR > 0 ? 'text-good' : l.avgR < 0 ? 'text-critical' : 'text-ink-2'}>{l.avgR >= 0 ? '+' : ''}{l.avgR.toFixed(2)}R</span> <span className="text-ink-3">avg ·</span>{' '}
+      <span className={l.totalR > 0 ? 'text-good' : l.totalR < 0 ? 'text-critical' : 'text-ink-2'}>{l.totalR >= 0 ? '+' : ''}{l.totalR.toFixed(1)}R</span>
+    </span>
+  );
+}
+
+/** The scorecard (ENGINE_PLAN.md Section 18.7): the engine's closed trades, and every confirmed signal followed to its end. */
+function ResultsCard() {
+  const [days, setDays] = useState(30);
+  const { data } = usePoll<Results>(`/api/results?days=${days}`, 60_000);
+  const keys = (pick: (x: Summary3) => ResultLine[]) => data ? [...new Set([...pick(data.trades), ...pick(data.followed)].map((l) => l.key))] : [];
+  const row = (label: ReactNode, key: string, pick: (x: Summary3) => ResultLine[]) => (
+    <tr key={key} className="hover:bg-card-2/60">
+      <td className={td}>{label}</td>
+      <td className={td}><ResultCell l={data ? pick(data.trades).find((l) => l.key === key) : undefined} /></td>
+      <td className={td}><ResultCell l={data ? pick(data.followed).find((l) => l.key === key) : undefined} /></td>
+      <td className={td}><ResultCell l={data ? pick(data.skipped).find((l) => l.key === key) : undefined} /></td>
+    </tr>
+  );
+  return (
+    <Card
+      title="Results by model and speed"
+      right={
+        <div className="flex overflow-hidden rounded-lg border border-line">
+          {[7, 30, 90].map((d) => (
+            <button key={d} onClick={() => setDays(d)} className={`px-2.5 py-1 text-xs ${days === d ? 'bg-accent text-white' : 'bg-card-2 text-ink-2 hover:text-ink'}`}>{d} days</button>
+          ))}
+        </div>
+      }
+    >
+      {!data ? <Empty>Loading…</Empty> : !data.followed.all.trades && !data.trades.all.trades ? (
+        <Empty>No results yet. Each confirmed signal is followed to its stop, take-profit or max hold; results appear here as they finish.</Empty>
+      ) : (
+        <Table head={['', 'Engine trades', 'All confirmed signals, followed', 'Skipped ones, followed']}>
+          {row(<b>All</b>, 'all', (x) => [x.all])}
+          {keys((x) => x.byModel).map((k) => row(<ModelBadge setup={k} />, k, (x) => x.byModel))}
+          {keys((x) => x.bySpeed).map((k) => row(<span className="text-xs text-ink-2">speed: <SpeedBadge speed={k} /></span>, `speed-${k}`, (x) => x.bySpeed.map((l) => ({ ...l, key: `speed-${l.key}` }))))}
+        </Table>
+      )}
+      <p className="mt-2 text-xs text-ink-3">
+        Count · win rate · average R · total R. "Engine trades" are the virtual trades it actually took. "Followed" tracks every confirmed
+        signal's plan to its stop, take-profit or max hold, including those a rule skipped, so you can see whether the rules help.
+        Results need a few weeks before they mean much.
+      </p>
+    </Card>
   );
 }

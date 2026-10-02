@@ -49,6 +49,11 @@ export class SignalLog {
     return (this.db.prepare(sql).all(...args, Math.min(opts.limit ?? 100, 1000)) as Row[]).map(fromRow);
   }
 
+  /** Followed signals' outcomes (status `outcome`) since `since`, oldest first. */
+  outcomes(since: number): SignalRecord[] {
+    return (this.db.prepare("SELECT * FROM signals WHERE status = 'outcome' AND time >= ? ORDER BY id").all(since) as Row[]).map(fromRow);
+  }
+
   /** Counts by status and reason since `since`. */
   summary(since: number): { status: string; reason: string | null; count: number }[] {
     return this.db.prepare('SELECT status, reason, COUNT(*) AS count FROM signals WHERE time >= ? GROUP BY status, reason ORDER BY count DESC')

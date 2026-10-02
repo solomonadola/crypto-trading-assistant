@@ -2,7 +2,7 @@ import { useMemo } from 'react';
 import { History, PieChart } from 'lucide-react';
 import { usePoll, type ClosedTradeView } from '../lib/api';
 import { SESSION_LABEL, coin, dateTime, duration, price, signedUsd, words } from '../lib/format';
-import { Card, Empty, Kpi, Pnl, SessionBadge, SideBadge, Table, td } from '../components/ui';
+import { Card, Empty, Kpi, ModelBadge, Pnl, SessionBadge, SideBadge, SpeedBadge, Table, td } from '../components/ui';
 
 interface Group { key: string; count: number; net: number; wins: number }
 
@@ -79,12 +79,13 @@ export function Trades({ go }: { go: (page: string, symbol?: string) => void }) 
         <Card title="By side"><NetBars groups={groupBy(t, (x) => x.side)} label={(k) => k} /></Card>
       </div>
       <Card title="Trade history" icon={<History size={16} />}>
-        <Table head={['Opened (UTC)', 'Coin', 'Side', 'Entry', 'Exit', 'Held', 'Exit reason', 'Session', 'Net P&L']}>
+        <Table head={['Opened (UTC)', 'Coin', 'Side', 'Model', 'Entry', 'Exit', 'Held', 'Exit reason', 'Session', 'Net P&L']}>
           {t.map((x) => (
             <tr key={x.id} className="hover:bg-card-2/60">
               <td className={`${td} tabular text-ink-2`}>{dateTime(x.openedAt)}</td>
               <td className={td}><button className="font-semibold hover:text-accent" onClick={() => go('chart', x.symbol)}>{coin(x.symbol)}</button></td>
               <td className={td}><SideBadge side={x.side} /></td>
+              <td className={td}><span className="flex flex-wrap gap-1"><ModelBadge setup={x.setup} /><SpeedBadge speed={x.speed} /></span></td>
               <td className={`${td} tabular`}>{price(x.entryPrice)}</td>
               <td className={`${td} tabular`}>{price(x.exitPrice)}</td>
               <td className={`${td} tabular text-ink-2`}>{duration(x.closedAt - x.openedAt)}</td>

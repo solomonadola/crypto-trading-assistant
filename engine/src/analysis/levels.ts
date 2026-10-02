@@ -11,6 +11,7 @@
 // pullback, short likewise, otherwise no plan. Entry is the strongest support
 // cluster (long) within reach below the price, the stop beyond it, and the
 // targets the next resistance clusters above.
+import { dealingRange, liquidityLevels } from './liquidity';
 import type { ChecklistItem, Direction, KeyLevel, TradeIdea, TradeIdeaTarget, WatchLevel } from '../../../shared/types';
 import { fibLevel } from './indicators';
 import { impulseLeg, flippedLevels } from '../strategy/pullback';
@@ -125,10 +126,25 @@ export interface IdeaInputs {
 export function tradeIdea(ctx: Context, inputs: IdeaInputs): TradeIdea {
   const idea = planIdea(ctx, inputs);
   const list = checklist(ctx, idea, inputs.entryBlock);
-  return { ...idea, checklist: list, watch: watchLevels(idea), quality: quality(idea, list) };
+  const m = ctx.m15;
+  const n = m.close.length - 1;
+  const atr15 = lastOf(ctx.atr15m);
+  // Each level once (the same price can be, say, the PDL and the Asian low), nearest first.
+  const seen = new Set<string>();
+  const liquidity = liquidityLevels(ctx)
+    .map((l) => ({ name: l.name, side: l.side, price: l.price, distancePct: ((l.price - ctx.price) / ctx.price) * 100, intact: l.brokenAt === null }))
+    .filter((l) => { const k = `${l.name}|${l.price}`; if (seen.has(k)) return false; seen.add(k); return true; })
+    .sort((a, b) => Math.abs(a.distancePct) - Math.abs(b.distancePct));
+  return {
+    ...idea, checklist: list, watch: watchLevels(idea), quality: quality(idea, list),
+    speed: ctx.speed ?? 'normal',
+    movingFast: Number.isFinite(atr15) && m.high[n] - m.low[n] >= 3 * atr15,
+    dealingRange: dealingRange(ctx),
+    liquidity,
+  };
 }
 
-type Planned = Omit<TradeIdea, 'checklist' | 'watch' | 'quality'>;
+type Planned = Omit<TradeIdea, 'checklist' | 'watch' | 'quality' | 'speed' | 'movingFast' | 'dealingRange' | 'liquidity'>;
 
 const STAGE_POINTS: Record<NonNullable<TradeIdea['plan']>['status'], number> = { in_trade: 15, confirmed: 15, armed: 15, in_zone: 12, wait: 5, no_level: 0 };
 

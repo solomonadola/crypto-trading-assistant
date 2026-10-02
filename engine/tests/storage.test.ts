@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { getKv, openDb, setKv } from '../src/storage/db';
 import { EventLog } from '../src/storage/eventLog';
-import type { TradeEvent } from '../../shared/types';
+import { SignalLog } from '../src/storage/signals';
+import type { SignalRecord, TradeEvent } from '../../shared/types';
 
 const event = (over: Partial<TradeEvent> = {}): TradeEvent => ({
   time: 1_000, positionId: 'p1', symbol: 'BTCUSDT', type: 'order_filled',
@@ -55,5 +56,16 @@ describe('event log', () => {
     // JSON.stringify(undefined) is undefined, which the NOT NULL column refuses.
     expect(() => log.append([event(), bad])).toThrow();
     expect(log.lastId()).toBe(0);
+  });
+});
+
+describe('signal outcomes', () => {
+  it('returns only finished signals ("outcome") since a time, oldest first', () => {
+    const log = new SignalLog(openDb(':memory:'));
+    const rec = (time: number, status: SignalRecord['status'], r?: number): SignalRecord =>
+      ({ time, symbol: 'SOLUSDT', setup: 'session_sweep', direction: 'long', status, reason: status === 'outcome' ? 'target' : null, payload: { armedId: `a${time}`, r } });
+    log.append([rec(1, 'taken'), rec(2, 'outcome', -1), rec(3, 'working'), rec(5, 'outcome', 2.5), rec(6, 'outcome', 1)]);
+    expect(log.outcomes(4).map((s) => [s.time, s.payload.r])).toEqual([[5, 2.5], [6, 1]]);
+    expect(log.outcomes(0)).toHaveLength(3);
   });
 });

@@ -41,3 +41,14 @@ export const words = (s: string | null | undefined) =>
   (s ?? '').replace(/^filter_/, '').replace(/^risk_/, 'risk: ').replace(/^session_/, 'session: ').replace(/[._]/g, ' ');
 
 export const SESSION_LABEL: Record<string, string> = { asian: 'Asian', london: 'London', newyork: 'New York' };
+
+/** The engine's setups (ENGINE_PLAN.md Section 18). */
+export const MODEL_LABEL: Record<string, string> = { zone_sweep: 'Zone sweep (M1)', session_sweep: 'Session sweep (M3)', pullback: 'Pullback (classic)' };
+
+/** Liquidity levels where stops sit (Section 18.3). */
+export const LIQUIDITY_LABEL: Record<string, string> = {
+  PDH: 'Previous day high', PDL: 'Previous day low', asian_high: 'Asian high', asian_low: 'Asian low',
+  london_high: 'London high', london_low: 'London low', EQH: 'Equal highs', EQL: 'Equal lows',
+  '4h_swing_high': '4h swing high', '4h_swing_low': '4h swing low',
+};
+export const liquidityName = (name: string | null | undefined) => (name ? LIQUIDITY_LABEL[name] ?? words(name) : '');

@@ -21,6 +21,7 @@ import { FirestoreBackup, type BackupState } from './storage/firestoreBackup';
 import { backupToFile } from './storage/fileBackup';
 import { authSettings, requireSignIn } from './api/auth';
 import { unrealized } from './risk';
+import { summarize } from './stats';
 import { scan, type ScanResult } from './scanner';
 import type { SymbolInfo } from './feed/binancePublic';
 import type { Candle, Timeframe } from '../../shared/types';
@@ -425,6 +426,7 @@ app.get('/api/market', (_req, res) => {
           bias: idea.bias, stage: idea.plan?.status ?? null, skipped: !!idea.plan?.confirmation && !idea.plan.confirmation.taken,
           rr: idea.plan?.targets[0]?.r ?? null, meetsRules: idea.plan?.meetsRules ?? false, targetPct: idea.plan?.targetPct ?? null,
           checksMet: decided.filter((c) => c.ok).length, checksDecided: decided.length, quality: idea.quality,
+          speed: idea.speed, movingFast: idea.movingFast, pdPosition: idea.dealingRange?.position ?? null,
         };
       })(),
     };
@@ -453,6 +455,22 @@ app.get('/api/armed', (_req, res) => {
 app.get('/api/signals', (req, res) => {
   const status = req.query.status ? String(req.query.status) as 'armed' | 'expired' | 'taken' | 'filtered' : undefined;
   res.json(signals.recent({ limit: Number(req.query.limit) || 100, symbol: req.query.symbol ? String(req.query.symbol).toUpperCase() : undefined, status }));
+});
+// Results per model and speed group: closed trades, and every confirmed signal followed to its end.
+app.get('/api/results', (req, res) => {
+  const since = engine.now() - (Number(req.query.days) || 30) * 86_400_000;
+  const trades = engine.closedTrades().filter((t) => t.closedAt >= since && t.riskUsd)
+    .map((t) => ({ setup: t.setup ?? 'pullback', speed: t.speed ?? 'normal', r: t.pnl / t.riskUsd! }));
+  const followed = signals.outcomes(since).map((s) => {
+    const p = s.payload as { r: number; speed?: string; signalStatus?: string };
+    return { setup: s.setup, speed: p.speed ?? 'normal', r: Number(p.r), taken: p.signalStatus === 'taken' };
+  });
+  res.json({
+    since,
+    trades: summarize(trades),
+    followed: summarize(followed),
+    skipped: summarize(followed.filter((x) => !x.taken)),
+  });
 });
 app.get('/api/signals/summary', (req, res) => {
   const hours = Number(req.query.hours) || 24;
