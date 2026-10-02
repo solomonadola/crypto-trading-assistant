@@ -7,9 +7,10 @@ import { Portfolio, type EntryFill } from '../src/portfolio';
 import { manage } from '../src/exits';
 import { speedOf } from '../src/speed';
 import { summarize } from '../src/stats';
+import { noticesFor } from '../src/notices';
 import { series, type Context } from '../src/strategy/context';
 import type { Pivot } from '../src/analysis/indicators';
-import type { Candle, TradeEvent } from '../../shared/types';
+import type { Candle, SignalRecord, TradeEvent } from '../../shared/types';
 
 const cfg = loadConfig('engine/config/config.yaml');
 const u = (iso: string) => Date.parse(iso);
@@ -115,5 +116,23 @@ describe('results per model and speed group', () => {
     expect(r.byModel.map((x) => [x.key, x.trades, x.avgR])).toEqual([['session_sweep', 2, 1], ['zone_sweep', 2, 0.5]]);
     expect(r.bySpeed.map((x) => [x.key, x.trades, x.wins])).toEqual([['normal', 3, 2], ['wild', 1, 0]]);
     expect(summarize([]).all).toEqual({ key: 'all', trades: 0, wins: 0, winRate: 0, avgR: 0, totalR: 0 });
+  });
+});
+
+describe('notifications', () => {
+  const sig = (time: number, status: SignalRecord['status']): SignalRecord => ({
+    time, symbol: 'PEPEUSDT', setup: 'session_sweep', direction: 'long', status, reason: status === 'filtered' ? 'rr_too_low' : null,
+    payload: { plan: { entry: 1, stop: 0.97, target: 1.07, rewardRisk: 2.33 }, speed: 'wild', swept: { name: 'asian_low' } },
+  });
+  const now = u('2026-07-15T10:00Z');
+
+  it('fresh confirmations only, taken or skipped, with the plan', () => {
+    const n = noticesFor([sig(now - 60_000, 'taken'), sig(now - 60_000, 'armed'), sig(now - 60_000, 'filtered'), sig(now - 60_000, 'outcome')], now);
+    expect(n.map((x) => x.status)).toEqual(['taken', 'filtered']);
+    expect(n[0]).toMatchObject({ symbol: 'PEPEUSDT', entry: 1, stop: 0.97, target: 1.07, rewardRisk: 2.33, speed: 'wild', swept: 'asian_low' });
+  });
+
+  it('not those replayed after a restart (older than 10 minutes)', () => {
+    expect(noticesFor([sig(now - 11 * 60_000, 'taken')], now)).toEqual([]);
   });
 });

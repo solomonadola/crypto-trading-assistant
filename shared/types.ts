@@ -285,3 +285,20 @@ export interface FeedStatus {
   /** Local clock minus Binance server time, ms. */
   clockOffsetMs: number;
 }
+
+/** A confirmation pushed to the dashboard for its notifications (engine/src/notices.ts). */
+export interface ConfirmationNotice {
+  time: number;
+  symbol: string;
+  direction: SignalRecord['direction'];
+  setup: SignalRecord['setup'];
+  status: 'taken' | 'filtered';
+  reason: string | null;
+  entry: number | null;
+  stop: number | null;
+  target: number | null;
+  rewardRisk: number | null;
+  speed: string | null;
+  /** The liquidity level or what Model 1 swept. */
+  swept: string | null;
+}

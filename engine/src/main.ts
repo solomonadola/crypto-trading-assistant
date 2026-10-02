@@ -22,6 +22,7 @@ import { backupToFile } from './storage/fileBackup';
 import { authSettings, requireSignIn } from './api/auth';
 import { unrealized } from './risk';
 import { summarize } from './stats';
+import { noticesFor } from './notices';
 import { scan, type ScanResult } from './scanner';
 import type { SymbolInfo } from './feed/binancePublic';
 import type { Candle, Timeframe } from '../../shared/types';
@@ -160,6 +161,8 @@ function process_(batch: Candle[]): void {
   for (const s of sigs) console.log(`[signal] ${iso(s.time)} ${s.symbol} ${s.direction} ${s.status}${s.reason ? ` (${s.reason})` : ''}`);
   ideaCache.clear();
   broadcast('engine', { clock: engine.now() });
+  // Confirmations for the dashboard's notifications: only fresh ones, not those replayed after a restart.
+  for (const n of noticesFor(sigs, Date.now())) broadcast('signal', n);
 }
 
 // ---------------------------------------------------------------- live updates

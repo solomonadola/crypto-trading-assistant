@@ -13,6 +13,7 @@ import { Signals } from './pages/Signals';
 import { Trades } from './pages/Trades';
 import { FilterLab } from './pages/FilterLab';
 import { Ideas } from './pages/Ideas';
+import { Notifier } from './components/Notifier';
 
 const PAGES = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
@@ -128,6 +129,7 @@ function Dashboard({ user }: { user: User | null }) {
               </Badge>
             )}
             {status?.engineClock ? <Badge tone="muted">engine {hhmm(status.engineClock)} UTC</Badge> : null}
+            <Notifier go={go} />
             {status?.halted ? (
               <>
                 <Badge tone="critical">stopped: {words(status.halted.reason)}</Badge>
