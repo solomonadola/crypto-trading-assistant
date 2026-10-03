@@ -178,3 +178,60 @@ describe('commands', () => {
     expect(closes(e.onCommand({ type: 'close_all' }))).toEqual(['b kill 2026-07-15T11:00Z']);
   });
 });
+
+describe('manual trades', () => {
+  const at = u('2026-07-15T10:30Z');
+  const open = (e: Engine, over: Partial<Extract<Parameters<Engine['onCommand']>[0], { type: 'open' }>> = {}) =>
+    e.onCommand({ type: 'open', symbol: 'BTCUSDT', side: 'long', price: 100, time: at + 40_000, stop: 98, target: 106, note: 'Scalp: EMA20 pullback', ...over });
+  const minute = (openTime: number, low: number): Candle =>
+    ({ symbol: 'BTCUSDT', tf: '1m', openTime, closeTime: openTime + 59_999, open: 100, high: 100.5, low, close: 100, volume: 1, quoteVolume: 100, trades: 1 });
+
+  it('fills at once at the asked price plus slippage, sized so the loss at the stop is the usual risk', () => {
+    const e = engine();
+    e.restore([], at);
+    const events = open(e);
+    expect(events.map((x) => x.type)).toEqual(['order_placed', 'order_filled']);
+    const fill = events[1].payload as unknown as EntryFill & { notional: number };
+    expect(events[1].time).toBe(at + 40_000);
+    expect(fill.price).toBeGreaterThan(100);   // slippage against a long
+    expect(fill.setup).toBe('manual');
+    expect(fill.note).toBe('Scalp: EMA20 pullback');
+    // 1% of the 1,000 balance lost at the stop, costs included.
+    const lossPct = ((fill.price - 98) / fill.price) * 100 + 0.2;
+    expect((fill.notional * lossPct) / 100).toBeCloseTo(10, 0);
+    expect(e.positions()).toHaveLength(1);
+  });
+
+  it('is managed like any trade: a candle from before the entry does not stop it, a later one does', () => {
+    const e = engine();
+    e.restore([], at);
+    open(e);
+    // The 10:30 minute opened before the 10:30:40 entry: its low under the stop happened before it.
+    expect(e.onCandles([minute(at, 97)]).filter((x) => x.type === 'position_closed')).toEqual([]);
+    const closed = e.onCandles([minute(at + 60_000, 97.5)]).filter((x) => x.type === 'position_closed');
+    expect(closed.map((x) => x.payload.reason)).toEqual(['stop']);
+    const trade = e.closedTrades()[0];
+    expect(trade.setup).toBe('manual');
+    expect(trade.note).toBe('Scalp: EMA20 pullback');
+    expect(trade.pnl).toBeLessThan(0);
+  });
+
+  it('is rebuilt from its events after a restart', () => {
+    const e = engine();
+    e.restore([], at);
+    const events = open(e);
+    const again = engine();
+    again.restore(events, at + 60_000);
+    expect(again.positions().map((p) => [p.symbol, p.setup, p.note])).toEqual([['BTCUSDT', 'manual', 'Scalp: EMA20 pullback']]);
+  });
+
+  it('refuses a stop or target on the wrong side, a coin already held, and an engine not started', () => {
+    const e = engine();
+    e.restore([], at);
+    expect(() => open(e, { stop: 101 })).toThrow(/stop must be below/);
+    expect(() => open(e, { side: 'short', stop: 102, target: 103 })).toThrow(/target must be below/);
+    open(e);
+    expect(() => open(e, { time: at + 50_000 })).toThrow(/already in symbol/);
+    expect(() => open(engine())).toThrow(/not started/);
+  });
+});

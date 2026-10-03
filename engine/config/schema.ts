@@ -67,6 +67,9 @@ export const configSchema = z.object({
 
   scanner: z.object({
     min_quote_volume_24h: z.number().min(0),
+    /** The last `recent_volume_hours` closed hours' USDT volume, scaled to 24h, must reach this. */
+    min_recent_quote_volume_24h: z.number().min(0),
+    recent_volume_hours: z.number().int().min(1).max(24),
     min_atr_pct_1h: pct,
     max_change_24h_pct: z.number().positive(),
     exclude: z.array(z.string()),

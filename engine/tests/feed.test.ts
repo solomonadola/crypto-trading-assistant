@@ -126,7 +126,7 @@ describe('live feed', () => {
     expect(batch.filter((c) => c.tf === '1m')).toHaveLength(2 * 15);
     expect(batch.filter((c) => c.tf === '15m').map((c) => c.symbol)).toEqual(['BTCUSDT', 'ETHUSDT']);
     const at15 = batch.filter((c) => c.closeTime === T0 + 900_000).map((c) => `${c.tf} ${c.symbol}`);
-    expect(at15).toEqual(['15m BTCUSDT', '15m ETHUSDT', '1m BTCUSDT', '1m ETHUSDT']);
+    expect(at15).toEqual(['15m BTCUSDT', '15m ETHUSDT', '5m BTCUSDT', '5m ETHUSDT', '1m BTCUSDT', '1m ETHUSDT']);
   });
 
   it('after downtime, hands on every missed candle so nothing is skipped', async () => {

@@ -9,11 +9,12 @@ quote: USDT
 
 feed:
   rest_base: https://fapi.binance.com
-  timeframes: [1m, 15m, 1h, 4h]
+  timeframes: [1m, 5m, 15m, 1h, 4h]   # 5m: chart reading only (patterns, Wyckoff); the engine trades on 15m and up
   # Candles fetched when a symbol is first seen: enough for EMA200 on 4h and
   # 200-candle zone lookback on 1h to settle.
   history:
     1m: 240
+    5m: 500
     15m: 500
     1h: 500
     4h: 500
@@ -31,6 +32,7 @@ storage:
   path: data/engine/engine.db   # ENGINE_DB_PATH overrides
   candle_retention_days:
     1m: 3
+    5m: 7
     15m: 30
     1h: 120
     4h: 400
@@ -44,6 +46,10 @@ backup:
 
 scanner:
   min_quote_volume_24h: 50000000
+  # Current volume too: the last few closed hours, scaled to a day, must also reach this. A coin that
+  # spiked yesterday keeps a big 24h volume for a day after trading has died down.
+  min_recent_quote_volume_24h: 50000000
+  recent_volume_hours: 4
   min_atr_pct_1h: 2.0
   max_change_24h_pct: 30
   # Stablecoins, wrapped/staked copies, tokenised gold and tokenised shares:

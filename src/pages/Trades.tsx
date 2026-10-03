@@ -85,7 +85,10 @@ export function Trades({ go }: { go: (page: string, symbol?: string) => void }) 
               <td className={`${td} tabular text-ink-2`}>{dateTime(x.openedAt)}</td>
               <td className={td}><button className="font-semibold hover:text-accent" onClick={() => go('chart', x.symbol)}>{coin(x.symbol)}</button></td>
               <td className={td}><SideBadge side={x.side} /></td>
-              <td className={td}><span className="flex flex-wrap gap-1"><ModelBadge setup={x.setup} /><SpeedBadge speed={x.speed} /></span></td>
+              <td className={td} title={x.note}>
+                <span className="flex flex-wrap gap-1"><ModelBadge setup={x.setup} /><SpeedBadge speed={x.speed} /></span>
+                {x.note && <span className="block max-w-48 truncate text-xs text-ink-3">{x.note}</span>}
+              </td>
               <td className={`${td} tabular`}>{price(x.entryPrice)}</td>
               <td className={`${td} tabular`}>{price(x.exitPrice)}</td>
               <td className={`${td} tabular text-ink-2`}>{duration(x.closedAt - x.openedAt)}</td>

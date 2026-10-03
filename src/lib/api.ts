@@ -4,6 +4,15 @@ import type { AccountSummary, Candle, ClosedTradeView, FeedStatus, ShadowResult,
 import { idToken } from './auth';
 
 export type { AccountSummary, Candle, ClosedTradeView, ShadowResult, SignalRecord };
+export type { ChartPattern, ChartReading, TrendRead, WyckoffRange } from '../../engine/src/analysis/patterns';
+export type { ScalpSetup, ScalpStats } from '../../engine/src/analysis/scalp';
+
+/** One timeframe's chart reading, in brief, for the market table. */
+export interface ReadingBrief {
+  trend: { direction: 'up' | 'down' | 'range'; strength: 'strong' | 'weak' | null } | null;
+  patterns: { label: string; bias: 'bullish' | 'bearish' | 'neutral'; status: 'forming' | 'broke_up' | 'broke_down' }[];
+  wyckoff: { kind: 'accumulation' | 'distribution'; phase: string } | null;
+}
 
 export interface SessionInstance { name: string; openTime: number; closeTime: number; localDate: string }
 export interface SessionInfo {
@@ -36,11 +45,15 @@ export interface MarketRow {
   price: number | null;
   changePct: number | null;
   quoteVolume: number | null;
+  /** The last few hours' volume scaled to 24h: how much trades now. Null for coins the scanner did not measure. */
+  recentVolume24h: number | null;
   atrPct1h: number | null;
   long: Direction | null;
   short: Direction | null;
   trend: Record<'4h' | '1h' | '15m', string | null> | null;
   zones: number;
+  /** Trend, patterns and Wyckoff per timeframe (5m, 15m, 1h); null without candles yet. */
+  reading: Record<string, ReadingBrief | null>;
   armed: string[];
   setup: null | {
     bias: 'long' | 'short' | 'none'; stage: string | null; skipped: boolean;
