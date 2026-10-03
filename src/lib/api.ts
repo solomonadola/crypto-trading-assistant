@@ -5,6 +5,7 @@ import { idToken } from './auth';
 
 export type { AccountSummary, Candle, ClosedTradeView, ShadowResult, SignalRecord };
 export type { ChartPattern, ChartReading, TrendRead, WyckoffRange } from '../../engine/src/analysis/patterns';
+export type { ScalpSetup, ScalpStats } from '../../engine/src/analysis/scalp';
 
 /** One timeframe's chart reading, in brief, for the market table. */
 export interface ReadingBrief {

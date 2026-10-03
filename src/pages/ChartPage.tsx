@@ -1,19 +1,22 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { CandlestickChart, CheckCircle2, CircleDashed, Crosshair, Layers, Shapes, SlidersHorizontal, XCircle } from 'lucide-react';
-import { usePoll, usePrices, type AccountSummary, type Analysis, type Candle, type ChartReading, type ClosedTradeView, type MarketRow, type SessionInstance } from '../lib/api';
+import { usePoll, usePrices, type AccountSummary, type Analysis, type Candle, type ChartReading, type ClosedTradeView, type MarketRow, type ScalpSetup, type SessionInstance } from '../lib/api';
 import { coin, pct, price } from '../lib/format';
 import { Badge, Card, StateBadge, TrendChip } from '../components/ui';
 import { CandleChart, DEFAULT_INDICATORS, INDICATORS, type ChartOverlays, type IndicatorId } from '../components/charts';
 import { TradePlanCard } from '../components/TradePlan';
 import { AddCoin } from '../components/AddCoin';
+import { TakePosition } from '../components/TakePosition';
 import type { TradeIdea, WatchLevel } from '../../shared/types';
 
 const TFS = [['15m', 900_000], ['1h', 3_600_000], ['4h', 14_400_000], ['5m', 300_000], ['1m', 60_000]] as const;
 const STORE_KEY = 'chart-indicators';
-/** Set once the smart-money indicators have been switched on for a saved choice. */
-const SMART_KEY = 'chart-indicators-smart';
-/** Set once the pattern and Wyckoff drawings have been switched on for a saved choice. */
-const PATTERNS_KEY = 'chart-indicators-patterns';
+/** Indicators added after a viewer may have saved a choice: each group is switched on once, then the key is set. */
+const ADDED_LATER: [string, IndicatorId[]][] = [
+  ['chart-indicators-smart', ['liquidity', 'orderblocks', 'premium', 'killzones']],
+  ['chart-indicators-patterns', ['patterns', 'wyckoff']],
+  ['chart-indicators-scalp', ['scalp']],
+];
 
 /** The viewer's indicator choice, remembered in this browser (a convenience: defaults when storage is unavailable). */
 function useIndicators(): [Set<IndicatorId>, (id: IndicatorId) => void, () => void] {
@@ -22,16 +25,12 @@ function useIndicators(): [Set<IndicatorId>, (id: IndicatorId) => void, () => vo
       const saved = JSON.parse(localStorage.getItem(STORE_KEY) ?? 'null');
       if (Array.isArray(saved)) {
         const kept = saved.filter((x): x is IndicatorId => INDICATORS.some((i) => i.id === x));
-        // Saved before the smart-money or pattern items existed: switch those on, once.
-        const added: IndicatorId[] = [];
-        if (!localStorage.getItem(SMART_KEY)) added.push('liquidity', 'orderblocks', 'premium', 'killzones');
-        if (!localStorage.getItem(PATTERNS_KEY)) added.push('patterns', 'wyckoff');
-        localStorage.setItem(SMART_KEY, '1');
-        localStorage.setItem(PATTERNS_KEY, '1');
+        // Saved before some items existed: switch those on, once.
+        const added = ADDED_LATER.filter(([key]) => !localStorage.getItem(key)).flatMap(([, ids]) => ids);
+        for (const [key] of ADDED_LATER) localStorage.setItem(key, '1');
         return [...new Set<IndicatorId>([...kept, ...added])];
       }
-      localStorage.setItem(SMART_KEY, '1');   // the defaults already include them
-      localStorage.setItem(PATTERNS_KEY, '1');
+      for (const [key] of ADDED_LATER) localStorage.setItem(key, '1');   // the defaults already include them
     } catch { /* storage unavailable */ }
     return DEFAULT_INDICATORS;
   });
@@ -224,8 +223,13 @@ function ReadingsCard({ readings, tf, setTf }: { readings: ChartReading[]; tf: s
   );
 }
 
-export function ChartPage({ symbol, setSymbol }: { symbol: string; setSymbol: (s: string) => void }) {
-  const [tf, setTf] = useState<(typeof TFS)[number][0]>('15m');
+type Tf = (typeof TFS)[number][0];
+const isTf = (x: string | null | undefined): x is Tf => TFS.some(([name]) => name === x);
+
+export function ChartPage({ symbol, initialTf, setSymbol }: { symbol: string; initialTf?: string | null; setSymbol: (s: string) => void }) {
+  const [tf, setTf] = useState<Tf>(isTf(initialTf) ? initialTf : '15m');
+  // A link with a timeframe (#/chart/SOLUSDT/5m, from the Scalp page) opens on it.
+  useEffect(() => { if (isTf(initialTf)) setTf(initialTf); }, [initialTf, symbol]);
   const [show, toggle, reset] = useIndicators();
   const { data: market } = usePoll<MarketRow[]>('/api/market', 60_000);
   const { data: candles } = usePoll<Candle[]>(`/api/candles/${symbol}?tf=${tf}&limit=500`, 30_000);
@@ -234,6 +238,7 @@ export function ChartPage({ symbol, setSymbol }: { symbol: string; setSymbol: (s
   const { data: acct } = usePoll<AccountSummary>('/api/account', 10_000);
   const { data: idea } = usePoll<TradeIdea>(`/api/ideas/${symbol}`, 30_000);
   const { data: readings } = usePoll<ChartReading[]>(`/api/patterns/${symbol}`, 60_000);
+  const { data: scalps } = usePoll<ScalpSetup[]>(`/api/scalp/${symbol}`, 60_000);
   // A stable address (from the loaded candles, rounded to the day): a changing one would refetch on every redraw.
   const day = 86_400_000;
   const from = candles?.length ? Math.floor(candles[0].openTime / day) * day : null;
@@ -255,6 +260,12 @@ export function ChartPage({ symbol, setSymbol }: { symbol: string; setSymbol: (s
         icon={<CandlestickChart size={16} />}
         right={
           <div className="flex flex-wrap items-center gap-2">
+            <TakePosition symbol={symbol} defaults={{
+              side: idea?.plan?.direction ?? 'long',
+              stop: idea?.plan?.stop ?? null,
+              target: idea?.plan?.targets[0]?.price ?? null,
+              note: idea?.plan ? `Chart: ${idea.plan.direction} plan` : 'Chart',
+            }} />
             <AddCoin onAdded={setSymbol} />
             <select value={symbol} onChange={(e) => setSymbol(e.target.value)} className="rounded-lg border border-line bg-card-2 px-2 py-1 text-xs">
               {symbols.map((s) => <option key={s} value={s}>{coin(s)}</option>)}
@@ -272,7 +283,7 @@ export function ChartPage({ symbol, setSymbol }: { symbol: string; setSymbol: (s
           <CandleChart
             viewKey={`${symbol}|${tf}`}
             candles={candles}
-            overlays={{ zones: tf === '1m' ? [] : zones, fvgs: analysis?.fvgs ?? [], profiles: analysis?.profiles ?? [], sessions: sessions ?? [], killzones: killzones ?? [], reading: readings?.find((r) => r.tf === tf) ?? null }}
+            overlays={{ zones: tf === '1m' ? [] : zones, fvgs: analysis?.fvgs ?? [], profiles: analysis?.profiles ?? [], sessions: sessions ?? [], killzones: killzones ?? [], reading: readings?.find((r) => r.tf === tf) ?? null, scalps: scalps ?? [] }}
             trades={mine} positions={open} tfMs={tfMs} tf={tf} idea={idea} show={show}
           />
         ) : <div className="grid h-[640px] place-items-center text-sm text-ink-3">Loading candles… (a newly added coin takes a few seconds to fetch its history)</div>}
@@ -284,7 +295,7 @@ export function ChartPage({ symbol, setSymbol }: { symbol: string; setSymbol: (s
         </div>
       </Card>
 
-      {readings && <ReadingsCard readings={readings} tf={tf} setTf={(t) => setTf(t as typeof tf)} />}
+      {readings && <ReadingsCard readings={readings} tf={tf} setTf={(t) => { if (isTf(t)) setTf(t); }} />}
 
       {idea && (
         <div className="grid gap-5 lg:grid-cols-2">

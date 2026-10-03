@@ -1,7 +1,7 @@
 // Dashboard shell: navigation, live status, controls, and the pages.
 import { useEffect, useState } from 'react';
 import type { User } from 'firebase/auth';
-import { CandlestickChart, Compass, Crosshair, FlaskConical, History, LayoutDashboard, LogIn, LogOut, Pause, Play, Power, Radio, RotateCcw, Zap } from 'lucide-react';
+import { CandlestickChart, Compass, Crosshair, FlaskConical, History, LayoutDashboard, LogIn, LogOut, Pause, Play, Power, Radio, RotateCcw, Timer, Zap } from 'lucide-react';
 import { get, post, usePoll, type Status } from './lib/api';
 import { signIn, signOutUser, watchUser } from './lib/auth';
 import { hhmm, words } from './lib/format';
@@ -13,11 +13,13 @@ import { Signals } from './pages/Signals';
 import { Trades } from './pages/Trades';
 import { FilterLab } from './pages/FilterLab';
 import { Ideas } from './pages/Ideas';
+import { Scalp } from './pages/Scalp';
 import { Notifier } from './components/Notifier';
 
 const PAGES = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
   { id: 'ideas', label: 'Ideas', icon: Compass },
+  { id: 'scalp', label: 'Scalp', icon: Timer },
   { id: 'market', label: 'Market', icon: Crosshair },
   { id: 'chart', label: 'Chart', icon: CandlestickChart },
   { id: 'signals', label: 'Signals', icon: Radio },
@@ -26,10 +28,10 @@ const PAGES = [
 ] as const;
 type PageId = (typeof PAGES)[number]['id'];
 
-/** #/chart/SOLUSDT -> { page: 'chart', symbol: 'SOLUSDT' } */
-function readHash(): { page: PageId; symbol: string } {
-  const [, page, symbol] = window.location.hash.split('/');
-  return { page: (PAGES.some((p) => p.id === page) ? page : 'overview') as PageId, symbol: symbol || 'BTCUSDT' };
+/** #/chart/SOLUSDT/5m -> { page: 'chart', symbol: 'SOLUSDT', tf: '5m' }; the timeframe is optional. */
+function readHash(): { page: PageId; symbol: string; tf: string | null } {
+  const [, page, symbol, tf] = window.location.hash.split('/');
+  return { page: (PAGES.some((p) => p.id === page) ? page : 'overview') as PageId, symbol: symbol || 'BTCUSDT', tf: tf || null };
 }
 
 /** Signs in first when the server requires it, then shows the dashboard. */
@@ -72,8 +74,8 @@ function Dashboard({ user }: { user: User | null }) {
     window.addEventListener('hashchange', on);
     return () => window.removeEventListener('hashchange', on);
   }, []);
-  const go = (page: string, symbol?: string) => {
-    window.location.hash = `/${page}${page === 'chart' ? `/${symbol ?? route.symbol}` : ''}`;
+  const go = (page: string, symbol?: string, tf?: string) => {
+    window.location.hash = `/${page}${page === 'chart' ? `/${symbol ?? route.symbol}${tf ? `/${tf}` : ''}` : ''}`;
   };
 
   const { data: status, error, reload } = usePoll<Status>('/api/status', 5_000);
@@ -155,8 +157,9 @@ function Dashboard({ user }: { user: User | null }) {
         <main className="flex-1 px-4 py-5 md:px-6">
           {route.page === 'overview' && <Overview go={go} />}
           {route.page === 'ideas' && <Ideas go={go} />}
+          {route.page === 'scalp' && <Scalp go={go} />}
           {route.page === 'market' && <Market go={go} />}
-          {route.page === 'chart' && <ChartPage symbol={route.symbol} setSymbol={(s) => go('chart', s)} />}
+          {route.page === 'chart' && <ChartPage symbol={route.symbol} initialTf={route.tf} setSymbol={(s) => go('chart', s)} />}
           {route.page === 'signals' && <Signals go={go} />}
           {route.page === 'trades' && <Trades go={go} />}
           {route.page === 'lab' && <FilterLab go={go} />}

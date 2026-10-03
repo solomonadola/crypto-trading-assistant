@@ -33,6 +33,8 @@ export interface EntryFill {
   speed?: SpeedGroup;
   /** The model whose signal opened it. */
   setup?: SignalRecord['setup'];
+  /** Manual trades: why it was taken. */
+  note?: string;
 }
 
 
@@ -57,6 +59,7 @@ export interface OpenOrder {
   refPrice: number;
   speed?: SpeedGroup;
   setup?: SignalRecord['setup'];
+  note?: string;
 }
 
 export interface Position {
@@ -77,6 +80,8 @@ export interface Position {
   signalId: string | null;
   speed: SpeedGroup;
   setup: SignalRecord['setup'] | null;
+  /** Manual trades: why it was taken. */
+  note?: string | null;
   /** Index of the highest ladder step reached; -1 before the first. */
   ladderStep: number;
   partialDone: boolean;
@@ -111,6 +116,7 @@ export interface ClosedTrade {
   riskUsd: number;
   setup?: SignalRecord['setup'];
   speed: SpeedGroup;
+  note?: string;
 }
 
 const day = (t: number) => Math.floor(t / 86_400_000);
@@ -159,7 +165,7 @@ export class Portfolio {
         this.open.set(id, {
           id, symbol: e.symbol, side: f.side, qty: f.qty, initialQty: f.qty, entryPrice: f.price,
           stop: f.stop, initialStop: f.stop, target: f.target ?? null, openedAt: e.time, session: f.session,
-          leverage: f.leverage ?? 1, liqPrice: f.liqPrice ?? null, chochLevel: f.chochLevel ?? null, signalId: f.signalId ?? null, speed: f.speed ?? 'normal', setup: f.setup ?? null,
+          leverage: f.leverage ?? 1, liqPrice: f.liqPrice ?? null, chochLevel: f.chochLevel ?? null, signalId: f.signalId ?? null, speed: f.speed ?? 'normal', setup: f.setup ?? null, note: f.note ?? null,
           ladderStep: -1, partialDone: false, fees: fee, funding: 0, realized: 0, pendingClose: null,
         });
         const key = `${e.symbol}|${day(e.time)}`;
@@ -209,7 +215,7 @@ export class Portfolio {
           session: pos.session?.name ?? null,
           signalId: pos.signalId,
           riskUsd: Math.abs(pos.entryPrice - pos.initialStop) * pos.initialQty,
-          setup: pos.setup ?? undefined, speed: pos.speed,
+          setup: pos.setup ?? undefined, speed: pos.speed, ...(pos.note ? { note: pos.note } : {}),
         });
         this.dayPnl.set(day(e.time), (this.dayPnl.get(day(e.time)) ?? 0) + net);
         if (net < 0) {

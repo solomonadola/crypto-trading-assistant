@@ -70,7 +70,12 @@ export type EngineCommand =
   /** Stop opening trades; open positions keep being managed. */
   | { type: 'pause'; reason?: string }
   | { type: 'resume' }
-  | { type: 'reset_balance'; balance?: number };
+  | { type: 'reset_balance'; balance?: number }
+  /**
+   * A trade taken by hand: filled at once at `price` (the mark price when asked, plus slippage) and at
+   * `time` (the wall clock), sized and limited by the same risk rules as the engine's own trades.
+   */
+  | { type: 'open'; symbol: string; side: Direction; price: number; time: number; stop: number; target: number | null; note?: string };
 
 export class CommandError extends Error {}
 
@@ -248,7 +253,7 @@ export class Engine {
           price, unrealized: u, pnlPct: price === null ? 0 : sign(p.side) * (price / p.entryPrice - 1) * 100,
           openedAt: p.openedAt, sessionName: p.session?.name ?? null, sessionClose: p.session?.closeTime ?? null,
           ladderStep: p.ladderStep, partialDone: p.partialDone, pendingClose: p.pendingClose?.reason ?? null,
-          fees: p.fees, funding: p.funding, realized: p.realized,
+          fees: p.fees, funding: p.funding, realized: p.realized, setup: p.setup, note: p.note ?? null,
         };
       }),
       pendingEntries: this.portfolio.pendingEntries().map((e) => ({ positionId: e.positionId, symbol: e.symbol, side: e.side, notional: e.notional, placedAt: e.placedAt })),
@@ -299,6 +304,8 @@ export class Engine {
         if (!this.portfolio.halted) return [];
         this.peakEquity = equityOf(this.portfolio, (s) => this.priceOf(s));
         return [this.emit('engine_resumed', null, null, {})];
+      case 'open':
+        return this.openManual(cmd);
       case 'reset_balance': {
         if (this.portfolio.positions().length || this.portfolio.pendingEntries().length) {
           throw new CommandError('Close all positions before resetting the balance');
@@ -309,6 +316,34 @@ export class Engine {
         return [this.emit('balance_reset', null, null, { balance })];
       }
     }
+  }
+
+  /** A manual trade: the risk rules, then an order and its fill at the given price. */
+  private openManual(cmd: Extract<EngineCommand, { type: 'open' }>): TradeEvent[] {
+    const { symbol, side, price, stop, target } = cmd;
+    if (!this.clock) throw new CommandError('The engine has not started yet');
+    if (![price, stop].every((x) => Number.isFinite(x) && x > 0)) throw new CommandError('Price and stop must be positive numbers');
+    const s = sign(side);
+    if (s * (price - stop) <= 0) throw new CommandError(`The stop must be ${side === 'long' ? 'below' : 'above'} the price (${price})`);
+    if (target !== null && (!Number.isFinite(target) || s * (target - price) <= 0)) throw new CommandError(`The target must be ${side === 'long' ? 'above' : 'below'} the price (${price})`);
+    const speed = buildContext(this.market, symbol, this.clock, this.cfg, this.funding.get(symbol) ?? null)?.speed ?? 'normal';
+    const lastHour = this.market.recent(symbol, '1h', 1)[0];
+    const risk = decideEntry({
+      config: this.cfg, t: cmd.time, symbol, side, entry: price, stop,
+      portfolio: this.portfolio, priceOf: (x) => this.priceOf(x), dayStartEquity: this.dayStart.equity || this.portfolio.balance,
+      lastHourVolume: lastHour ? lastHour.quoteVolume : null, rules: this.rules.get(symbol) ?? null, score: Number.POSITIVE_INFINITY, speed,
+    });
+    if (!risk.ok) throw new CommandError(`Not taken: ${risk.reason!.replace(/^risk_/, '').replace(/_/g, ' ')}`);
+    const id = `manual-${symbol}-${cmd.time}`;
+    const order: OpenOrder = {
+      action: 'open', orderType: 'market', side, notional: risk.notional, stop, target,
+      chochLevel: null, signalId: null, refPrice: price, speed, setup: 'manual', ...(cmd.note ? { note: cmd.note.slice(0, 200) } : {}),
+    };
+    const placed = this.emit('order_placed', id, symbol, { ...order }, cmd.time);
+    const pending = this.portfolio.pendingEntries().find((e) => e.positionId === id)!;
+    // Filled at once, as a candle opening at the asked price at that moment.
+    const fill = this.fillEntry(pending, { symbol, tf: '1m', openTime: cmd.time, closeTime: cmd.time, open: price, high: price, low: price, close: price, volume: 0, quoteVolume: 0, trades: 0 });
+    return [placed, ...fill];
   }
 
   /** Everything that closed at time `t`, larger timeframes first. */
@@ -429,6 +464,7 @@ export class Engine {
       role: 'entry', side: e.side, qty, price, stop: e.stop, target: e.target,
       fee: fee(qty * price, cfg.sim), session: this.sessions.ownerAt(e.placedAt),
       leverage: cfg.leverage, liqPrice, chochLevel: e.chochLevel, signalId: e.signalId, speed: e.speed ?? 'normal', setup: e.setup,
+      ...(e.note ? { note: e.note } : {}),
     };
     // Recorded at the candle's open: the moment the fill happened.
     return [this.emit('order_filled', e.positionId, e.symbol, { ...fill, notional: qty * price, margin: (qty * price) / cfg.leverage }, c.openTime)];

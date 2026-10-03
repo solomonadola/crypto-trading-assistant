@@ -26,6 +26,7 @@ import { noticesFor } from './notices';
 import { scan, type ScanResult } from './scanner';
 import { resolveSymbol } from './symbols';
 import { readChart, type ChartReading } from './analysis/patterns';
+import { findScalps, scalpStats, type ScalpSetup } from './analysis/scalp';
 import type { SymbolInfo } from './feed/binancePublic';
 import { TIMEFRAME_MS, type Candle, type Timeframe } from '../../shared/types';
 
@@ -408,6 +409,50 @@ const control = (build: (req: express.Request) => EngineCommand) => (req: expres
     res.status(err instanceof CommandError ? 400 : 500).json({ ok: false, error: message(err) });
   }
 };
+// A trade taken by hand: filled at once at Binance's mark price (plus slippage), with the engine's usual sizing and risk rules.
+app.post('/api/positions/open', async (req, res) => {
+  if (backup.standby) {
+    res.status(409).json({ ok: false, error: 'Another engine holds the lock; trade there' });
+    return;
+  }
+  const b = req.body ?? {};
+  const symbol = String(b.symbol ?? '').toUpperCase();
+  const side = b.side === 'short' ? 'short' : b.side === 'long' ? 'long' : null;
+  const stop = Number(b.stop);
+  const target = b.target === null || b.target === undefined || b.target === '' ? null : Number(b.target);
+  if (!symbol || !side) {
+    res.status(400).json({ ok: false, error: 'symbol and side (long or short) are required' });
+    return;
+  }
+  let mark: number | undefined;
+  try {
+    mark = (await client.premiumIndex()).find((x) => x.symbol === symbol)?.markPrice;
+  } catch (err) {
+    res.status(502).json({ ok: false, error: `Could not get the mark price from Binance: ${message(err)}` });
+    return;
+  }
+  if (!mark) {
+    res.status(400).json({ ok: false, error: `${symbol} is not a Binance USDT perpetual` });
+    return;
+  }
+  const wasFed = symbols().includes(symbol);
+  try {
+    const produced = command({ type: 'open', symbol, side, price: mark, time: Date.now(), stop, target, note: b.note ? String(b.note) : undefined });
+    for (const e of produced) console.log(`[manual] ${e.type} ${e.symbol ?? ''} ${JSON.stringify(e.payload)}`);
+    void pushToCloud();
+    // Its candles are needed from now on for the stop and target.
+    if (!wasFed) catchUpNow(symbol);
+    const filled = produced.find((e) => e.type === 'order_filled');
+    if (!filled) {
+      const why = produced.find((e) => e.type === 'order_cancelled')?.payload.reason;
+      res.status(400).json({ ok: false, error: `Not filled: ${String(why ?? 'unknown').replace(/_/g, ' ')}`, mark });
+      return;
+    }
+    res.json({ ok: true, mark, fill: filled.payload, positionId: filled.positionId, account: engine.account() });
+  } catch (err) {
+    res.status(err instanceof CommandError ? 400 : 500).json({ ok: false, error: message(err), mark });
+  }
+});
 app.post('/api/positions/:id/close', control((req) => ({ type: 'close', positionId: String(req.params.id) })));
 app.post('/api/control/kill', control(() => ({ type: 'kill', reason: 'manual kill' })));
 app.post('/api/control/pause', control(() => ({ type: 'pause', reason: 'paused from the dashboard' })));
@@ -445,6 +490,39 @@ function chartReading(symbol: string, tf: Timeframe): ChartReading | null {
 app.get('/api/patterns/:symbol', (req, res) => {
   const symbol = req.params.symbol.toUpperCase();
   res.json(READ_TFS.map((tf) => chartReading(symbol, tf)).filter((r): r is ChartReading => r !== null));
+});
+
+// Scalp setups on 5m for the listed coins, over the last 24 hours, each followed to its end.
+// Worked out again for a coin only when its next 5m candle closes.
+const SCALP_HOURS = 24;
+/** Round trip: fees and slippage on the entry and the exit. */
+const SCALP_COST_PCT = 2 * (config.sim.taker_fee_pct + config.sim.slippage_pct);
+const scalpCache = new Map<string, { asOf: number; setups: ScalpSetup[] }>();
+function scalpsFor(symbol: string): ScalpSetup[] {
+  const lastOpen = store.lastOpenTime(symbol, '5m');
+  if (lastOpen === null) return [];
+  const cached = scalpCache.get(symbol);
+  if (cached?.asOf === lastOpen) return cached.setups;
+  // 24 hours, plus warm-up for the ATR, EMAs and swing points.
+  const candles = store.latest(symbol, '5m', (SCALP_HOURS * 60) / 5 + 72);
+  const from = candles[0]?.openTime ?? lastOpen;
+  const sessionOpens = engine.sessions.between(from, lastOpen + 300_000)
+    .filter((sn) => sn.name === 'london' || sn.name === 'newyork').map((sn) => sn.openTime);
+  const setups = findScalps(candles, {
+    symbol,
+    bias1h: chartReading(symbol, '1h')?.trend?.direction ?? 'range',
+    sessionOpens,
+    costPct: SCALP_COST_PCT,
+  }).filter((x) => x.time >= lastOpen - SCALP_HOURS * 3_600_000);
+  scalpCache.set(symbol, { asOf: lastOpen, setups });
+  return setups;
+}
+app.get('/api/scalp', (_req, res) => {
+  const setups = listed().flatMap((sym) => scalpsFor(sym)).sort((a, b) => b.time - a.time);
+  res.json({ hours: SCALP_HOURS, costPct: SCALP_COST_PCT, setups, stats: scalpStats(setups) });
+});
+app.get('/api/scalp/:symbol', (req, res) => {
+  res.json(scalpsFor(req.params.symbol.toUpperCase()));
 });
 
 app.get('/api/market', (_req, res) => {

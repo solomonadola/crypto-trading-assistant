@@ -87,7 +87,8 @@ export interface SignalRecord {
   /** Engine clock. */
   time: number;
   symbol: string;
-  setup: 'pullback' | 'breakout' | 'session_sweep' | 'zone_sweep';
+  /** The model behind it; `manual` for trades taken by hand from the dashboard. */
+  setup: 'pullback' | 'breakout' | 'session_sweep' | 'zone_sweep' | 'manual';
   direction: Direction;
   status: SignalStatus;
   reason: string | null;
@@ -139,6 +140,9 @@ export interface PositionView {
   fees: number;
   funding: number;
   realized: number;
+  /** The model that opened it (`manual` for trades taken by hand) and, for those, why. */
+  setup: SignalRecord['setup'] | null;
+  note: string | null;
 }
 
 export interface AccountSummary {
@@ -174,6 +178,8 @@ export interface ClosedTradeView {
   /** The model that opened it and the coin's speed group then (absent on trades from before v3). */
   setup?: SignalRecord['setup'];
   speed?: 'calm' | 'normal' | 'wild';
+  /** Why a manual trade was taken, as typed or from the setup it came from. */
+  note?: string;
 }
 
 /** A price level where several sources agree. */

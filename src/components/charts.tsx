@@ -13,7 +13,8 @@ import {
   type IChartApi, type IPriceLine, type ISeriesApi, type ISeriesMarkersPluginApi, type SeriesMarker, type SeriesType, type Time, type UTCTimestamp,
 } from 'lightweight-charts';
 import type { Candle, ClosedTradeView, EquityPoint, PositionViewLike, TradeIdea, Zone } from './chartTypes';
-import { usePrices, type ChartReading, type Fvg, type SessionInstance, type VolumeProfile } from '../lib/api';
+import { usePrices, type ChartReading, type Fvg, type ScalpSetup, type SessionInstance, type VolumeProfile } from '../lib/api';
+import { SCALP_LABEL } from '../../engine/src/analysis/scalp';
 import { bollingerBands, ema, rsi, supertrend, vwapDaily } from '../../engine/src/analysis/indicators';
 import { SESSION_LABEL } from '../lib/format';
 import { price as fmtPrice, usd, dateTime } from '../lib/format';
@@ -94,13 +95,14 @@ export const INDICATORS = [
   { id: 'killzones', group: 'Smart money', label: 'Killzones (London, New York)' },
   { id: 'patterns', group: 'Patterns (5m, 15m, 1h)', label: 'Chart patterns (triangles, wedges, channels, double tops)' },
   { id: 'wyckoff', group: 'Patterns (5m, 15m, 1h)', label: 'Wyckoff range & events' },
+  { id: 'scalp', group: 'Scalp (5m)', label: 'Scalp setups: entry, stop, target' },
   { id: 'volume', group: 'Panels', label: 'Volume' },
   { id: 'rsi', group: 'Panels', label: 'RSI 14' },
   { id: 'trades', group: 'Marks', label: 'My trades' },
   { id: 'positions', group: 'Marks', label: 'Open positions' },
 ] as const;
 export type IndicatorId = (typeof INDICATORS)[number]['id'];
-export const DEFAULT_INDICATORS: IndicatorId[] = ['ema50', 'ema200', 'zones', 'profile24h', 'plan', 'liquidity', 'orderblocks', 'premium', 'killzones', 'patterns', 'wyckoff', 'volume', 'trades', 'positions'];
+export const DEFAULT_INDICATORS: IndicatorId[] = ['ema50', 'ema200', 'zones', 'profile24h', 'plan', 'liquidity', 'orderblocks', 'premium', 'killzones', 'patterns', 'wyckoff', 'scalp', 'volume', 'trades', 'positions'];
 
 export interface ChartOverlays {
   zones: Zone[];
@@ -110,6 +112,8 @@ export interface ChartOverlays {
   killzones: { name: string; openTime: number; closeTime: number }[];
   /** Trend, patterns and Wyckoff read on the timeframe shown; null on timeframes that are not read. */
   reading?: ChartReading | null;
+  /** Scalp setups of the last 24 hours (5m): open ones drawn bright and labelled, those closed in the last 4 hours faint. */
+  scalps?: ScalpSetup[];
 }
 
 const BIAS_COLOR = { bullish: 'var(--color-good)', bearish: 'var(--color-critical)', neutral: 'var(--color-warning)' } as const;
@@ -532,6 +536,31 @@ function Overlay({ chart, series, candles, overlays, show, tf, tfMs, idea }: {
                 <line x1={xb - 80} x2={width} y1={yTarget} y2={yTarget} stroke={color} strokeDasharray="3 3" strokeOpacity={0.8} />
                 <text x={xb - 80} y={yTarget - 3} fontSize={10} fill={color} {...HALO}>{p.label.toLowerCase()} target {fmtPrice(p.target!)}</text>
               </g>
+            )}
+          </g>
+        );
+      })}
+
+      {show.has('scalp') && tfMs <= 900_000 && (overlays.scalps ?? []).filter((sc) => sc.status === 'open' || last - (sc.closedAt ?? 0) < 4 * 3_600_000).map((sc) => {
+        // From the signal candle to where it closed (or the right edge while open).
+        const x1 = xFree(sc.time);
+        if (x1 === null) return null;
+        const x2 = sc.closedAt === null ? width : Math.min(width, x(sc.closedAt));
+        if (x2 < 0 || x1 > width) return null;
+        const open = sc.status === 'open';
+        const lines = [['entry', sc.entry, 'var(--color-ink)'], ['stop', sc.stop, 'var(--color-critical)'], ['target', sc.target, 'var(--color-good)']] as const;
+        const ye = y(sc.entry);
+        return (
+          <g key={`sc${sc.kind}${sc.side}${sc.time}`} opacity={open ? 1 : 0.35}>
+            {lines.map(([name, p, color]) => {
+              const yy = y(p);
+              if (yy === null) return null;
+              return <line key={name} x1={x1} x2={x2} y1={yy} y2={yy} stroke={color} strokeWidth={name === 'entry' ? 1.5 : 1.25} strokeDasharray={name === 'entry' ? undefined : '4 3'} />;
+            })}
+            {open && ye !== null && (
+              <text x={Math.max(x1, 0) + 4} y={sc.side === 'long' ? ye + 13 : ye - 5} fontSize={10} fontWeight={600} fill="var(--color-ink)" {...HALO}>
+                {SCALP_LABEL[sc.kind]} {sc.side}
+              </text>
             )}
           </g>
         );

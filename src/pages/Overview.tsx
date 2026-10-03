@@ -1,7 +1,7 @@
 import { Activity, Briefcase, LineChart, Radio, X } from 'lucide-react';
 import { post, usePoll, usePrices, type AccountSummary, type ClosedTradeView, type EquityPoint, type SignalRecord } from '../lib/api';
 import { coin, dateTime, duration, hhmm, pct, price, signedUsd, usd, words } from '../lib/format';
-import { Badge, Card, Empty, Kpi, Pnl, SessionBadge, SideBadge, Table, td } from '../components/ui';
+import { Badge, Card, Empty, Kpi, ModelBadge, Pnl, SessionBadge, SideBadge, Table, td } from '../components/ui';
 import { SessionTimeline } from '../components/SessionTimeline';
 import { EquityChart } from '../components/charts';
 
@@ -72,11 +72,15 @@ export function Overview({ go }: { go: (page: string, symbol?: string) => void }
 
       <Card title="Open positions" icon={<Briefcase size={16} />} right={acct?.pendingEntries.length ? <Badge tone="accent"><Activity size={12} />{acct.pendingEntries.length} filling</Badge> : null}>
         {!acct?.positions.length ? <Empty>No open positions. The engine opens one when a confirmed setup passes every check and the risk rules.</Empty> : (
-          <Table head={['Coin', 'Side', 'Entry', 'Price', 'Stop', 'Target', 'P&L', 'Session', 'Open', '']}>
+          <Table head={['Coin', 'Side', 'Model', 'Entry', 'Price', 'Stop', 'Target', 'P&L', 'Session', 'Open', '']}>
             {acct.positions.map((p) => (
               <tr key={p.id} className="hover:bg-card-2/60">
                 <td className={td}><button className="font-semibold hover:text-accent" onClick={() => go('chart', p.symbol)}>{coin(p.symbol)}</button></td>
                 <td className={td}><SideBadge side={p.side} /></td>
+                <td className={td} title={p.note ?? undefined}>
+                  {p.setup ? <ModelBadge setup={p.setup} /> : <span className="text-ink-3">–</span>}
+                  {p.note && <span className="block max-w-48 truncate text-xs text-ink-3">{p.note}</span>}
+                </td>
                 <td className={`${td} tabular`}>{price(p.entryPrice)}</td>
                 <td className={`${td} tabular`}>{price(at(p).price)}</td>
                 <td className={`${td} tabular text-critical/90`} title={p.ladderStep >= 0 ? `ladder step ${p.ladderStep + 1}` : 'initial stop'}>{price(p.stop)}{p.ladderStep >= 0 && <span className="ml-1 text-[10px] text-accent">L{p.ladderStep + 1}</span>}</td>
