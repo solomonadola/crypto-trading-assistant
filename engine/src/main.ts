@@ -25,6 +25,7 @@ import { summarize } from './stats';
 import { noticesFor } from './notices';
 import { scan, type ScanResult } from './scanner';
 import { resolveSymbol } from './symbols';
+import { readChart, type ChartReading } from './analysis/patterns';
 import type { SymbolInfo } from './feed/binancePublic';
 import { TIMEFRAME_MS, type Candle, type Timeframe } from '../../shared/types';
 
@@ -428,6 +429,24 @@ app.get('/api/sessions/today', (_req, res) => {
   const dayStart = Math.floor(t / 86_400_000) * 86_400_000;
   res.json({ dayStart, sessions: engine.sessions.between(dayStart, dayStart + 86_400_000), info: engine.sessions.info(t) });
 });
+// Chart reading (trend, patterns, Wyckoff) per coin and timeframe, worked out again only when a candle closes.
+const READ_TFS = (['5m', '15m', '1h'] as const).filter((tf) => config.feed.timeframes.includes(tf));
+const readings = new Map<string, ChartReading>();
+function chartReading(symbol: string, tf: Timeframe): ChartReading | null {
+  const lastOpen = store.lastOpenTime(symbol, tf);
+  if (lastOpen === null) return null;
+  const key = `${symbol}|${tf}`;
+  const cached = readings.get(key);
+  if (cached?.asOf === lastOpen) return cached;
+  const reading = readChart(store.latest(symbol, tf, config.feed.history[tf] ?? 500), tf);
+  readings.set(key, reading);
+  return reading;
+}
+app.get('/api/patterns/:symbol', (req, res) => {
+  const symbol = req.params.symbol.toUpperCase();
+  res.json(READ_TFS.map((tf) => chartReading(symbol, tf)).filter((r): r is ChartReading => r !== null));
+});
+
 app.get('/api/market', (_req, res) => {
   const rows = new Map((lastScan?.selected ?? []).map((r) => [r.symbol, r]));
   res.json(listed().map((symbol) => {
@@ -440,11 +459,21 @@ app.get('/api/market', (_req, res) => {
       price: last?.close ?? null,
       changePct: rows.get(symbol)?.changePct ?? null,
       quoteVolume: rows.get(symbol)?.quoteVolume ?? null,
+      recentVolume24h: rows.get(symbol)?.recentVolume24h ?? null,
       atrPct1h: rows.get(symbol)?.atrPct1h ?? null,
       long: a?.long ?? null,
       short: a?.short ?? null,
       trend: a ? { '4h': a.structure['4h']?.trend ?? null, '1h': a.structure['1h']?.trend ?? null, '15m': a.structure['15m']?.trend ?? null } : null,
       zones: a?.zones.length ?? 0,
+      // Per timeframe: the trend, the patterns' names and the Wyckoff phase, for the table.
+      reading: Object.fromEntries(READ_TFS.map((tf) => {
+        const r = chartReading(symbol, tf);
+        return [tf, r && {
+          trend: r.trend ? { direction: r.trend.direction, strength: r.trend.strength } : null,
+          patterns: r.patterns.map((p) => ({ label: p.label, bias: p.bias, status: p.status })),
+          wyckoff: r.wyckoff ? { kind: r.wyckoff.kind, phase: r.wyckoff.phase } : null,
+        }];
+      })),
       armed: engine.armedSetups().filter((x) => x.symbol === symbol).map((x) => x.direction),
       setup: (() => {
         const idea = ideaFor(symbol);

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { CandlestickChart, CheckCircle2, CircleDashed, Crosshair, Layers, SlidersHorizontal, XCircle } from 'lucide-react';
-import { usePoll, usePrices, type AccountSummary, type Analysis, type Candle, type ClosedTradeView, type MarketRow, type SessionInstance } from '../lib/api';
+import { CandlestickChart, CheckCircle2, CircleDashed, Crosshair, Layers, Shapes, SlidersHorizontal, XCircle } from 'lucide-react';
+import { usePoll, usePrices, type AccountSummary, type Analysis, type Candle, type ChartReading, type ClosedTradeView, type MarketRow, type SessionInstance } from '../lib/api';
 import { coin, pct, price } from '../lib/format';
 import { Badge, Card, StateBadge, TrendChip } from '../components/ui';
 import { CandleChart, DEFAULT_INDICATORS, INDICATORS, type ChartOverlays, type IndicatorId } from '../components/charts';
@@ -8,10 +8,12 @@ import { TradePlanCard } from '../components/TradePlan';
 import { AddCoin } from '../components/AddCoin';
 import type { TradeIdea, WatchLevel } from '../../shared/types';
 
-const TFS = [['15m', 900_000], ['1h', 3_600_000], ['4h', 14_400_000], ['1m', 60_000]] as const;
+const TFS = [['15m', 900_000], ['1h', 3_600_000], ['4h', 14_400_000], ['5m', 300_000], ['1m', 60_000]] as const;
 const STORE_KEY = 'chart-indicators';
 /** Set once the smart-money indicators have been switched on for a saved choice. */
 const SMART_KEY = 'chart-indicators-smart';
+/** Set once the pattern and Wyckoff drawings have been switched on for a saved choice. */
+const PATTERNS_KEY = 'chart-indicators-patterns';
 
 /** The viewer's indicator choice, remembered in this browser (a convenience: defaults when storage is unavailable). */
 function useIndicators(): [Set<IndicatorId>, (id: IndicatorId) => void, () => void] {
@@ -20,12 +22,16 @@ function useIndicators(): [Set<IndicatorId>, (id: IndicatorId) => void, () => vo
       const saved = JSON.parse(localStorage.getItem(STORE_KEY) ?? 'null');
       if (Array.isArray(saved)) {
         const kept = saved.filter((x): x is IndicatorId => INDICATORS.some((i) => i.id === x));
-        // Saved before the smart-money items existed: switch those on, once.
-        if (localStorage.getItem(SMART_KEY)) return kept;
+        // Saved before the smart-money or pattern items existed: switch those on, once.
+        const added: IndicatorId[] = [];
+        if (!localStorage.getItem(SMART_KEY)) added.push('liquidity', 'orderblocks', 'premium', 'killzones');
+        if (!localStorage.getItem(PATTERNS_KEY)) added.push('patterns', 'wyckoff');
         localStorage.setItem(SMART_KEY, '1');
-        return [...new Set<IndicatorId>([...kept, 'liquidity', 'orderblocks', 'premium', 'killzones'])];
+        localStorage.setItem(PATTERNS_KEY, '1');
+        return [...new Set<IndicatorId>([...kept, ...added])];
       }
       localStorage.setItem(SMART_KEY, '1');   // the defaults already include them
+      localStorage.setItem(PATTERNS_KEY, '1');
     } catch { /* storage unavailable */ }
     return DEFAULT_INDICATORS;
   });
@@ -151,6 +157,73 @@ function ChecklistCard({ idea }: { idea: TradeIdea }) {
   );
 }
 
+const TREND_TONE = { up: 'good', down: 'critical', range: 'muted' } as const;
+const BIAS_TONE = { bullish: 'good', bearish: 'critical', neutral: 'warning' } as const;
+const STATUS_TEXT = { forming: 'forming', broke_up: 'broke up', broke_down: 'broke down' } as const;
+
+/** Trend, chart patterns and Wyckoff per timeframe; clicking a timeframe shows its drawings on the chart. */
+function ReadingsCard({ readings, tf, setTf }: { readings: ChartReading[]; tf: string; setTf: (tf: string) => void }) {
+  return (
+    <Card title="Trend, patterns & Wyckoff" icon={<Shapes size={16} />} right={<span className="text-xs text-ink-3">read on closed candles · drawn on the chart for its timeframe</span>}>
+      {!readings.length ? <p className="text-sm text-ink-3">No candles yet for 5m, 15m or 1h.</p> : (
+        <div className="grid gap-4 lg:grid-cols-3">
+          {readings.map((r) => (
+            <div key={r.tf} className={`rounded-xl border p-3 ${r.tf === tf ? 'border-accent bg-accent/5' : 'border-line bg-card-2'}`}>
+              <div className="flex items-center justify-between gap-2">
+                <button onClick={() => setTf(r.tf)} className="text-sm font-semibold hover:text-accent" title="Show this timeframe on the chart">{r.tf}</button>
+                {r.trend
+                  ? <Badge tone={TREND_TONE[r.trend.direction]}>{r.trend.direction === 'range' ? 'ranging' : `${r.trend.strength} ${r.trend.direction}trend`}</Badge>
+                  : <Badge tone="muted">not enough candles</Badge>}
+              </div>
+              {r.trend && <p className="mt-1 text-xs text-ink-3">{r.trend.detail}</p>}
+
+              <p className="mt-3 text-[11px] uppercase tracking-wider text-ink-3">Patterns</p>
+              {!r.patterns.length ? <p className="text-xs text-ink-3">None clear right now.</p> : (
+                <ul className="mt-1 space-y-1.5">
+                  {r.patterns.map((p) => (
+                    <li key={`${p.kind}${p.from}`} className="text-sm">
+                      <span className="flex flex-wrap items-center gap-1.5">
+                        <span className="font-semibold">{p.label}</span>
+                        <Badge tone={BIAS_TONE[p.bias]}>{p.bias}</Badge>
+                        <Badge tone={p.status === 'forming' ? 'muted' : 'accent'}>{STATUS_TEXT[p.status]}</Badge>
+                      </span>
+                      <span className="block text-xs text-ink-3">{p.detail}{p.target !== null ? ` · target ${price(p.target)}` : ''}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+
+              <p className="mt-3 text-[11px] uppercase tracking-wider text-ink-3">Wyckoff</p>
+              {!r.wyckoff ? <p className="text-xs text-ink-3">No accumulation or distribution range found.</p> : (
+                <div className="mt-1 text-sm">
+                  <span className="flex flex-wrap items-center gap-1.5">
+                    <Badge tone={r.wyckoff.kind === 'accumulation' ? 'good' : 'critical'}>{r.wyckoff.kind}</Badge>
+                    <Badge tone="accent">phase {r.wyckoff.phase}</Badge>
+                    <span className="text-xs text-ink-3 tabular">{price(r.wyckoff.bottom)} – {price(r.wyckoff.top)}</span>
+                  </span>
+                  <span className="block text-xs text-ink-3">{r.wyckoff.detail}</span>
+                  <ul className="mt-1 space-y-0.5">
+                    {r.wyckoff.events.map((e) => (
+                      <li key={`${e.name}${e.time}`} className="text-xs" title={e.why}>
+                        <b className="text-ink">{e.name}</b> <span className="tabular text-ink-2">{price(e.price)}</span> <span className="text-ink-3">· {e.why}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+      <p className="mt-3 text-xs text-ink-3">
+        Rule-based reads of the chart to help you look, not signals: the engine's entries do not use them. Trend: up or down when at least two of
+        swing structure, the EMA20/EMA50 stack and the EMA20 slope agree. Wyckoff names: SC/BC selling/buying climax, AR automatic reaction,
+        ST secondary test, Spring/UTAD the shakeout, SOS/SOW sign of strength/weakness, LPS/LPSY last point of support/supply.
+      </p>
+    </Card>
+  );
+}
+
 export function ChartPage({ symbol, setSymbol }: { symbol: string; setSymbol: (s: string) => void }) {
   const [tf, setTf] = useState<(typeof TFS)[number][0]>('15m');
   const [show, toggle, reset] = useIndicators();
@@ -160,6 +233,7 @@ export function ChartPage({ symbol, setSymbol }: { symbol: string; setSymbol: (s
   const { data: trades } = usePoll<ClosedTradeView[]>('/api/trades?limit=2000', 60_000);
   const { data: acct } = usePoll<AccountSummary>('/api/account', 10_000);
   const { data: idea } = usePoll<TradeIdea>(`/api/ideas/${symbol}`, 30_000);
+  const { data: readings } = usePoll<ChartReading[]>(`/api/patterns/${symbol}`, 60_000);
   // A stable address (from the loaded candles, rounded to the day): a changing one would refetch on every redraw.
   const day = 86_400_000;
   const from = candles?.length ? Math.floor(candles[0].openTime / day) * day : null;
@@ -198,7 +272,7 @@ export function ChartPage({ symbol, setSymbol }: { symbol: string; setSymbol: (s
           <CandleChart
             viewKey={`${symbol}|${tf}`}
             candles={candles}
-            overlays={{ zones: tf === '1m' ? [] : zones, fvgs: analysis?.fvgs ?? [], profiles: analysis?.profiles ?? [], sessions: sessions ?? [], killzones: killzones ?? [] }}
+            overlays={{ zones: tf === '1m' ? [] : zones, fvgs: analysis?.fvgs ?? [], profiles: analysis?.profiles ?? [], sessions: sessions ?? [], killzones: killzones ?? [], reading: readings?.find((r) => r.tf === tf) ?? null }}
             trades={mine} positions={open} tfMs={tfMs} tf={tf} idea={idea} show={show}
           />
         ) : <div className="grid h-[640px] place-items-center text-sm text-ink-3">Loading candles… (a newly added coin takes a few seconds to fetch its history)</div>}
@@ -209,6 +283,8 @@ export function ChartPage({ symbol, setSymbol }: { symbol: string; setSymbol: (s
           <span className="text-ink-3">drag to scroll, wheel to zoom; the view stays where you leave it</span>
         </div>
       </Card>
+
+      {readings && <ReadingsCard readings={readings} tf={tf} setTf={(t) => setTf(t as typeof tf)} />}
 
       {idea && (
         <div className="grid gap-5 lg:grid-cols-2">

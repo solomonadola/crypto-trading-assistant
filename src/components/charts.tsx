@@ -13,7 +13,7 @@ import {
   type IChartApi, type IPriceLine, type ISeriesApi, type ISeriesMarkersPluginApi, type SeriesMarker, type SeriesType, type Time, type UTCTimestamp,
 } from 'lightweight-charts';
 import type { Candle, ClosedTradeView, EquityPoint, PositionViewLike, TradeIdea, Zone } from './chartTypes';
-import { usePrices, type Fvg, type SessionInstance, type VolumeProfile } from '../lib/api';
+import { usePrices, type ChartReading, type Fvg, type SessionInstance, type VolumeProfile } from '../lib/api';
 import { bollingerBands, ema, rsi, supertrend, vwapDaily } from '../../engine/src/analysis/indicators';
 import { SESSION_LABEL } from '../lib/format';
 import { price as fmtPrice, usd, dateTime } from '../lib/format';
@@ -92,13 +92,15 @@ export const INDICATORS = [
   { id: 'orderblocks', group: 'Smart money', label: 'Order blocks (1h)' },
   { id: 'premium', group: 'Smart money', label: 'Premium / discount (4h range)' },
   { id: 'killzones', group: 'Smart money', label: 'Killzones (London, New York)' },
+  { id: 'patterns', group: 'Patterns (5m, 15m, 1h)', label: 'Chart patterns (triangles, wedges, channels, double tops)' },
+  { id: 'wyckoff', group: 'Patterns (5m, 15m, 1h)', label: 'Wyckoff range & events' },
   { id: 'volume', group: 'Panels', label: 'Volume' },
   { id: 'rsi', group: 'Panels', label: 'RSI 14' },
   { id: 'trades', group: 'Marks', label: 'My trades' },
   { id: 'positions', group: 'Marks', label: 'Open positions' },
 ] as const;
 export type IndicatorId = (typeof INDICATORS)[number]['id'];
-export const DEFAULT_INDICATORS: IndicatorId[] = ['ema50', 'ema200', 'zones', 'profile24h', 'plan', 'liquidity', 'orderblocks', 'premium', 'killzones', 'volume', 'trades', 'positions'];
+export const DEFAULT_INDICATORS: IndicatorId[] = ['ema50', 'ema200', 'zones', 'profile24h', 'plan', 'liquidity', 'orderblocks', 'premium', 'killzones', 'patterns', 'wyckoff', 'volume', 'trades', 'positions'];
 
 export interface ChartOverlays {
   zones: Zone[];
@@ -106,7 +108,13 @@ export interface ChartOverlays {
   profiles: VolumeProfile[];
   sessions: SessionInstance[];
   killzones: { name: string; openTime: number; closeTime: number }[];
+  /** Trend, patterns and Wyckoff read on the timeframe shown; null on timeframes that are not read. */
+  reading?: ChartReading | null;
 }
+
+const BIAS_COLOR = { bullish: 'var(--color-good)', bearish: 'var(--color-critical)', neutral: 'var(--color-warning)' } as const;
+/** A dark outline behind drawing labels, so they stay readable over candles and other lines. */
+const HALO = { stroke: 'var(--color-page)', strokeWidth: 3, paintOrder: 'stroke' } as const;
 
 interface Props {
   /** The chart is rebuilt (and fitted) only when this changes: symbol and timeframe. */
@@ -352,6 +360,11 @@ function Overlay({ chart, series, candles, overlays, show, tf, tfMs, idea }: {
     const c = ts.timeToCoordinate(sec(t));
     return c === null ? width : Math.max(0, Math.min(width, c));
   };
+  /** A time to an x without clamping, for drawings that should scroll off-screen with their candles; null outside the data. */
+  const xFree = (ms: number) => {
+    const t = Math.floor(ms / tfMs) * tfMs;
+    return t < first || t > last ? null : ts.timeToCoordinate(sec(t));
+  };
   const y = (p: number) => series.priceToCoordinate(p);
   const box = (key: string, from: number, top: number, bottom: number, props: Record<string, string | number>, label: string) => {
     const y1 = y(top);
@@ -375,7 +388,7 @@ function Overlay({ chart, series, candles, overlays, show, tf, tfMs, idea }: {
   const barMax = width * 0.22;
 
   return (
-    <svg className="pointer-events-none absolute left-0 top-0" width={width} height={height} aria-hidden>
+    <svg className="pointer-events-none absolute left-0 top-0 overflow-hidden" width={width} height={height} aria-hidden>
       <defs>
         {[['hatch-buy', buy], ['hatch-sell', sell]].map(([id, color]) => (
           <pattern key={id} id={id} width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
@@ -468,6 +481,61 @@ function Overlay({ chart, series, candles, overlays, show, tf, tfMs, idea }: {
         { fill: `url(#hatch-${g.side === 'bullish' ? 'buy' : 'sell'})`, stroke: g.side === 'bullish' ? buy : sell, strokeOpacity: 0.8, strokeWidth: 1, strokeDasharray: g.inverse ? '1 3' : '5 3' },
         `${g.side} ${g.inverse ? 'IFVG' : 'FVG'}${g.status === 'tested' ? ' · tested' : ''}`,
       ))}
+
+      {show.has('wyckoff') && overlays.reading?.tf === tf && overlays.reading.wyckoff && (() => {
+        const w = overlays.reading.wyckoff;
+        const yt = y(w.top);
+        const yb = y(w.bottom);
+        const x1 = xFree(w.from);
+        if (yt === null || yb === null || x1 === null || x1 >= width) return null;
+        const color = w.kind === 'accumulation' ? 'var(--color-demand)' : 'var(--color-supply)';
+        const mid = (w.top + w.bottom) / 2;
+        return (
+          <g>
+            <rect x={x1} y={yt} width={width - x1} height={Math.max(1, yb - yt)} fill={color} fillOpacity={0.06} stroke={color} strokeOpacity={0.6} strokeDasharray="6 3" />
+            <text x={Math.max(x1, 0) + 6} y={yb - 6} fontSize={11} fontWeight={600} fill={color} {...HALO}>Wyckoff {w.kind} · phase {w.phase}</text>
+            {w.events.map((e) => {
+              const ex = xFree(e.time);
+              const ey = y(e.price);
+              if (ex === null || ey === null) return null;
+              const above = e.price >= mid;
+              return (
+                <g key={`${e.name}${e.time}`}>
+                  <circle cx={ex} cy={ey} r={3.5} fill={color} stroke="var(--color-page)" strokeWidth={1} />
+                  <text x={ex} y={above ? ey - 8 : ey + 16} fontSize={10} fontWeight={600} textAnchor="middle" fill={color} {...HALO}>{e.name}</text>
+                </g>
+              );
+            })}
+          </g>
+        );
+      })()}
+
+      {show.has('patterns') && overlays.reading?.tf === tf && overlays.reading.patterns.map((p) => {
+        const color = BIAS_COLOR[p.bias];
+        const ys = [y(p.upper.p1), y(p.upper.p2), y(p.lower.p2), y(p.lower.p1)];
+        const xu = xFree(p.upper.t1);
+        const xl = xFree(p.lower.t1);
+        const xb = xFree(p.upper.t2);
+        if (ys.some((v) => v === null) || xu === null || xl === null || xb === null || xb < 0 || Math.min(xu, xl) > width) return null;
+        const [u1, u2, l2, l1] = ys as number[];
+        const yLabel = u2;
+        const yTarget = p.target === null ? null : y(p.target);
+        const status = p.status === 'forming' ? 'forming' : p.status === 'broke_up' ? 'broke up' : 'broke down';
+        return (
+          <g key={`${p.kind}${p.from}`}>
+            <polygon points={`${xu},${u1} ${xb},${u2} ${xb},${l2} ${xl},${l1}`} fill={color} fillOpacity={0.08} />
+            <line x1={xu} y1={u1} x2={xb} y2={u2} stroke={color} strokeWidth={2.5} />
+            <line x1={xl} y1={l1} x2={xb} y2={l2} stroke={color} strokeWidth={2.5} />
+            <text x={xb - 4} y={yLabel - 7} fontSize={11} fontWeight={700} textAnchor="end" fill={color} {...HALO}>{p.label} · {status}</text>
+            {yTarget !== null && (
+              <g>
+                <line x1={xb - 80} x2={width} y1={yTarget} y2={yTarget} stroke={color} strokeDasharray="3 3" strokeOpacity={0.8} />
+                <text x={xb - 80} y={yTarget - 3} fontSize={10} fill={color} {...HALO}>{p.label.toLowerCase()} target {fmtPrice(p.target!)}</text>
+              </g>
+            )}
+          </g>
+        );
+      })}
 
       {profile && (
         <g>

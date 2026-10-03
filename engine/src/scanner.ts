@@ -1,6 +1,6 @@
 // The universe of coins setups may arm on (ENGINE_PLAN.md Section 7): USDT
-// perpetuals with enough volume, not excluded, not already pumped too far,
-// with enough 1h volatility, ranked by ATR% x log(volume).
+// perpetuals with enough volume over 24h and right now, not excluded, not
+// already pumped too far, with enough 1h volatility, ranked by ATR% x log(volume).
 import type { EngineConfig } from './config';
 import type { BinancePublic, SymbolInfo, Ticker24h } from './feed/binancePublic';
 import { atr } from './analysis/indicators';
@@ -12,6 +12,8 @@ export interface ScanRow {
   symbol: string;
   quoteVolume: number;
   changePct: number;
+  /** USDT volume of the last `recent_volume_hours` closed hours, scaled to 24h: how much trades now. */
+  recentVolume24h: number;
   atrPct1h: number;
   rank: number;
 }
@@ -42,14 +44,18 @@ export function prefilter(tickers: Ticker24h[], symbols: SymbolInfo[], cfg: Engi
   return { candidates, dropped };
 }
 
-/** ATR% filter and ranking. `atrPct` holds each candidate's 1h ATR(14) as a percent of price. */
-export function rank(candidates: Ticker24h[], atrPct: Map<string, number>, cfg: EngineConfig['scanner'], dropped: Record<string, number>): ScanRow[] {
+/**
+ * Current-volume and ATR% filters, and ranking. `measured` holds each candidate's 1h ATR(14) as a
+ * percent of price and its recent volume scaled to 24h (both from its latest 1h candles).
+ */
+export function rank(candidates: Ticker24h[], measured: Map<string, { atrPct: number; recentVolume24h: number }>, cfg: EngineConfig['scanner'], dropped: Record<string, number>): ScanRow[] {
   const rows: ScanRow[] = [];
   for (const t of candidates) {
-    const a = atrPct.get(t.symbol);
-    if (a === undefined || !Number.isFinite(a)) { dropped.no_candles = (dropped.no_candles ?? 0) + 1; continue; }
-    if (a < cfg.min_atr_pct_1h) { dropped.atr = (dropped.atr ?? 0) + 1; continue; }
-    rows.push({ symbol: t.symbol, quoteVolume: t.quoteVolume, changePct: t.priceChangePercent, atrPct1h: a, rank: a * Math.log10(t.quoteVolume) });
+    const m = measured.get(t.symbol);
+    if (!m || !Number.isFinite(m.atrPct)) { dropped.no_candles = (dropped.no_candles ?? 0) + 1; continue; }
+    if (m.recentVolume24h < cfg.min_recent_quote_volume_24h) { dropped.recent_volume = (dropped.recent_volume ?? 0) + 1; continue; }
+    if (m.atrPct < cfg.min_atr_pct_1h) { dropped.atr = (dropped.atr ?? 0) + 1; continue; }
+    rows.push({ symbol: t.symbol, quoteVolume: t.quoteVolume, changePct: t.priceChangePercent, recentVolume24h: m.recentVolume24h, atrPct1h: m.atrPct, rank: m.atrPct * Math.log10(t.quoteVolume) });
   }
   rows.sort((a, b) => b.rank - a.rank);
   if (rows.length > cfg.max_symbols) dropped.not_top = (dropped.not_top ?? 0) + rows.length - cfg.max_symbols;
@@ -63,17 +69,19 @@ export async function scan(client: BinancePublic, cfg: EngineConfig['scanner'], 
     symbolsCache.at = now;
   }
   const { candidates, dropped } = prefilter(await client.tickers24h(), symbolsCache.list, cfg);
-  const atrPct = new Map<string, number>();
+  const measured = new Map<string, { atrPct: number; recentVolume24h: number }>();
   for (const t of candidates) {
     try {
       const c = await client.klines(t.symbol, '1h', { limit: 30 });
       const closed = c.filter((x) => x.closeTime <= now);
       const a = atr(closed.map((x) => x.high), closed.map((x) => x.low), closed.map((x) => x.close), 14);
       const last = closed[closed.length - 1];
-      if (last) atrPct.set(t.symbol, (a[a.length - 1] / last.close) * 100);
+      const recent = closed.slice(-cfg.recent_volume_hours);
+      const recentVolume24h = recent.length ? (recent.reduce((s, x) => s + x.quoteVolume, 0) * 24) / recent.length : 0;
+      if (last) measured.set(t.symbol, { atrPct: (a[a.length - 1] / last.close) * 100, recentVolume24h });
     } catch {
       // Left out of this scan; counted as no_candles.
     }
   }
-  return { time: now, selected: rank(candidates, atrPct, cfg, dropped), dropped };
+  return { time: now, selected: rank(candidates, measured, cfg, dropped), dropped };
 }

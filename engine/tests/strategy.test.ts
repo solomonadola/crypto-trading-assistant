@@ -297,9 +297,20 @@ describe('scanner', () => {
 
   it('ranks by ATR% x log(volume), dropping low volatility and keeping the top max_symbols', () => {
     const dropped: Record<string, number> = {};
-    const rows = rank([t('AUSDT', 1e9), t('BUSDT', 1e8), t('CUSDT', 1e8)], new Map([['AUSDT', 2.5], ['BUSDT', 4], ['CUSDT', 1]]), cfg.scanner, dropped);
+    const m = (atrPct: number, recentVolume24h = 1e8) => ({ atrPct, recentVolume24h });
+    const rows = rank([t('AUSDT', 1e9), t('BUSDT', 1e8), t('CUSDT', 1e8)], new Map([['AUSDT', m(2.5)], ['BUSDT', m(4)], ['CUSDT', m(1)]]), cfg.scanner, dropped);
     expect(rows.map((r) => r.symbol)).toEqual(['BUSDT', 'AUSDT']);
     expect(dropped).toEqual({ atr: 1 });
+  });
+
+  it('drops coins whose 24h volume came from an earlier spike but trade little now', () => {
+    const dropped: Record<string, number> = {};
+    // Both had 172M over 24h; QUIET trades at a 14M-a-day pace over the last hours, BUSY at 60M.
+    const rows = rank([t('QUIETUSDT', 1.72e8), t('BUSYUSDT', 1.72e8)],
+      new Map([['QUIETUSDT', { atrPct: 3, recentVolume24h: 1.4e7 }], ['BUSYUSDT', { atrPct: 3, recentVolume24h: 6e7 }]]), cfg.scanner, dropped);
+    expect(rows.map((r) => r.symbol)).toEqual(['BUSYUSDT']);
+    expect(rows[0].recentVolume24h).toBe(6e7);
+    expect(dropped).toEqual({ recent_volume: 1 });
   });
 
   it('strips 1000/1M multipliers for exclusion checks', () => {
