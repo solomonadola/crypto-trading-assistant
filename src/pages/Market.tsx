@@ -109,7 +109,7 @@ export function Market({ go }: { go: (page: string, symbol?: string) => void }) 
                   <SideBadge side={a.direction} />
                 </div>
                 <div className="mt-2 flex flex-wrap gap-1">
-                  {a.factors.map((f) => <Badge key={f.name} tone="accent" title={f.detail}>{words(f.name)}</Badge>)}
+                  {a.factors.map((f) => <Badge key={`${f.name}${f.level}`} tone="accent" title={f.detail}>{words(f.name)}</Badge>)}
                 </div>
                 <p className="mt-2 text-xs text-ink-3 tabular">
                   area {price(a.areaLow)} – {price(a.areaHigh)} · armed {hhmm(a.armedAt)} · expires in {duration(a.expiresAt - now)}

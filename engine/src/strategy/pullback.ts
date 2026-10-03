@@ -6,7 +6,7 @@ import { fibLevel, type Pivot } from '../analysis/indicators';
 import type { Zone } from '../analysis/zones';
 import { lastOf, sign, type Context } from './context';
 
-export type FactorName = 'zone' | 'order_block' | 'ema' | 'fib' | 'vwap' | 'breakout_level';
+export type FactorName = 'zone' | 'order_block' | 'ema' | 'fib' | 'vwap' | 'breakout_level' | '4h_zone' | '4h_fvg' | '4h_order_block';
 
 export interface Factor {
   name: FactorName;

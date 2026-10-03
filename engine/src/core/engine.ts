@@ -10,7 +10,7 @@
 // pullback setup). The 1m candle that ends at a 15m close happened before
 // that close, so it is settled first.
 import type {
-  AccountSummary, Candle, ClosedTradeView, Direction, ShadowResult, SignalRecord, TradeEvent, TradeEventType, TradeIdea,
+  AccountSummary, Candle, ClosedTradeView, Direction, ShadowResult, SignalRecord, Timeframe, TradeEvent, TradeEventType, TradeIdea,
 } from '../../../shared/types';
 import { TIMEFRAME_MS } from '../../../shared/types';
 import type { EngineConfig } from '../config';
@@ -27,9 +27,10 @@ import { fee, grossPnl, liquidationPrice, marketFill, roundQty, stopFill, target
 import { tradeIdea } from '../analysis/levels';
 import { sessionSweep } from '../strategy/sessionSweep';
 import { armZoneSweep, confirmZoneSweep, zoneSweepStillValid, type ZoneSweepConfirmation } from '../strategy/zoneSweep';
+import { armHtfPoi, chochOn, htfPoiStillValid } from '../strategy/htfPoi';
 import { liquidityPlan } from '../strategy/smc';
 import { liquidityLevels, type LiquidityLevel } from '../analysis/liquidity';
-import { costsFor, roundTripPct, speedSettings, type SpeedGroup } from '../speed';
+import { costsFor, netRewardRisk, roundTripPct, speedSettings, type SpeedGroup } from '../speed';
 
 const DIRECTIONS: Direction[] = ['long', 'short'];
 /** Entry-window blocks that end an armed setup; a funding pause only delays it. */
@@ -101,6 +102,8 @@ export class Engine {
   private readonly portfolio: Portfolio;
   private readonly market: MarketBook;
   private readonly armed = new Map<string, Armed>();
+  /** Model 4's armed setups, by symbol|direction: they confirm on 5m or 15m closes. */
+  private readonly htfArmed = new Map<string, Armed>();
   /** Signals that passed every check at this 15m close, waiting to be ranked. */
   private clean: Candidate[] = [];
   /** Liquidity levels a sweep signal came from, with when: one signal per level and direction. */
@@ -143,10 +146,12 @@ export class Engine {
   /** Coins setups may arm on (the scanner's shortlist). Armed setups on coins that leave it expire. */
   setUniverse(symbols: string[]): void {
     this.universe = new Set(symbols);
-    for (const [key, a] of this.armed) {
-      if (!this.universe.has(a.symbol)) {
-        this.armed.delete(key);
-        this.signal(a.symbol, a.direction, 'expired', 'left_universe', { armedId: a.id });
+    for (const [map, setup] of [[this.armed, this.cfg.models.zone_sweep ? 'zone_sweep' : 'pullback'], [this.htfArmed, 'htf_poi']] as const) {
+      for (const [key, a] of map) {
+        if (!this.universe.has(a.symbol)) {
+          map.delete(key);
+          this.signal(a.symbol, a.direction, 'expired', 'left_universe', { armedId: a.id }, setup);
+        }
       }
     }
   }
@@ -184,7 +189,7 @@ export class Engine {
   }
 
   armedSetups(): Armed[] {
-    return [...this.armed.values()];
+    return [...this.armed.values(), ...this.htfArmed.values()];
   }
 
   /** Key levels and a suggested plan for a coin, as of its last 15m close. Null without enough history. */
@@ -368,6 +373,14 @@ export class Engine {
       if (inUniverse) {
         if (this.cfg.models.pullback || this.cfg.models.zone_sweep) out.push(...this.evaluate(ctx));
         out.push(...this.evaluateSweep(ctx));
+        if (this.cfg.models.htf_poi) this.armHtf(ctx);
+      }
+    }
+    // Model 4 confirms on the first 5m or 15m CHoCH (larger timeframes come first in a batch).
+    if (this.cfg.models.htf_poi && this.htfArmed.size) {
+      const done = new Set<string>();
+      for (const c of candles) {
+        if (this.universe.has(c.symbol) && (this.cfg.htf_poi.confirm_timeframes as Timeframe[]).includes(c.tf)) out.push(...this.confirmHtf(c, done));
       }
     }
     // Clean signals from this close, best first: highest reward:risk, then score (Section 18.1).
@@ -590,6 +603,95 @@ export class Engine {
     return out;
   }
 
+  /** Model 4's entry window: the session rules, without the killzones unless htf_poi.killzones_only. */
+  private htfBlock(t: number): string | null {
+    const block = this.sessions.entryBlock(t);
+    return block === 'outside_killzone' && !this.cfg.htf_poi.killzones_only ? null : block;
+  }
+
+  /** Model 4 at a 15m close: expire armed setups that no longer stand, arm new ones at 4h points of interest. */
+  private armHtf(ctx: Context): void {
+    const { symbol, t } = ctx;
+    const block = this.htfBlock(t);
+    const windowClosed = block !== null && WINDOW_CLOSED.has(block);
+    const newListing = ctx.h1.candles.length < this.cfg.speed.min_history_days * 24;
+    const busy = this.portfolio.positions().some((p) => p.symbol === symbol) || this.portfolio.pendingEntries().some((e) => e.symbol === symbol);
+    for (const dir of DIRECTIONS) {
+      const key = `${symbol}|${dir}`;
+      const armed = this.htfArmed.get(key);
+      if (armed) {
+        const why = htfPoiStillValid(ctx, armed, ctx.price, windowClosed);
+        if (why) {
+          this.htfArmed.delete(key);
+          this.signal(symbol, dir, 'expired', why, { armedId: armed.id, price: ctx.price }, 'htf_poi');
+        }
+        continue;
+      }
+      if (windowClosed || busy || newListing) continue;
+      const fresh = armHtfPoi(ctx, dir);
+      if (!fresh) continue;
+      this.htfArmed.set(key, fresh);
+      this.signal(symbol, dir, 'armed', null, {
+        armedId: fresh.id, model: 'htf_poi', price: fresh.price, factors: fresh.factors,
+        areaLow: fresh.areaLow, areaHigh: fresh.areaHigh, expiresAt: fresh.expiresAt, trendState: ctx.analysis[dir].state,
+      }, 'htf_poi');
+    }
+  }
+
+  /** Model 4 at a 5m or 15m close: a CHoCH on that timeframe confirms an armed setup (once per symbol and close). */
+  private confirmHtf(c: Candle, done: Set<string>): TradeEvent[] {
+    const out: TradeEvent[] = [];
+    for (const dir of DIRECTIONS) {
+      const key = `${c.symbol}|${dir}`;
+      const a = this.htfArmed.get(key);
+      if (!a || done.has(key) || c.closeTime <= a.armedAt) continue;
+      const candles = this.market.recent(c.symbol, c.tf);
+      if (candles[candles.length - 1]?.openTime !== c.openTime) continue;
+      const swing = chochOn(candles, this.cfg.trend.swing_lookback, dir);
+      if (!swing) continue;
+      // The analysis as of the last 15m close, priced and timed at this close.
+      const last15 = this.market.recent(c.symbol, this.cfg.timeframes.trigger, 1)[0];
+      const base = last15 ? buildContext(this.market, c.symbol, last15.closeTime, this.cfg, this.funding.get(c.symbol) ?? null) : null;
+      if (!base) continue;
+      done.add(key);
+      this.htfArmed.delete(key);
+      out.push(...this.checkHtf({ ...base, t: c.closeTime, price: c.close }, a, swing.price, c.tf));
+    }
+    return out;
+  }
+
+  /** A confirmed Model 4 setup: stop beyond the extreme since arming, take-profit at opposite liquidity, then the shared rules. */
+  private checkHtf(ctx: Context, a: Armed, chochLevel: number, chochTf: Timeframe): TradeEvent[] {
+    const long = a.direction === 'long';
+    // The finest confirmation timeframe, from the arming candle's open on.
+    const fine = (this.cfg.htf_poi.confirm_timeframes as Timeframe[]).includes('5m') ? '5m' : this.cfg.timeframes.trigger;
+    const armingOpen = a.armedAt - TIMEFRAME_MS[this.cfg.timeframes.trigger];
+    const since = this.market.recent(ctx.symbol, fine).filter((x) => x.openTime >= armingOpen && x.closeTime <= ctx.t);
+    if (!since.length) return [];
+    const extreme = long ? Math.min(...since.map((x) => x.low)) : Math.max(...since.map((x) => x.high));
+    const levels = liquidityLevels(ctx);
+    const planned = this.zonePlan(ctx, a, extreme, levels);
+    const detail = {
+      armedAt: a.armedAt, factors: a.factors, poi: { low: a.areaLow, high: a.areaHigh }, chochLevel, chochTf, extreme,
+      target: planned && { name: planned.target.name, price: planned.target.price },
+    };
+    if (!planned) {
+      this.signals.push({ time: this.clock, symbol: ctx.symbol, setup: 'htf_poi', direction: a.direction, status: 'filtered', reason: 'no_target', payload: { armedId: a.id, model: 'htf_poi', ...detail, failures: ['no_target'], speed: ctx.speed ?? 'normal' } });
+      return [];
+    }
+    const block = this.htfBlock(ctx.t);
+    const fundingCheck = funding(ctx, a.direction);
+    const failures = [
+      ...(block ? [`session_${block}`] : []),
+      ...this.planFailures(ctx, planned.plan),
+      ...(fundingCheck.pass ? [] : ['filter_funding']),
+    ];
+    return this.submit({
+      ctx, id: a.id, direction: a.direction, setup: 'htf_poi', plan: planned.plan, score: a.factors.length, failures, level: chochLevel,
+      payload: { ...detail, filters: [fundingCheck] },
+    });
+  }
+
   /** A confirmed pullback: session, filters, stop, reward/risk, score, then risk. The first failure is the reason. */
   private check(ctx: Context, a: Armed, conf: Confirmation, block: string | null): TradeEvent[] {
     const cfg = this.cfg;
@@ -645,7 +747,8 @@ export class Engine {
     const cfg = this.cfg;
     return [
       ...(plan.stopDistancePct > 0 && plan.stopDistancePct <= cfg.exits.max_stop_pct ? [] : ['stop_too_wide']),
-      ...(plan.rewardRisk >= cfg.exits.min_rr ? [] : ['rr_too_low']),
+      // At least min_rr after the round-trip costs, not before them.
+      ...(netRewardRisk(plan.entry, plan.stop, plan.target, roundTripPct(costsFor(cfg, ctx.speed))) >= cfg.exits.min_rr ? [] : ['rr_too_low']),
       ...(Math.abs(plan.target - plan.entry) / plan.entry * 100 >= cfg.exits.min_target_pct ? [] : ['profit_too_small']),
       // Fees and slippage would eat too much of the money at risk: the stop is too tight for the costs.
       ...(plan.stopDistancePct > 0 && (roundTripPct(costsFor(cfg, ctx.speed)) / plan.stopDistancePct) * 100 > cfg.allocation.max_fee_drag_pct ? ['fees_too_high'] : []),
@@ -685,7 +788,8 @@ export class Engine {
       this.shadows.push({
         armedId: id, working: false,
         signalTime: ctx.t, symbol, direction, signalStatus: status, signalReason: failures[0] ?? null, plan,
-        sessionClose: cfg.sessions.exit_at_session_end ? owner?.closeTime ?? ctx.t + DAY : ctx.t + speedSettings(cfg, ctx.speed).max_hold_hours * 3_600_000,
+        sessionClose: cfg.sessions.exit_at_session_end ? owner?.closeTime ?? ctx.t + DAY
+          : ctx.t + Math.min(speedSettings(cfg, ctx.speed).max_hold_hours, setup === 'htf_poi' ? cfg.htf_poi.max_hold_hours : Infinity) * 3_600_000,
         speed: ctx.speed ?? 'normal', setup,
       });
     }

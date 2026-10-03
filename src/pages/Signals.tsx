@@ -285,7 +285,7 @@ function SignalDetail({ s }: { s: SignalRecord }) {
     <div className="grid gap-4 text-sm lg:grid-cols-3">
       <div className="space-y-2">
         <h3 className="text-xs uppercase tracking-wider text-ink-3">Setup</h3>
-        <p className="flex flex-wrap gap-1">{(p.factors ?? []).map((f: { name: string; detail: string }) => <Badge key={f.name} tone="accent" title={f.detail}>{words(f.name)}</Badge>)}</p>
+        <p className="flex flex-wrap gap-1">{(p.factors ?? []).map((f: { name: string; detail: string; level?: number }) => <Badge key={`${f.name}${f.level ?? ''}`} tone="accent" title={f.detail}>{words(f.name)}</Badge>)}</p>
         {p.trendState && <p>trend state <b>{p.trendState}</b></p>}
         {p.session !== undefined && <p>session <SessionBadge name={p.session} /></p>}
         {p.confirmation && <p>confirmed through {price(p.confirmation.level)} with {(p.confirmation.confirmations ?? []).map(words).join(', ') || 'no extra confirmation'}{p.confirmation.liquiditySweep ? ', after a liquidity sweep' : ''}</p>}

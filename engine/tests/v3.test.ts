@@ -91,6 +91,12 @@ describe('v3 trade management', () => {
     expect(manage({ ctx: ctx(101, T0 + 24 * 3_600_000), pos: pos({ speed: 'wild' }), peakPct: 1, candlesSinceEntry: 96 })).toEqual([{ type: 'close', reason: 'max_hold' }]);
   });
 
+  it('closes Model 4 trades at its own, shorter max hold (8 h)', () => {
+    expect(manage({ ctx: ctx(101, T0 + 8 * 3_600_000), pos: pos({ setup: 'htf_poi' }), peakPct: 1, candlesSinceEntry: 32 })).toEqual([{ type: 'close', reason: 'max_hold' }]);
+    expect(manage({ ctx: ctx(101, T0 + 7 * 3_600_000), pos: pos({ setup: 'htf_poi' }), peakPct: 1, candlesSinceEntry: 28 })).toEqual([]);
+    expect(manage({ ctx: ctx(101, T0 + 8 * 3_600_000), pos: pos({ setup: 'zone_sweep' }), peakPct: 1, candlesSinceEntry: 32 })).toEqual([]);
+  });
+
   it('break-even plus costs after a close through a swing high formed since the entry; once only', () => {
     const at = T0 + 3 * 3_600_000;
     // Index 34 opened after the entry (index 30 is the entry candle): a new swing high at 101; the last close 101.5 breaks it.
