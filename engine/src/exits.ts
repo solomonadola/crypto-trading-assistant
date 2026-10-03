@@ -88,7 +88,9 @@ export function manage(i: ManageInput): ManageAction[] {
 function manageV3({ ctx, pos }: ManageInput): ManageAction[] {
   const cfg = ctx.config;
   const s = sign(pos.side);
-  const maxHold = cfg.speed.groups[pos.speed ?? 'normal'].max_hold_hours * 3_600_000;
+  // Model 4 trades are held for hours: its own max hold when shorter than the speed group's.
+  const maxHoldHours = Math.min(cfg.speed.groups[pos.speed ?? 'normal'].max_hold_hours, pos.setup === 'htf_poi' ? cfg.htf_poi.max_hold_hours : Infinity);
+  const maxHold = maxHoldHours * 3_600_000;
   if (ctx.t - pos.openedAt >= maxHold) return [{ type: 'close', reason: 'max_hold' }];
   // A swing formed after the entry, closed through: structure broke in our favour.
   const m = ctx.m15;

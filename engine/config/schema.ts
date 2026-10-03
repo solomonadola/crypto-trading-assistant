@@ -91,7 +91,7 @@ export const configSchema = z.object({
   }).strict(),
 
   /** Which setups the engine trades (Section 18): the pullback (Model 1 once upgraded) and the session sweep (Model 3). */
-  models: z.object({ pullback: z.boolean(), zone_sweep: z.boolean(), session_sweep: z.boolean() }).strict()
+  models: z.object({ pullback: z.boolean(), zone_sweep: z.boolean(), session_sweep: z.boolean(), htf_poi: z.boolean() }).strict()
     .refine((m) => !(m.pullback && m.zone_sweep), 'pullback and zone_sweep share the armed setups: switch on one of them'),
 
   /** Coins grouped by how fast they move: 1h ATR as a percent of price (Section 18.2). */
@@ -137,6 +137,16 @@ export const configSchema = z.object({
   }).strict(),
 
   supertrend: z.object({ atr_period: posInt, multiplier: positive }).strict(),
+
+  /** Model 4: 4h point of interest + 5m/15m CHoCH. */
+  htf_poi: z.object({
+    confirm_timeframes: z.array(z.enum(['5m', '15m'])).min(1),
+    armed_expiry_hours: positive,
+    max_hold_hours: positive,
+    killzones_only: z.boolean(),
+    zone_lookback_4h: posInt,
+    zone_max_width_pct: pct,
+  }).strict(),
 
   pullback: z.object({
     ema_levels: z.array(posInt).min(1),
@@ -229,6 +239,8 @@ export const configSchema = z.object({
   }).strict(),
 
   risk: z.object({
+    /** New entries per UTC day across all coins and models, manual ones included. */
+    max_trades_per_day: posInt,
     max_trades_per_symbol_per_day: posInt,
     daily_loss_limit_pct: pct,
     max_drawdown_kill_pct: pct,
@@ -250,6 +262,9 @@ export const configSchema = z.object({
     if (c.breakout.rsi_min >= c.breakout.rsi_max) issue(['breakout', 'rsi_min'], 'must be below rsi_max');
     if (c.trend.ema_fast >= c.trend.ema_slow) issue(['trend', 'ema_fast'], 'must be below ema_slow');
     if (!c.feed.timeframes.includes(c.timeframes.exits)) issue(['feed', 'timeframes'], `the exits timeframe (${c.timeframes.exits}) must be fed: stops and session exits run on it`);
+    for (const tf of c.htf_poi.confirm_timeframes) {
+      if (!c.feed.timeframes.includes(tf)) issue(['htf_poi', 'confirm_timeframes'], `${tf} must be fed (feed.timeframes) to confirm Model 4 on it`);
+    }
     c.exits.ladder.forEach((step, i) => {
       if (step.lock_pct >= step.trigger_pct) issue(['exits', 'ladder', i, 'lock_pct'], 'must be below trigger_pct');
       const prev = c.exits.ladder[i - 1];

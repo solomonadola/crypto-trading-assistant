@@ -82,6 +82,16 @@ models:
   pullback: false         # the classic zone pullback (Section 8.4); off: Model 1 replaces it
   zone_sweep: true        # Model 1: sweep + CHoCH at a zone or order block (Section 18.5)
   session_sweep: true     # Model 3: liquidity sweep in a killzone (Section 18.4)
+  htf_poi: true           # Model 4: 4h zone / FVG / order block + 5m or 15m CHoCH (htf_poi below)
+
+# Model 4: trade from 4h points of interest, confirmed on a lower timeframe.
+htf_poi:
+  confirm_timeframes: [5m, 15m]  # the first CHoCH on either confirms
+  armed_expiry_hours: 12         # an armed setup with no CHoCH by then expires
+  max_hold_hours: 8              # held for hours, not days: closed at the market after this
+  killzones_only: false          # true: entries only inside the killzones, like Models 1 and 3
+  zone_lookback_4h: 180          # 4h candles (30 days) to find supply and demand zones in
+  zone_max_width_pct: 8.0        # 4h zones are wider than 1h ones
 
 # Coins grouped by speed: 1h ATR(14) as a percent of price (ENGINE_PLAN.md Section 18.2).
 speed:
@@ -220,6 +230,7 @@ exits:
     stagnation: { rvol_max: 0.5, candles: 6, max_peak_pct: 1.0 }
 
 risk:
+  max_trades_per_day: 5          # all coins and models together, manual trades included (UTC day)
   max_trades_per_symbol_per_day: 2
   daily_loss_limit_pct: 3.0
   max_drawdown_kill_pct: 15.0

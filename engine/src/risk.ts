@@ -71,6 +71,7 @@ export function decideEntry(i: RiskInput): RiskDecision {
   if (dayLoss >= (c.risk.daily_loss_limit_pct / 100) * i.dayStartEquity) {
     return no('risk_daily_loss_limit', { dayLoss: round(dayLoss), limitPct: c.risk.daily_loss_limit_pct });
   }
+  if (pf.entriesOnDay(i.t) >= c.risk.max_trades_per_day) return no('risk_max_trades_per_day', { max: c.risk.max_trades_per_day });
   const held = (x: { symbol: string }) => x.symbol === i.symbol;
   if (positions.some(held) || pending.some(held)) return no('risk_already_in_symbol');
   if (positions.length + pending.length >= a.max_open_trades) return no('risk_max_open_trades', { open: positions.length + pending.length, max: a.max_open_trades });

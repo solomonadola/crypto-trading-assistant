@@ -130,6 +130,7 @@ export class Portfolio {
   /** Net result of trades closed per UTC day. */
   private readonly dayPnl = new Map<number, number>();
   private readonly entriesPerSymbolDay = new Map<string, number>();
+  private readonly entriesPerDay = new Map<number, number>();
   private readonly lastLossAt = new Map<string, number>();
   /** Consecutive losing trades, and wins since the size cut began. */
   lossStreak = 0;
@@ -170,6 +171,7 @@ export class Portfolio {
         });
         const key = `${e.symbol}|${day(e.time)}`;
         this.entriesPerSymbolDay.set(key, (this.entriesPerSymbolDay.get(key) ?? 0) + 1);
+        this.entriesPerDay.set(day(e.time), (this.entriesPerDay.get(day(e.time)) ?? 0) + 1);
         return;
       }
       case 'stop_moved': {
@@ -271,6 +273,11 @@ export class Portfolio {
 
   realizedOnDay(t: number): number {
     return this.dayPnl.get(day(t)) ?? 0;
+  }
+
+  /** Positions opened on the UTC day of `t`, all coins together. */
+  entriesOnDay(t: number): number {
+    return this.entriesPerDay.get(day(t)) ?? 0;
   }
 
   entriesToday(symbol: string, t: number): number {

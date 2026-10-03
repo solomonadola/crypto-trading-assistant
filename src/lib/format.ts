@@ -43,7 +43,7 @@ export const words = (s: string | null | undefined) =>
 export const SESSION_LABEL: Record<string, string> = { asian: 'Asian', london: 'London', newyork: 'New York' };
 
 /** The engine's setups (ENGINE_PLAN.md Section 18). */
-export const MODEL_LABEL: Record<string, string> = { zone_sweep: 'Zone sweep (M1)', session_sweep: 'Session sweep (M3)', pullback: 'Pullback (classic)', manual: 'Manual' };
+export const MODEL_LABEL: Record<string, string> = { zone_sweep: 'Zone sweep (M1)', session_sweep: 'Session sweep (M3)', pullback: 'Pullback (classic)', htf_poi: '4h POI + CHoCH (M4)', manual: 'Manual' };
 
 /** Liquidity levels where stops sit (Section 18.3). */
 export const LIQUIDITY_LABEL: Record<string, string> = {

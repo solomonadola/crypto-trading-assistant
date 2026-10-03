@@ -5,6 +5,7 @@ import type { Candle, Direction } from '../../../shared/types';
 import type { LiquidityLevel } from '../analysis/liquidity';
 import type { Pivot } from '../analysis/indicators';
 import { lastOf, sign, type Context } from './context';
+import { costsFor, netRewardRisk, roundTripPct } from '../speed';
 import type { TradePlan } from './pullback';
 
 /** The current 15m candle closes in `dir`, is at least 1 ATR(15m) long, and its body is at least half its range. */
@@ -19,8 +20,9 @@ export function isDisplacement(ctx: Context, dir: Direction): boolean {
 
 /**
  * The plan for an entry at `entry` with its stop at `stop`: the one take-profit
- * is the nearest intact opposite liquidity level at least min_rr away, else the
- * nearest one (the engine then records it as skipped for its reward:risk).
+ * is the nearest intact opposite liquidity level at least min_rr away after the
+ * round-trip costs, else the nearest one (the engine then records it as skipped
+ * for its reward:risk).
  * Null when no opposite level is ahead or the stop is on the wrong side.
  */
 export function liquidityPlan(ctx: Context, dir: Direction, entry: number, stop: number, levels: LiquidityLevel[]): { plan: TradePlan; target: LiquidityLevel } | null {
@@ -30,7 +32,8 @@ export function liquidityPlan(ctx: Context, dir: Direction, entry: number, stop:
   const ahead = levels
     .filter((l) => l.side === (dir === 'long' ? 'buy' : 'sell') && l.brokenAt === null && s * (l.price - entry) > 0)
     .sort((a, b) => s * (a.price - b.price));
-  const target = ahead.find((l) => (s * (l.price - entry)) / risk >= ctx.config.exits.min_rr) ?? ahead[0];
+  const costPct = roundTripPct(costsFor(ctx.config, ctx.speed));
+  const target = ahead.find((l) => netRewardRisk(entry, stop, l.price, costPct) >= ctx.config.exits.min_rr) ?? ahead[0];
   if (!target) return null;
   return {
     target,

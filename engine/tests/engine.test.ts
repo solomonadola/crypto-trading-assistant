@@ -225,6 +225,13 @@ describe('manual trades', () => {
     expect(again.positions().map((p) => [p.symbol, p.setup, p.note])).toEqual([['BTCUSDT', 'manual', 'Scalp: EMA20 pullback']]);
   });
 
+  it('counts against the daily limit on new trades, across coins', () => {
+    const e = engine((c) => { c.risk.max_trades_per_day = 1; });
+    e.restore([], at);
+    open(e);
+    expect(() => open(e, { symbol: 'ETHUSDT', time: at + 50_000 })).toThrow(/max trades per day/);
+  });
+
   it('refuses a stop or target on the wrong side, a coin already held, and an engine not started', () => {
     const e = engine();
     e.restore([], at);
