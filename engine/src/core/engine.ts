@@ -27,7 +27,7 @@ import { fee, grossPnl, liquidationPrice, marketFill, roundQty, stopFill, target
 import { tradeIdea } from '../analysis/levels';
 import { sessionSweep } from '../strategy/sessionSweep';
 import { armZoneSweep, confirmZoneSweep, zoneSweepStillValid, type ZoneSweepConfirmation } from '../strategy/zoneSweep';
-import { armHtfPoi, chochOn, htfPoiStillValid } from '../strategy/htfPoi';
+import { armHtfPoi, chochOn, htfPointsOfInterest, htfPoiStillValid, type HtfPoi } from '../strategy/htfPoi';
 import { liquidityPlan } from '../strategy/smc';
 import { liquidityLevels, type LiquidityLevel } from '../analysis/liquidity';
 import { costsFor, netRewardRisk, roundTripPct, speedSettings, type SpeedGroup } from '../speed';
@@ -186,6 +186,13 @@ export class Engine {
 
   universeSymbols(): string[] {
     return [...this.universe];
+  }
+
+  /** Model 4's 4h points of interest for a coin, as of its last 15m close: where it would arm, both ways. */
+  htfPoints(symbol: string): { long: HtfPoi[]; short: HtfPoi[] } | null {
+    const last15 = this.market.recent(symbol, this.cfg.timeframes.trigger, 1)[0];
+    const ctx = last15 ? buildContext(this.market, symbol, last15.closeTime, this.cfg, this.funding.get(symbol) ?? null) : null;
+    return ctx ? { long: htfPointsOfInterest(ctx, 'long'), short: htfPointsOfInterest(ctx, 'short') } : null;
   }
 
   armedSetups(): Armed[] {

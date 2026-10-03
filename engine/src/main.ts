@@ -567,6 +567,20 @@ app.get('/api/market', (_req, res) => {
     };
   }));
 });
+// Model 4's 4h points of interest, for the chart: the nearest few on each side of the price.
+app.get('/api/htf/:symbol', (req, res) => {
+  const symbol = req.params.symbol.toUpperCase();
+  const points = engine.htfPoints(symbol);
+  const price = store.latest(symbol, '1m', 1)[0]?.close ?? null;
+  if (!points || price === null) {
+    res.json({ long: [], short: [] });
+    return;
+  }
+  const near = (list: typeof points.long) => list
+    .map((p) => ({ ...p, distance: price > p.high ? price - p.high : price < p.low ? p.low - price : 0 }))
+    .sort((a, b) => a.distance - b.distance).slice(0, 3);
+  res.json({ long: near(points.long), short: near(points.short) });
+});
 app.get('/api/ideas/:symbol', (req, res) => {
   const idea = ideaFor(req.params.symbol.toUpperCase());
   if (!idea) {
