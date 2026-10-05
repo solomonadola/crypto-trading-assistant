@@ -30,8 +30,8 @@ describe('speed groups', () => {
 });
 
 describe('risk sizing', () => {
-  const base = (over: Partial<RiskInput> = {}): RiskInput => ({
-    config: cfg, t: u('2026-07-15T10:00Z'), symbol: 'SOLUSDT', side: 'long', entry: 100, stop: 96,
+  const base = (over: Partial<RiskInput> = {}, config = cfg): RiskInput => ({
+    config, t: u('2026-07-15T10:00Z'), symbol: 'SOLUSDT', side: 'long', entry: 100, stop: 96,
     portfolio: new Portfolio(1000), priceOf: () => 100, dayStartEquity: 1000, lastHourVolume: null, rules: null, score: 5, ...over,
   });
 
@@ -44,15 +44,17 @@ describe('risk sizing', () => {
     expect(decideEntry(base({ speed: 'wild' })).notional).toBeCloseTo((5 / 4.4) * 100, 6);
   });
 
-  it('at most two wild trades open', () => {
+  it('at most two wild trades open when the wild group sets max_open: 2', () => {
+    const capped = { ...cfg, speed: { ...cfg.speed, groups: { ...cfg.speed.groups, wild: { ...cfg.speed.groups.wild, max_open: 2 } } } };
     const p = new Portfolio(1000);
     const fill = (id: string, symbol: string): TradeEvent =>
       ev(u('2026-07-15T09:00Z'), 'order_filled', id, symbol, { role: 'entry', side: 'long', qty: 0.1, price: 100, stop: 96, session: null, speed: 'wild' } satisfies EntryFill);
     p.apply(fill('a', 'PEPEUSDT'));
-    expect(decideEntry(base({ portfolio: p, speed: 'wild' })).ok).toBe(true);
+    expect(decideEntry(base({ portfolio: p, speed: 'wild' }, capped)).ok).toBe(true);
     p.apply(fill('b', 'WIFUSDT'));
-    expect(decideEntry(base({ portfolio: p, speed: 'wild' }))).toMatchObject({ ok: false, reason: 'risk_max_speed_group' });
-    expect(decideEntry(base({ portfolio: p, speed: 'normal' })).ok).toBe(true);   // other groups are not limited
+    expect(decideEntry(base({ portfolio: p, speed: 'wild' }, capped))).toMatchObject({ ok: false, reason: 'risk_max_speed_group' });
+    expect(decideEntry(base({ portfolio: p, speed: 'normal' }, capped)).ok).toBe(true);   // other groups are not limited
+    expect(decideEntry(base({ portfolio: p, speed: 'wild' })).ok).toBe(true);             // the shipped config sets no cap
   });
 });
 

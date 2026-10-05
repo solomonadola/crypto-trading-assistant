@@ -71,10 +71,10 @@ export function decideEntry(i: RiskInput): RiskDecision {
   if (dayLoss >= (c.risk.daily_loss_limit_pct / 100) * i.dayStartEquity) {
     return no('risk_daily_loss_limit', { dayLoss: round(dayLoss), limitPct: c.risk.daily_loss_limit_pct });
   }
-  if (pf.entriesOnDay(i.t) >= c.risk.max_trades_per_day) return no('risk_max_trades_per_day', { max: c.risk.max_trades_per_day });
+  if (c.risk.max_trades_per_day !== null && pf.entriesOnDay(i.t) >= c.risk.max_trades_per_day) return no('risk_max_trades_per_day', { max: c.risk.max_trades_per_day });
   const held = (x: { symbol: string }) => x.symbol === i.symbol;
   if (positions.some(held) || pending.some(held)) return no('risk_already_in_symbol');
-  if (positions.length + pending.length >= a.max_open_trades) return no('risk_max_open_trades', { open: positions.length + pending.length, max: a.max_open_trades });
+  if (a.max_open_trades !== null && positions.length + pending.length >= a.max_open_trades) return no('risk_max_open_trades', { open: positions.length + pending.length, max: a.max_open_trades });
   if (pf.entriesToday(i.symbol, i.t) >= c.risk.max_trades_per_symbol_per_day) return no('risk_max_trades_today', { max: c.risk.max_trades_per_symbol_per_day });
   const lastLoss = pf.lastLoss(i.symbol);
   if (lastLoss !== null && i.t - lastLoss < c.risk.cooldown_after_loss_min * 60_000) {
@@ -113,7 +113,7 @@ export function decideEntry(i: RiskInput): RiskDecision {
   if (notional > room) { notional = Math.max(0, room); caps.push('exposure'); }
 
   const openRisk = positions.reduce((s, p) => s + riskAtStop(p), 0) + pending.reduce((s, p) => s + p.notional * (Math.abs(p.refPrice - p.stop) / p.refPrice), 0);
-  const riskRoom = (a.max_open_risk_pct / 100) * equity - openRisk;
+  const riskRoom = a.max_open_risk_pct === null ? Infinity : (a.max_open_risk_pct / 100) * equity - openRisk;
   if ((notional * lossPct) / 100 > riskRoom) { notional = Math.max(0, (riskRoom / lossPct) * 100); caps.push('open_risk'); }
 
   if (i.lastHourVolume !== null) {
