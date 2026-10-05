@@ -48,6 +48,14 @@ export class EventLog {
     }))();
   }
 
+  /** Puts events from a backup back with their own ids, so the log matches the backup exactly; ids already here are kept. */
+  restore(events: TradeEvent[]): number {
+    const insert = this.db.prepare(`INSERT OR IGNORE INTO trade_events (id, time, position_id, symbol, type, payload, engine_version, config_hash)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
+    return this.db.transaction(() => events.reduce((n, e) => n + insert.run(
+      e.id, e.time, e.positionId, e.symbol, e.type, JSON.stringify(e.payload), e.engineVersion, e.configHash).changes, 0))();
+  }
+
   /** Events with id greater than `afterId`, oldest first. */
   after(afterId = 0, limit = 10_000): TradeEvent[] {
     return (this.selectAfter.all(afterId, limit) as Row[]).map(fromRow);
