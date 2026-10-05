@@ -453,8 +453,27 @@ app.post('/api/positions/open', async (req, res) => {
     res.status(err instanceof CommandError ? 400 : 500).json({ ok: false, error: message(err), mark });
   }
 });
-app.post('/api/positions/:id/close', control((req) => ({ type: 'close', positionId: String(req.params.id) })));
-app.post('/api/control/kill', control(() => ({ type: 'kill', reason: 'manual kill' })));
+/** Binance's mark prices of the open positions' coins; empty when Binance cannot be reached (closes then wait for the next 1m candle). */
+async function markPrices(): Promise<Record<string, number>> {
+  const held = new Set(engine.positions().map((p) => p.symbol));
+  if (!held.size) return {};
+  try {
+    return Object.fromEntries((await client.premiumIndex()).filter((x) => held.has(x.symbol) && x.markPrice > 0).map((x) => [x.symbol, x.markPrice]));
+  } catch (err) {
+    console.log(`[control] mark prices unavailable, closing at the next 1m candle instead: ${message(err)}`);
+    return {};
+  }
+}
+// Manual closes fill at once at the mark price (they used to wait for the next 1m candle, forever while the feed was down).
+app.post('/api/positions/:id/close', async (req, res) => {
+  const marks = await markPrices();
+  const symbol = engine.positions().find((p) => p.id === String(req.params.id))?.symbol;
+  control(() => ({ type: 'close', positionId: String(req.params.id), price: symbol ? marks[symbol] : undefined, time: Date.now() }))(req, res);
+});
+app.post('/api/control/kill', async (req, res) => {
+  const prices = await markPrices();
+  control(() => ({ type: 'kill', reason: 'manual kill', prices, time: Date.now() }))(req, res);
+});
 app.post('/api/control/pause', control(() => ({ type: 'pause', reason: 'paused from the dashboard' })));
 app.post('/api/control/resume', control(() => ({ type: 'resume' })));
 app.post('/api/control/reset', control((req) => ({ type: 'reset_balance', balance: Number(req.body?.balance) || undefined })));
