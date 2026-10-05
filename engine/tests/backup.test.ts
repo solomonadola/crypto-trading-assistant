@@ -98,3 +98,43 @@ describe('Firestore backup', () => {
     expect(s).toMatchObject({ clock: 1_790_000_000_000, lastEventId: 7, universe: ['SOLUSDT'] });
   });
 });
+
+describe('history backup and the saved state', () => {
+  it('copies signal, shadow and equity rows out and puts them back with the same ids', async () => {
+    const { openDb } = await import('../src/storage/db');
+    const { SignalLog } = await import('../src/storage/signals');
+    const { Results } = await import('../src/storage/results');
+    const { HISTORY_TABLES, insertRows, lastKey, rowsAfter } = await import('../src/storage/history');
+    const before = openDb(':memory:');
+    new SignalLog(before).append([
+      { time: 1000, symbol: 'SOLUSDT', setup: 'htf_poi', direction: 'long', status: 'armed', reason: null, payload: { a: 1 } },
+      { time: 2000, symbol: 'SOLUSDT', setup: 'htf_poi', direction: 'long', status: 'taken', reason: null, payload: { b: 2 } },
+    ]);
+    const results = new Results(before);
+    results.recordEquity({ time: 300_000, balance: 1000, equity: 1001, openPositions: 1 });
+    results.recordEquity({ time: 600_000, balance: 1010, equity: 1010, openPositions: 0 });
+    // An empty disk after a redeploy gets every row back, keys and all.
+    const after = openDb(':memory:');
+    for (const t of HISTORY_TABLES) {
+      expect(insertRows(after, t, rowsAfter(before, t, 0))).toBe(rowsAfter(before, t, 0).length);
+      expect(rowsAfter(after, t, 0)).toEqual(rowsAfter(before, t, 0));
+      expect(lastKey(after, t)).toBe(lastKey(before, t));
+    }
+    expect(new SignalLog(after).recent().map((s) => s.status)).toEqual(['taken', 'armed']);
+    expect(new Results(after).equity(0).map((p) => p.equity)).toEqual([1001, 1010]);
+    // Putting them back twice adds nothing; only newer rows are read for the next push.
+    expect(insertRows(after, HISTORY_TABLES[0], rowsAfter(before, HISTORY_TABLES[0], 0))).toBe(0);
+    expect(rowsAfter(before, HISTORY_TABLES[2], 300_000).map((r) => r.time)).toEqual([600_000]);
+  });
+
+  it('a lease from an engine that has not restored yet never blanks the saved state', async () => {
+    const { mergeState } = await import('../src/storage/history');
+    const saved = { clock: 5000, lastEventId: 42, universe: ['QNTUSDT', 'MOVRUSDT'], watchlist: ['XLMUSDT'] };
+    const blank = { clock: 0, lastEventId: 0, universe: ['BTCUSDT', 'ETHUSDT', 'SOLUSDT'], watchlist: [] };
+    expect(mergeState(saved, blank)).toEqual(saved);
+    // A running engine that is ahead writes its own state.
+    const ahead = { clock: 6000, lastEventId: 50, universe: ['ZROUSDT'], watchlist: [] };
+    expect(mergeState(saved, ahead)).toEqual(ahead);
+    expect(mergeState(undefined, blank)).toEqual(blank);
+  });
+});

@@ -18,6 +18,8 @@ type Listener = (candles: Candle[]) => void;
 
 /** How far back a restored engine may catch up. */
 const MAX_RESUME_MS = 3 * 86_400_000;
+/** A poll still running after this long is taken as hung: the next one starts anyway. */
+const POLL_STUCK_MS = 5 * 60_000;
 
 export interface LiveFeedDeps {
   client: BinancePublic;
@@ -44,6 +46,7 @@ export class LiveFeed {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private running = false;
   private polling = false;
+  private pollStartedAt = 0;
   private clockOffsetMs = 0;
   private lastClockSync = 0;
   private readonly st: FeedStatus;
@@ -64,7 +67,10 @@ export class LiveFeed {
   }
 
   status(): FeedStatus {
-    return { ...this.st, symbols: [...this.st.symbols], lastCloseTime: { ...this.st.lastCloseTime } };
+    const st = { ...this.st, symbols: [...this.st.symbols], lastCloseTime: { ...this.st.lastCloseTime } };
+    // Checked now, not only when a poll finishes: when polls keep failing, hang or stop, no poll is left to say so.
+    if (st.state === 'live' && this.stalledSymbols(st.symbols, this.now() - this.clockOffsetMs).length) st.state = 'stalled';
+    return st;
   }
 
   start(): void {
@@ -93,15 +99,20 @@ export class LiveFeed {
 
   /** One poll: fetch, store and hand on everything that closed since the last one. Returns the candles handed on. */
   async poll(): Promise<Candle[]> {
-    if (this.polling) return [];
+    if (this.polling) {
+      if (this.now() - this.pollStartedAt < POLL_STUCK_MS) return [];
+      this.log(`the poll started ${Math.round((this.now() - this.pollStartedAt) / 60_000)} min ago has not finished: starting a new one`);
+    }
     this.polling = true;
+    const started = (this.pollStartedAt = this.now());
     try {
-      await this.syncClock();
+      let errors = 0;
+      // Failing to read Binance's clock must not stop the candles: the last offset is kept.
+      await this.syncClock().catch((err) => { errors++; this.fail(err, 'clock sync'); });
       const now = this.now() - this.clockOffsetMs;
       const symbols = this.deps.symbols();
       this.st.symbols = symbols;
       const fresh: Candle[] = [];
-      let errors = 0;
       const jobs = symbols.flatMap((symbol) => this.deps.config.timeframes.map((tf) => ({ symbol, tf })));
       await inParallel(jobs, this.deps.config.concurrency, async ({ symbol, tf }) => {
         try {
@@ -120,7 +131,8 @@ export class LiveFeed {
       if (fresh.length) for (const l of this.listeners) l(fresh);
       return fresh;
     } finally {
-      this.polling = false;
+      // A hung poll that finishes late does not clear the flag of the one that replaced it.
+      if (this.pollStartedAt === started) this.polling = false;
     }
   }
 
@@ -165,10 +177,14 @@ export class LiveFeed {
     if (Math.abs(this.clockOffsetMs) > 1000) this.log(`local clock is ${this.clockOffsetMs} ms off Binance; using Binance time`);
   }
 
-  private updateState(symbols: string[], now: number): void {
+  /** Normally the newest 1m close is under a minute old; older than stall_after_sec means candles are missing. */
+  private stalledSymbols(symbols: string[], now: number): string[] {
     const staleAfter = this.deps.config.stall_after_sec * 1000;
-    // Normally the newest 1m close is under a minute old; older than staleAfter means candles are missing.
-    const stalled = symbols.filter((s) => now - (this.st.lastCloseTime[s] ?? 0) > staleAfter);
+    return symbols.filter((s) => now - (this.st.lastCloseTime[s] ?? 0) > staleAfter);
+  }
+
+  private updateState(symbols: string[], now: number): void {
+    const stalled = this.stalledSymbols(symbols, now);
     const next = stalled.length ? 'stalled' : 'live';
     if (next !== this.st.state) this.log(next === 'stalled' ? `stalled: no new 1m candles for ${stalled.join(', ')}` : 'live');
     this.st.state = next;

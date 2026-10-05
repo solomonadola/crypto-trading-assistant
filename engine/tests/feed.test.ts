@@ -206,3 +206,41 @@ describe('live feed', () => {
     expect(feed.status().lastError).toBeNull();
   });
 });
+
+describe('feed health', () => {
+  it('keeps fetching candles when the clock sync with Binance fails', async () => {
+    const { feed, handed, clock, ex } = setup();
+    (ex.api as unknown as { serverTime: () => Promise<number> }).serverTime = async () => { throw new Error('clock down'); };
+    await feed.poll();                         // warm-up history
+    clock.now = T0 + 900_000 + 3_000;          // 15 minutes later
+    await feed.poll();
+    expect(handed).toHaveLength(1);
+    expect(handed[0].length).toBeGreaterThan(0);
+    expect(feed.status().lastError).toMatch(/clock down/);
+  });
+
+  it('reports stalled once candles stop arriving, even when no poll finishes to say so', async () => {
+    const { feed, clock } = setup();
+    await feed.poll();
+    expect(feed.status().state).toBe('live');
+    clock.now += 10 * 60_000;                  // ten minutes without a completed poll
+    expect(feed.status().state).toBe('stalled');
+  });
+
+  it('starts over when a poll has hung for more than 5 minutes', async () => {
+    const { feed, clock, ex } = setup();
+    await feed.poll();
+    const api = ex.api as unknown as { klinesRange: (...a: unknown[]) => Promise<Candle[]> };
+    const working = api.klinesRange;
+    let reached!: () => void;
+    const hanging = new Promise<void>((r) => { reached = r; });
+    api.klinesRange = () => { reached(); return new Promise(() => {}); };   // never answers
+    clock.now = T0 + 60_000 + 3_000;
+    void feed.poll();
+    await hanging;                                    // that poll is now stuck on Binance
+    expect(await feed.poll()).toEqual([]);            // still within 5 minutes: waits for it
+    api.klinesRange = working;
+    clock.now += 6 * 60_000;
+    expect((await feed.poll()).length).toBeGreaterThan(0);
+  });
+});

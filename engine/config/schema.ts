@@ -193,10 +193,12 @@ export const configSchema = z.object({
     sizing: z.enum(['risk', 'flat', 'tiers']),
     flat_capital_pct: pct,
     tiers: z.array(z.object({ min_score: z.number().int().min(0), capital_pct: pct }).strict()).min(1),
-    max_open_trades: posInt,
+    /** null: no limit. */
+    max_open_trades: posInt.nullable(),
     max_total_exposure_pct: z.number().positive().max(1000),
     max_loss_per_trade_pct: pct,
-    max_open_risk_pct: pct,
+    /** null: no limit. */
+    max_open_risk_pct: pct.nullable(),
     max_correlated_trades: posInt,
     correlation_groups: z.record(z.string(), z.array(z.string())),
     max_pct_of_1h_volume: pct,
@@ -239,8 +241,8 @@ export const configSchema = z.object({
   }).strict(),
 
   risk: z.object({
-    /** New entries per UTC day across all coins and models, manual ones included. */
-    max_trades_per_day: posInt,
+    /** New entries per UTC day across all coins and models, manual ones included; null: no limit. */
+    max_trades_per_day: posInt.nullable(),
     max_trades_per_symbol_per_day: posInt,
     daily_loss_limit_pct: pct,
     max_drawdown_kill_pct: pct,

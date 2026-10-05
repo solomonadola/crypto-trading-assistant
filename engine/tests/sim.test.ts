@@ -85,9 +85,12 @@ describe('risk', () => {
     expect(decideEntry(base({ portfolio: p })).reason).toBe('risk_cooldown_after_loss');
     expect(decideEntry(base({ portfolio: p, t: u('2026-07-15T10:21Z') })).ok).toBe(true);
 
+    // With a cap of 5 open trades (the shipped config has none), a sixth is refused; without one it is taken.
+    const capped: EngineConfig = { ...cfg, allocation: { ...cfg.allocation, max_open_trades: 5 } };
     const full = new Portfolio(1000);
     ['A', 'B', 'C', 'D', 'E'].forEach((s, i) => full.apply(fill(s, `${s}USDT`, i)));
-    expect(decideEntry(base({ portfolio: full })).reason).toBe('risk_max_open_trades');
+    expect(decideEntry(base({ portfolio: full }, capped)).reason).toBe('risk_max_open_trades');
+    expect(decideEntry(base({ portfolio: full }, { ...cfg, allocation: { ...cfg.allocation, max_open_trades: null } })).ok).toBe(true);
 
     expect(decideEntry(base({ dayStartEquity: 1031 })).reason).toBe('risk_daily_loss_limit');
     const halted = new Portfolio(1000);

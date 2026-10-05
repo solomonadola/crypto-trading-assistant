@@ -3,7 +3,7 @@ import { CandlestickChart, CheckCircle2, CircleDashed, Crosshair, Layers, Shapes
 import { usePoll, usePrices, type AccountSummary, type Analysis, type Candle, type ChartReading, type ClosedTradeView, type MarketRow, type ScalpSetup, type SessionInstance } from '../lib/api';
 import { coin, pct, price } from '../lib/format';
 import { Badge, Card, StateBadge, TrendChip } from '../components/ui';
-import { CandleChart, DEFAULT_INDICATORS, INDICATORS, type ChartOverlays, type IndicatorId } from '../components/charts';
+import { CandleChart, DEFAULT_INDICATORS, INDICATORS, PRESETS, type ChartOverlays, type HtfPoiView, type IndicatorId } from '../components/charts';
 import { TradePlanCard } from '../components/TradePlan';
 import { AddCoin } from '../components/AddCoin';
 import { TakePosition } from '../components/TakePosition';
@@ -16,6 +16,7 @@ const ADDED_LATER: [string, IndicatorId[]][] = [
   ['chart-indicators-smart', ['liquidity', 'orderblocks', 'premium', 'killzones']],
   ['chart-indicators-patterns', ['patterns', 'wyckoff']],
   ['chart-indicators-scalp', ['scalp']],
+  ['chart-indicators-htf', ['htf']],
 ];
 
 /** The viewer's indicator choice, remembered in this browser (a convenience: defaults when storage is unavailable). */
@@ -42,10 +43,10 @@ function useIndicators(): [Set<IndicatorId>, (id: IndicatorId) => void, () => vo
     if (id === 'profile7d' && next.includes(id)) return next.filter((x) => x !== 'profile24h');
     return next;
   });
-  return [useMemo(() => new Set(ids), [ids]), toggle, () => setIds(DEFAULT_INDICATORS)];
+  return [useMemo(() => new Set(ids), [ids]), toggle, (preset: IndicatorId[] = DEFAULT_INDICATORS) => setIds(preset)];
 }
 
-function IndicatorPicker({ show, toggle, reset }: { show: Set<IndicatorId>; toggle: (id: IndicatorId) => void; reset: () => void }) {
+function IndicatorPicker({ show, toggle, reset }: { show: Set<IndicatorId>; toggle: (id: IndicatorId) => void; reset: (preset?: IndicatorId[]) => void }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -62,7 +63,17 @@ function IndicatorPicker({ show, toggle, reset }: { show: Set<IndicatorId>; togg
         <SlidersHorizontal size={13} />Indicators <span className="rounded bg-accent/20 px-1 text-accent">{show.size}</span>
       </button>
       {open && (
-        <div className="absolute right-0 z-30 mt-2 w-72 rounded-xl border border-line bg-card p-3 shadow-2xl shadow-black/50">
+        <div className="absolute right-0 z-30 mt-2 max-h-[75vh] w-72 overflow-y-auto rounded-xl border border-line bg-card p-3 shadow-2xl shadow-black/50">
+          <p className="mb-1 text-[11px] uppercase tracking-wider text-ink-3">Presets</p>
+          <div className="mb-3 flex flex-wrap gap-1">
+            {PRESETS.map((p) => {
+              const on = p.ids.length === show.size && p.ids.every((id) => show.has(id));
+              return (
+                <button key={p.id} onClick={() => reset(p.ids)}
+                  className={`rounded-md px-2 py-1 text-xs ${on ? 'bg-accent text-white' : 'bg-card-2 text-ink-2 hover:text-ink'}`}>{p.label}</button>
+              );
+            })}
+          </div>
           {groups.map((g) => (
             <div key={g} className="mb-2">
               <p className="mb-1 text-[11px] uppercase tracking-wider text-ink-3">{g}</p>
@@ -76,7 +87,7 @@ function IndicatorPicker({ show, toggle, reset }: { show: Set<IndicatorId>; togg
               </div>
             </div>
           ))}
-          <button onClick={reset} className="mt-1 text-xs text-accent hover:underline">Back to defaults</button>
+          <button onClick={() => reset()} className="mt-1 text-xs text-accent hover:underline">Back to defaults (Model 4)</button>
         </div>
       )}
     </div>
@@ -239,6 +250,7 @@ export function ChartPage({ symbol, initialTf, setSymbol }: { symbol: string; in
   const { data: idea } = usePoll<TradeIdea>(`/api/ideas/${symbol}`, 30_000);
   const { data: readings } = usePoll<ChartReading[]>(`/api/patterns/${symbol}`, 60_000);
   const { data: scalps } = usePoll<ScalpSetup[]>(`/api/scalp/${symbol}`, 60_000);
+  const { data: htf } = usePoll<{ long: HtfPoiView[]; short: HtfPoiView[] }>(`/api/htf/${symbol}`, 60_000);
   // A stable address (from the loaded candles, rounded to the day): a changing one would refetch on every redraw.
   const day = 86_400_000;
   const from = candles?.length ? Math.floor(candles[0].openTime / day) * day : null;
@@ -283,7 +295,7 @@ export function ChartPage({ symbol, initialTf, setSymbol }: { symbol: string; in
           <CandleChart
             viewKey={`${symbol}|${tf}`}
             candles={candles}
-            overlays={{ zones: tf === '1m' ? [] : zones, fvgs: analysis?.fvgs ?? [], profiles: analysis?.profiles ?? [], sessions: sessions ?? [], killzones: killzones ?? [], reading: readings?.find((r) => r.tf === tf) ?? null, scalps: scalps ?? [] }}
+            overlays={{ zones: tf === '1m' ? [] : zones, fvgs: analysis?.fvgs ?? [], profiles: analysis?.profiles ?? [], sessions: sessions ?? [], killzones: killzones ?? [], reading: readings?.find((r) => r.tf === tf) ?? null, scalps: scalps ?? [], htf: htf ?? null }}
             trades={mine} positions={open} tfMs={tfMs} tf={tf} idea={idea} show={show}
           />
         ) : <div className="grid h-[640px] place-items-center text-sm text-ink-3">Loading candles… (a newly added coin takes a few seconds to fetch its history)</div>}

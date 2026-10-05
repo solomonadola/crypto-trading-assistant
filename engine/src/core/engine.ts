@@ -27,7 +27,7 @@ import { fee, grossPnl, liquidationPrice, marketFill, roundQty, stopFill, target
 import { tradeIdea } from '../analysis/levels';
 import { sessionSweep } from '../strategy/sessionSweep';
 import { armZoneSweep, confirmZoneSweep, zoneSweepStillValid, type ZoneSweepConfirmation } from '../strategy/zoneSweep';
-import { armHtfPoi, chochOn, htfPoiStillValid } from '../strategy/htfPoi';
+import { armHtfPoi, chochOn, htfPointsOfInterest, htfPoiStillValid, type HtfPoi } from '../strategy/htfPoi';
 import { liquidityPlan } from '../strategy/smc';
 import { liquidityLevels, type LiquidityLevel } from '../analysis/liquidity';
 import { costsFor, netRewardRisk, roundTripPct, speedSettings, type SpeedGroup } from '../speed';
@@ -64,10 +64,14 @@ export interface EngineDeps {
 }
 
 export type EngineCommand =
-  | { type: 'close'; positionId: string }
+  /**
+   * With `price` (the mark price when asked) the position closes at once at that price plus slippage, at
+   * `time`; without it, at the next 1m candle's open, which never comes while the feed is down.
+   */
+  | { type: 'close'; positionId: string; price?: number; time?: number }
   | { type: 'close_all' }
-  /** Close everything and stop opening trades until resumed. */
-  | { type: 'kill'; reason?: string }
+  /** Close everything and stop opening trades until resumed; at once at `prices` where given. */
+  | { type: 'kill'; reason?: string; prices?: Record<string, number>; time?: number }
   /** Stop opening trades; open positions keep being managed. */
   | { type: 'pause'; reason?: string }
   | { type: 'resume' }
@@ -188,6 +192,13 @@ export class Engine {
     return [...this.universe];
   }
 
+  /** Model 4's 4h points of interest for a coin, as of its last 15m close: where it would arm, both ways. */
+  htfPoints(symbol: string): { long: HtfPoi[]; short: HtfPoi[] } | null {
+    const last15 = this.market.recent(symbol, this.cfg.timeframes.trigger, 1)[0];
+    const ctx = last15 ? buildContext(this.market, symbol, last15.closeTime, this.cfg, this.funding.get(symbol) ?? null) : null;
+    return ctx ? { long: htfPointsOfInterest(ctx, 'long'), short: htfPointsOfInterest(ctx, 'short') } : null;
+  }
+
   armedSetups(): Armed[] {
     return [...this.armed.values(), ...this.htfArmed.values()];
   }
@@ -293,13 +304,14 @@ export class Engine {
       case 'close': {
         const pos = this.portfolio.get(cmd.positionId);
         if (!pos) throw new CommandError(`No open position ${cmd.positionId}`);
+        if (cmd.price !== undefined && cmd.price > 0) return [this.closeNow(pos, 'manual', cmd.price, cmd.time ?? this.clock)];
         if (pos.pendingClose) return [];
         return [this.closeOrder(pos, 'manual')];
       }
       case 'close_all':
         return this.closeAll('kill');
       case 'kill': {
-        const out = this.closeAll('kill');
+        const out = this.closeAll('kill', cmd.prices, cmd.time);
         if (!this.portfolio.halted) out.push(this.emit('engine_halted', null, null, { reason: cmd.reason ?? 'manual kill' }));
         return out;
       }
@@ -498,11 +510,16 @@ export class Engine {
     return out;
   }
 
-  private closePosition(p: Position, price: number, reason: CloseReason): TradeEvent {
+  private closePosition(p: Position, price: number, reason: CloseReason, time = this.clock): TradeEvent {
     return this.emit('position_closed', p.id, p.symbol, {
       qty: p.qty, price, pnl: grossPnl(p.side, p.entryPrice, price, p.qty), fee: fee(p.qty * price, this.cfg.sim), reason,
-      holdMinutes: Math.round((this.clock - p.openedAt) / 60_000),
-    });
+      holdMinutes: Math.round((time - p.openedAt) / 60_000),
+    }, time);
+  }
+
+  /** Closes at once at `price` (a market order: slippage against the trade), replacing any close still waiting for a candle. */
+  private closeNow(p: Position, reason: CloseReason, price: number, time: number): TradeEvent {
+    return this.closePosition(p, marketFill(p.side, 'close', price, costsFor(this.cfg, p.speed)), reason, Math.max(time, p.openedAt));
   }
 
   // ---------------------------------------------------------------- account-wide limits
@@ -522,8 +539,12 @@ export class Engine {
     return [];
   }
 
-  private closeAll(reason: CloseReason): TradeEvent[] {
-    const out = this.portfolio.positions().filter((p) => !p.pendingClose).map((p) => this.closeOrder(p, reason));
+  private closeAll(reason: CloseReason, prices: Record<string, number> = {}, time = this.clock): TradeEvent[] {
+    const out = this.portfolio.positions().flatMap((p) => {
+      const price = prices[p.symbol];
+      if (price > 0) return [this.closeNow(p, reason, price, time)];
+      return p.pendingClose ? [] : [this.closeOrder(p, reason)];
+    });
     for (const e of this.portfolio.pendingEntries()) out.push(this.emit('order_cancelled', e.positionId, e.symbol, { reason }));
     return out;
   }

@@ -19,6 +19,7 @@ import { Results } from './storage/results';
 import { SignalLog } from './storage/signals';
 import { FirestoreBackup, type BackupState } from './storage/firestoreBackup';
 import { backupToFile } from './storage/fileBackup';
+import { HISTORY_TABLES, insertRows, lastKey, rowsAfter } from './storage/history';
 import { authSettings, requireSignIn } from './api/auth';
 import { unrealized } from './risk';
 import { summarize } from './stats';
@@ -72,7 +73,7 @@ const backup = {
   ok: false,
   error: null as string | null,
   holder: `${hostname()}-${randomUUID().slice(0, 8)}`,
-  /** True while another engine holds the lock: this one shows data but does not trade. */
+  /** True until this engine holds the lock (with Firestore): it shows data but does not trade. */
   standby: false,
   lastPush: 0,
   lastFileBackup: null as string | null,
@@ -95,13 +96,27 @@ let universe: string[] = JSON.parse(getKv(db, UNIVERSE_KEY) ?? 'null') ?? config
 let watchlist: string[] = JSON.parse(getKv(db, WATCHLIST_KEY) ?? '[]');
 
 /** Events in Firestore newer than the local log are added to it (a restore onto an empty disk, or another engine's work). */
+/** Set once Firestore has been read: until then nothing may start trading or write to it (an empty disk would overwrite the backup). */
+let restored = !cloud;
+if (cloud) backup.standby = true;
+
 async function pullFromCloud(): Promise<number> {
   if (!cloud) return 0;
   const { state, events: newer } = await cloud.restore(events.lastId());
-  if (newer.length) {
-    const added = events.append(newer.map((e) => ({ ...e, id: undefined })));
-    if (added[0].id !== newer[0].id) console.log(`[backup] event ids moved on restore (${newer[0].id} -> ${added[0].id})`);
+  // With their own ids, so the local log and the backup stay the same, event for event.
+  if (newer.length) events.restore(newer);
+  // History: on an empty table the last 30 days, otherwise what another engine added since.
+  for (const t of HISTORY_TABLES) {
+    const local = lastKey(db, t);
+    const rows = local === 0
+      ? await cloud.readHistory(t, 'time', Date.now() - SIGNAL_RETENTION_DAYS * 86_400_000)
+      : await cloud.readHistory(t, t.key, local);
+    const added = insertRows(db, t, rows);
+    await cloud.historyLastKey(t);
+    if (added) console.log(`[backup] ${added} ${t.name} rows restored`);
   }
+  if (newer.length) console.log(`[backup] ${newer.length} trade events restored (up to id ${newer[newer.length - 1].id})`);
+  restored = true;
   if (state && state.clock > Number(getKv(db, CLOCK_KEY) ?? 0)) {
     setKv(db, CLOCK_KEY, String(state.clock));
     if (state.universe?.length) { universe = state.universe; setKv(db, UNIVERSE_KEY, JSON.stringify(universe)); }
@@ -113,9 +128,10 @@ async function pullFromCloud(): Promise<number> {
 const backupState = (): BackupState => ({ clock: engine.now(), lastEventId: events.lastId(), universe, watchlist });
 
 async function pushToCloud(): Promise<void> {
-  if (!cloud || backup.standby) return;
+  if (!cloud || backup.standby || !restored) return;
   try {
-    const n = await cloud.pushEvents(events.after(cloud.lastPushed(), 5000));
+    let n = await cloud.pushEvents(events.after(cloud.lastPushed(), 5000));
+    for (const t of HISTORY_TABLES) n += await cloud.pushHistory(t, rowsAfter(db, t, cloud.historyPushedUpTo(t)));
     if (n) backup.lastPush = Date.now();
     backup.ok = true;
   } catch (err) {
@@ -255,26 +271,49 @@ function startEngine(): void {
 }
 
 /** Takes or renews the lock; starts the engine on gaining it, stops trading on losing it. */
+const STANDBY_MESSAGE = 'This server copy is on standby: another copy of the engine holds the lock (usually a second Cloud Run instance after a republish). '
+  + 'It takes over within about 5 minutes once the other one stops. If this keeps happening, set the service to at most 1 instance.';
+let holding = false;
 async function holdLock(): Promise<void> {
   if (!cloud) {
     if (!started) startEngine();
     return;
   }
+  // One at a time: the renewal timer and a quick retry after a failed restore can meet.
+  if (holding) return;
+  holding = true;
   try {
+    // Restore before anything else: the lease writes this engine's state, and an engine that has not read the
+    // backup must neither trade nor write over it. Shown read-only (standby) until the lease is ours.
+    if (!restored) {
+      await pullFromCloud();
+      backup.ok = true;
+      backup.error = null;
+      startEngine();
+    }
     const mine = await cloud.lease(backupState(), config.backup.lock_lease_sec * 1000, Date.now());
-    if (mine && (backup.standby || !started)) {
+    if (mine && backup.standby) {
       const pulled = await pullFromCloud();
       backup.standby = false;
-      if (pulled && started) console.log(`[backup] ${pulled} events from the previous lock holder`);
+      if (pulled) console.log(`[backup] ${pulled} events from the previous lock holder`);
       startEngine();
+      console.log('[backup] this engine holds the lock: trading');
     } else if (!mine && !backup.standby) {
       backup.standby = true;
       console.log('[backup] another engine holds the lock: this one shows data and does not trade');
+    } else if (!mine) {
+      // Still on standby: keep showing what the engine holding the lock has done.
+      const pulled = await pullFromCloud();
+      if (pulled) startEngine();
     }
   } catch (err) {
-    backup.error = `lock renewal failed: ${message(err)}`;
+    backup.ok = false;
+    backup.error = `${restored ? 'lock renewal' : 'restore from Firestore'} failed: ${message(err)}`;
     console.log(`[backup] ${backup.error}`);
-    if (!started) startEngine();
+    // Never start on an empty disk over a backup that could not be read: try again shortly.
+    if (!restored) setTimeout(() => void holdLock(), 15_000);
+  } finally {
+    holding = false;
   }
 }
 
@@ -397,7 +436,7 @@ app.get('/api/shadows', (req, res) => {
 // Controls. They act at the engine's time and are saved like any other event.
 const control = (build: (req: express.Request) => EngineCommand) => (req: express.Request, res: express.Response) => {
   if (backup.standby) {
-    res.status(409).json({ ok: false, error: 'Another engine holds the lock; control it there' });
+    res.status(409).json({ ok: false, error: STANDBY_MESSAGE });
     return;
   }
   try {
@@ -412,7 +451,7 @@ const control = (build: (req: express.Request) => EngineCommand) => (req: expres
 // A trade taken by hand: filled at once at Binance's mark price (plus slippage), with the engine's usual sizing and risk rules.
 app.post('/api/positions/open', async (req, res) => {
   if (backup.standby) {
-    res.status(409).json({ ok: false, error: 'Another engine holds the lock; trade there' });
+    res.status(409).json({ ok: false, error: STANDBY_MESSAGE });
     return;
   }
   const b = req.body ?? {};
@@ -453,8 +492,27 @@ app.post('/api/positions/open', async (req, res) => {
     res.status(err instanceof CommandError ? 400 : 500).json({ ok: false, error: message(err), mark });
   }
 });
-app.post('/api/positions/:id/close', control((req) => ({ type: 'close', positionId: String(req.params.id) })));
-app.post('/api/control/kill', control(() => ({ type: 'kill', reason: 'manual kill' })));
+/** Binance's mark prices of the open positions' coins; empty when Binance cannot be reached (closes then wait for the next 1m candle). */
+async function markPrices(): Promise<Record<string, number>> {
+  const held = new Set(engine.positions().map((p) => p.symbol));
+  if (!held.size) return {};
+  try {
+    return Object.fromEntries((await client.premiumIndex()).filter((x) => held.has(x.symbol) && x.markPrice > 0).map((x) => [x.symbol, x.markPrice]));
+  } catch (err) {
+    console.log(`[control] mark prices unavailable, closing at the next 1m candle instead: ${message(err)}`);
+    return {};
+  }
+}
+// Manual closes fill at once at the mark price (they used to wait for the next 1m candle, forever while the feed was down).
+app.post('/api/positions/:id/close', async (req, res) => {
+  const marks = await markPrices();
+  const symbol = engine.positions().find((p) => p.id === String(req.params.id))?.symbol;
+  control(() => ({ type: 'close', positionId: String(req.params.id), price: symbol ? marks[symbol] : undefined, time: Date.now() }))(req, res);
+});
+app.post('/api/control/kill', async (req, res) => {
+  const prices = await markPrices();
+  control(() => ({ type: 'kill', reason: 'manual kill', prices, time: Date.now() }))(req, res);
+});
 app.post('/api/control/pause', control(() => ({ type: 'pause', reason: 'paused from the dashboard' })));
 app.post('/api/control/resume', control(() => ({ type: 'resume' })));
 app.post('/api/control/reset', control((req) => ({ type: 'reset_balance', balance: Number(req.body?.balance) || undefined })));
@@ -567,6 +625,20 @@ app.get('/api/market', (_req, res) => {
     };
   }));
 });
+// Model 4's 4h points of interest, for the chart: the nearest few on each side of the price.
+app.get('/api/htf/:symbol', (req, res) => {
+  const symbol = req.params.symbol.toUpperCase();
+  const points = engine.htfPoints(symbol);
+  const price = store.latest(symbol, '1m', 1)[0]?.close ?? null;
+  if (!points || price === null) {
+    res.json({ long: [], short: [] });
+    return;
+  }
+  const near = (list: typeof points.long) => list
+    .map((p) => ({ ...p, distance: price > p.high ? price - p.high : price < p.low ? p.low - price : 0 }))
+    .sort((a, b) => a.distance - b.distance).slice(0, 3);
+  res.json({ long: near(points.long), short: near(points.short) });
+});
 app.get('/api/ideas/:symbol', (req, res) => {
   const idea = ideaFor(req.params.symbol.toUpperCase());
   if (!idea) {
@@ -600,6 +672,8 @@ function catchUpNow(symbol: string): void {
 function saveWatchlist(next: string[]): void {
   watchlist = next;
   setKv(db, WATCHLIST_KEY, JSON.stringify(watchlist));
+  // Saved to the backup now (the lease write carries it), not at the next renewal minutes later.
+  if (cloud && !backup.standby) void holdLock();
   ideaCache.clear();
   broadcast('engine', { clock: engine.now() });
 }

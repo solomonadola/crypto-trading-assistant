@@ -77,6 +77,7 @@ export function EquityChart({ points, startingBalance }: { points: EquityPoint[]
 
 /** Everything the chart can show; the picker turns each on or off. */
 export const INDICATORS = [
+  { id: 'htf', group: 'Model 4', label: '4h zones, FVGs & order blocks (where Model 4 trades)' },
   { id: 'ema20', group: 'Lines', label: 'EMA 20' },
   { id: 'ema50', group: 'Lines', label: 'EMA 50' },
   { id: 'ema200', group: 'Lines', label: 'EMA 200' },
@@ -102,7 +103,15 @@ export const INDICATORS = [
   { id: 'positions', group: 'Marks', label: 'Open positions' },
 ] as const;
 export type IndicatorId = (typeof INDICATORS)[number]['id'];
-export const DEFAULT_INDICATORS: IndicatorId[] = ['ema50', 'ema200', 'zones', 'profile24h', 'plan', 'liquidity', 'orderblocks', 'premium', 'killzones', 'patterns', 'wyckoff', 'scalp', 'volume', 'trades', 'positions'];
+/** One-click sets of indicators, each for one way of reading the chart. */
+export const PRESETS: { id: string; label: string; ids: IndicatorId[] }[] = [
+  { id: 'model4', label: 'Model 4', ids: ['htf', 'liquidity', 'plan', 'ema50', 'volume', 'trades', 'positions'] },
+  { id: 'scalp', label: 'Scalp', ids: ['scalp', 'ema20', 'vwap', 'volume', 'trades', 'positions'] },
+  { id: 'patterns', label: 'Patterns', ids: ['patterns', 'wyckoff', 'ema50', 'volume'] },
+  { id: 'minimal', label: 'Minimal', ids: ['volume', 'positions'] },
+  { id: 'all', label: 'Everything', ids: INDICATORS.map((i) => i.id).filter((id) => id !== 'profile7d') },
+];
+export const DEFAULT_INDICATORS: IndicatorId[] = PRESETS[0].ids;
 
 export interface ChartOverlays {
   zones: Zone[];
@@ -112,9 +121,17 @@ export interface ChartOverlays {
   killzones: { name: string; openTime: number; closeTime: number }[];
   /** Trend, patterns and Wyckoff read on the timeframe shown; null on timeframes that are not read. */
   reading?: ChartReading | null;
+  /** Model 4's 4h points of interest nearest the price, for longs (demand side) and shorts (supply side). */
+  htf?: { long: HtfPoiView[]; short: HtfPoiView[] } | null;
   /** Scalp setups of the last 24 hours (5m): open ones drawn bright and labelled, those closed in the last 4 hours faint. */
   scalps?: ScalpSetup[];
 }
+
+export interface HtfPoiView { kind: 'zone' | 'fvg' | 'order_block'; id: string; low: number; high: number; from: number }
+const HTF_LABEL = {
+  long: { zone: '4h demand zone', fvg: '4h bullish FVG', order_block: '4h bullish order block' },
+  short: { zone: '4h supply zone', fvg: '4h bearish FVG', order_block: '4h bearish order block' },
+} as const;
 
 const BIAS_COLOR = { bullish: 'var(--color-good)', bearish: 'var(--color-critical)', neutral: 'var(--color-warning)' } as const;
 /** A dark outline behind drawing labels, so they stay readable over candles and other lines. */
@@ -283,9 +300,10 @@ export function CandleChart({ viewKey, candles, overlays, trades, positions, tfM
     const bad = css('--color-critical');
     if (show.has('positions')) {
       for (const p of positions) {
-        add({ price: p.entryPrice, color: css('--color-ink-2'), lineWidth: 1, lineStyle: LineStyle.Solid, title: `entry ${p.side}` });
-        add({ price: p.stop, color: bad, lineWidth: 1, lineStyle: LineStyle.Dashed, title: 'stop' });
-        if (p.target !== null) add({ price: p.target, color: good, lineWidth: 1, lineStyle: LineStyle.Dashed, title: 'target' });
+        // Labels on the price axis only: the position box draws the levels on the chart.
+        add({ price: p.entryPrice, color: css('--color-ink-2'), lineWidth: 1, lineVisible: false, title: `entry ${p.side}` });
+        add({ price: p.stop, color: bad, lineWidth: 1, lineVisible: false, title: 'stop' });
+        if (p.target !== null) add({ price: p.target, color: good, lineWidth: 1, lineVisible: false, title: 'target' });
       }
     }
     if (idea && show.has('plan')) {
@@ -334,7 +352,8 @@ export function CandleChart({ viewKey, candles, overlays, trades, positions, tfM
         </div>
       )}
       <div ref={el} className="h-[640px] w-full" />
-      <Overlay chart={chartRef.current} series={candleRef.current} candles={candles} overlays={overlays} show={show} tf={tf} tfMs={tfMs} idea={idea ?? null} />
+      <Overlay chart={chartRef.current} series={candleRef.current} candles={candles} overlays={overlays} show={show} tf={tf} tfMs={tfMs} idea={idea ?? null}
+        positions={positions} priceNow={liveBar?.close ?? candles[candles.length - 1]?.close ?? null} />
     </div>
   );
 }
@@ -345,8 +364,9 @@ const LIQUIDITY_SHORT: Record<string, string> = {
 };
 
 /** Session shading, boxes and the volume profile, drawn in SVG over the price panel at the chart's own coordinates. */
-function Overlay({ chart, series, candles, overlays, show, tf, tfMs, idea }: {
+function Overlay({ chart, series, candles, overlays, show, tf, tfMs, idea, positions, priceNow }: {
   chart: IChartApi | null; series: ISeriesApi<'Candlestick'> | null; candles: Candle[]; overlays: ChartOverlays; show: Set<IndicatorId>; tf: string; tfMs: number; idea: TradeIdea | null;
+  positions: PositionViewLike[]; priceNow: number | null;
 }) {
   if (!chart || !series || !candles.length) return null;
   const width = chart.timeScale().width();
@@ -461,18 +481,32 @@ function Overlay({ chart, series, candles, overlays, show, tf, tfMs, idea }: {
           g.intact = g.intact && l.intact;
           byPrice.set(l.price, g);
         }
-        return [...byPrice].map(([p, g]) => {
-          const yy = y(p);
-          if (yy === null || yy < 0 || yy > height) return null;
-          const color = g.side === 'sell' ? buy : sell;   // lows (sell-side) on the buy colour, highs on the sell colour
-          return (
-            <g key={`liq${p}`} opacity={g.intact ? 1 : 0.35}>
-              <line x1={0} x2={width} y1={yy} y2={yy} stroke={color} strokeWidth={1.25} strokeDasharray="8 4" />
-              <text x={6} y={yy - 3} fontSize={10} fill={color}>{g.names.join(' · ')} {fmtPrice(p)}{g.intact ? '' : ' · swept'}</text>
-            </g>
-          );
-        });
+        // Top to bottom; a label that would overlap the one above is left out (its line stays, the price axis shows it).
+        let lastLabel = -Infinity;
+        return [...byPrice]
+          .flatMap(([p, g]) => {
+            const yy = y(p);
+            return yy !== null && yy >= 0 && yy <= height ? [{ p, g, yy: yy as number }] : [];
+          })
+          .sort((a, b) => a.yy - b.yy)
+          .map(({ p, g, yy }) => {
+            const color = g.side === 'sell' ? buy : sell;   // lows (sell-side) on the buy colour, highs on the sell colour
+            const label = yy - lastLabel >= 12;
+            if (label) lastLabel = yy;
+            return (
+              <g key={`liq${p}`} opacity={g.intact ? 1 : 0.35}>
+                <line x1={0} x2={width} y1={yy} y2={yy} stroke={color} strokeWidth={1.25} strokeDasharray="8 4" />
+                {label && <text x={6} y={yy - 3} fontSize={10} fill={color} {...HALO}>{g.names.join(' · ')} {fmtPrice(p)}{g.intact ? '' : ' · swept'}</text>}
+              </g>
+            );
+          });
       })()}
+
+      {show.has('htf') && overlays.htf && (['long', 'short'] as const).flatMap((side) => (overlays.htf?.[side] ?? []).map((p) => box(
+        `htf${side}${p.id}`, p.from, p.high, p.low,
+        { fill: side === 'long' ? buy : sell, fillOpacity: 0.12, stroke: side === 'long' ? buy : sell, strokeOpacity: 0.95, strokeWidth: 1.5 },
+        HTF_LABEL[side][p.kind],
+      )))}
 
       {show.has('zones') && overlays.zones.map((z) => box(
         z.id, z.createdAt, z.high, z.low,
@@ -562,6 +596,37 @@ function Overlay({ chart, series, candles, overlays, show, tf, tfMs, idea }: {
                 {SCALP_LABEL[sc.kind]} {sc.side}
               </text>
             )}
+          </g>
+        );
+      })}
+
+      {show.has('positions') && positions.map((p) => {
+        // The long/short position box: reward (entry to target) in green, risk (entry to stop) in red, from the entry on.
+        const long = p.side === 'long';
+        const ye = y(p.entryPrice);
+        const ys = y(p.stop);
+        const yt = p.target === null ? null : y(p.target);
+        if (ye === null || ys === null) return null;
+        // From the entry candle to the right edge; at least 300px wide, so a trade opened in the forming candle still shows with its labels.
+        const x1 = Math.max(0, Math.min(p.openedAt ? x(p.openedAt) : 0, width - 300));
+        const w = width - x1;
+        const pct = (to: number) => ((long ? to - p.entryPrice : p.entryPrice - to) / p.entryPrice) * 100;
+        const risk = Math.abs(p.entryPrice - p.stop);
+        const r = p.target === null ? null : Math.abs(p.target - p.entryPrice) / risk;
+        const pnl = priceNow === null ? null : pct(priceNow);
+        const good = 'var(--color-good)';
+        const bad = 'var(--color-critical)';
+        const label = (yy: number, text: string, color: string, below: boolean) => (
+          <text x={x1 + 6} y={below ? yy + 13 : yy - 5} fontSize={11} fontWeight={600} fill={color} {...HALO}>{text}</text>
+        );
+        return (
+          <g key={`pos${p.id ?? p.entryPrice}`}>
+            {yt !== null && <rect x={x1} y={Math.min(ye, yt)} width={w} height={Math.abs(yt - ye)} fill={good} fillOpacity={0.16} stroke={good} strokeOpacity={0.5} />}
+            <rect x={x1} y={Math.min(ye, ys)} width={w} height={Math.abs(ys - ye)} fill={bad} fillOpacity={0.16} stroke={bad} strokeOpacity={0.5} />
+            <line x1={x1} x2={width} y1={ye} y2={ye} stroke="var(--color-ink-2)" strokeWidth={1.5} />
+            {yt !== null && label(yt, `Target ${fmtPrice(p.target!)} · ${pct(p.target!) >= 0 ? '+' : ''}${pct(p.target!).toFixed(2)}% · ${r!.toFixed(2)}R`, good, !long)}
+            {label(ys, `Stop ${fmtPrice(p.stop)} · ${pct(p.stop).toFixed(2)}%`, bad, long)}
+            {label(ye, `${long ? 'Long' : 'Short'} ${fmtPrice(p.entryPrice)}${pnl === null ? '' : ` · now ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%`}`, pnl === null || pnl >= 0 ? good : bad, false)}
           </g>
         );
       })}

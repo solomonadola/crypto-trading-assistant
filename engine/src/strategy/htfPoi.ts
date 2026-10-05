@@ -21,8 +21,11 @@ export interface HtfPoi {
   id: string;
   low: number;
   high: number;
+  /** Where it starts on a chart: the zone's base, the gap's first candle, the order block's candle. */
+  from: number;
 }
 
+const FOUR_HOURS = 4 * 3_600_000;
 const KIND_LABEL: Record<HtfPoi['kind'], string> = { zone: '4h zone', fvg: '4h FVG', order_block: '4h order block' };
 const FACTOR: Record<HtfPoi['kind'], '4h_zone' | '4h_fvg' | '4h_order_block'> = { zone: '4h_zone', fvg: '4h_fvg', order_block: '4h_order_block' };
 
@@ -40,12 +43,12 @@ export function htfPointsOfInterest(ctx: Context, dir: Direction): HtfPoi[] {
   const long = dir === 'long';
   const zones = activeZones(detectZones(ctx.h4.candles, { ...ctx.config.zones, lookback_candles: p.zone_lookback_4h, max_zone_width_pct: p.zone_max_width_pct }))
     .filter((z) => z.type === (long ? 'demand' : 'supply'))
-    .map((z): HtfPoi => ({ kind: 'zone', id: z.id, low: z.low, high: z.high }));
+    .map((z): HtfPoi => ({ kind: 'zone', id: z.id, low: z.low, high: z.high, from: z.baseStart }));
   const fvgs = ctx.analysis.fvgs
     .filter((g) => g.tf === '4h' && g.side === (long ? 'bullish' : 'bearish'))
-    .map((g): HtfPoi => ({ kind: 'fvg', id: g.id, low: g.bottom, high: g.top }));
+    .map((g): HtfPoi => ({ kind: 'fvg', id: g.id, low: g.bottom, high: g.top, from: g.createdAt - 3 * FOUR_HOURS }));
   const blocks = orderBlocks(ctx.h4.candles, ctx.pivots4h, dir)
-    .map((b): HtfPoi => ({ kind: 'order_block', id: b.id, low: b.low, high: b.high }));
+    .map((b): HtfPoi => ({ kind: 'order_block', id: b.id, low: b.low, high: b.high, from: b.createdAt - 3 * FOUR_HOURS }));
   return [...zones, ...fvgs, ...blocks];
 }
 

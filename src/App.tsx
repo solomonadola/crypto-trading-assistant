@@ -4,7 +4,7 @@ import type { User } from 'firebase/auth';
 import { CandlestickChart, Compass, Crosshair, FlaskConical, History, LayoutDashboard, LogIn, LogOut, Pause, Play, Power, Radio, RotateCcw, Timer, Zap } from 'lucide-react';
 import { get, post, usePoll, type Status } from './lib/api';
 import { signIn, signOutUser, watchUser } from './lib/auth';
-import { hhmm, words } from './lib/format';
+import { dateTime, duration, hhmm, words } from './lib/format';
 import { Badge } from './components/ui';
 import { Overview } from './pages/Overview';
 import { Market } from './pages/Market';
@@ -80,6 +80,9 @@ function Dashboard({ user }: { user: User | null }) {
 
   const { data: status, error, reload } = usePoll<Status>('/api/status', 5_000);
   const live = status?.feed.state === 'live';
+  // The engine's time normally trails the clock by about a minute (it moves when each 1m candle closes).
+  const behindMin = status?.engineClock ? Math.floor((Date.now() - status.engineClock) / 60_000) : null;
+  const behind = behindMin !== null && behindMin >= 3;
   const control = async (path: string, confirmText?: string) => {
     if (confirmText && !confirm(confirmText)) return;
     try { await post(`/api/control/${path}`); reload(); } catch (e) { alert(e instanceof Error ? e.message : String(e)); }
@@ -154,6 +157,15 @@ function Dashboard({ user }: { user: User | null }) {
           </nav>
         </header>
 
+        {behind && (
+          <div role="alert" className="border-b border-warning/40 bg-warning/15 px-4 py-2 text-sm text-warning md:px-6">
+            <b>Data is {duration(behindMin! * 60_000)} behind.</b>{' '}
+            {status?.backup.standby
+              ? 'This copy of the engine is on standby (another copy holds the lock), so it is not processing candles.'
+              : `The server has had no new candles since ${dateTime(status!.engineClock)} UTC${status?.feed.lastError ? ` (last error: ${status.feed.lastError})` : ''}.`}
+            {' '}Charts, setups and signals are out of date until it catches up: don't trade from them meanwhile.
+          </div>
+        )}
         <main className="flex-1 px-4 py-5 md:px-6">
           {route.page === 'overview' && <Overview go={go} />}
           {route.page === 'ideas' && <Ideas go={go} />}

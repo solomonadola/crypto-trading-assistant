@@ -242,3 +242,38 @@ describe('manual trades', () => {
     expect(() => open(engine())).toThrow(/not started/);
   });
 });
+
+describe('closing at the mark price', () => {
+  const at = u('2026-07-15T10:30Z');
+  const opened = () => {
+    const e = engine();
+    e.restore([entry(e, 'p1', '2026-07-15T10:00Z'), entry(e, 'p2', '2026-07-15T10:05Z', 'ETHUSDT')], at);
+    return e;
+  };
+
+  it('a close with a price fills at once, at that price less slippage, without waiting for a candle', () => {
+    const e = opened();
+    const events = e.onCommand({ type: 'close', positionId: 'p1', price: 105, time: at + 20_000 });
+    expect(events.map((x) => [x.type, x.payload.reason, x.time])).toEqual([['position_closed', 'manual', at + 20_000]]);
+    expect(Number(events[0].payload.price)).toBeLessThan(105);   // slippage against a long being sold
+    expect(e.positions().map((p) => p.id)).toEqual(['p2']);
+    expect(e.closedTrades()[0]).toMatchObject({ id: 'p1', reason: 'manual' });
+  });
+
+  it('also finishes a close that was waiting for a candle that never came', () => {
+    const e = opened();
+    e.onCommand({ type: 'close', positionId: 'p1' });                 // the old way: waits for the next minute
+    expect(e.positions().map((p) => p.id)).toContain('p1');
+    const events = e.onCommand({ type: 'close', positionId: 'p1', price: 104, time: at + 30_000 });
+    expect(events.map((x) => x.type)).toEqual(['position_closed']);
+    expect(e.positions().map((p) => p.id)).toEqual(['p2']);
+  });
+
+  it('kill with prices closes every position at once; one without a price waits for its next candle', () => {
+    const e = opened();
+    const events = e.onCommand({ type: 'kill', reason: 'manual kill', prices: { BTCUSDT: 103 }, time: at + 10_000 });
+    expect(events.filter((x) => x.type === 'position_closed').map((x) => x.positionId)).toEqual(['p1']);
+    expect(events.filter((x) => x.type === 'order_placed').map((x) => x.positionId)).toEqual(['p2']);
+    expect(e.account().halted).not.toBeNull();
+  });
+});
