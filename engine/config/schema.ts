@@ -44,6 +44,8 @@ export const configSchema = z.object({
     history: z.object({ '1m': posInt, '5m': posInt.optional(), '15m': posInt, '1h': posInt, '4h': posInt }).strict(),
     watch_symbols: z.array(z.string().regex(/^[A-Z0-9]+USDT$/)).min(1),
     price_poll_ms: z.number().int().min(1000),
+    mark_price_stream: z.string().startsWith('wss://'),
+    kline_stream: z.string().startsWith('wss://'),
     poll_delay_ms: z.number().int().min(0).max(30_000),
     concurrency: z.number().int().min(1).max(32),
     stall_after_sec: posInt,

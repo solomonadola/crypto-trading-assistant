@@ -12,6 +12,7 @@ import type { TradeIdea, WatchLevel } from '../../shared/types';
 const TFS = [['15m', 900_000], ['1h', 3_600_000], ['4h', 14_400_000], ['5m', 300_000], ['1m', 60_000]] as const;
 const STORE_KEY = 'chart-indicators';
 /** Indicators added after a viewer may have saved a choice: each group is switched on once, then the key is set. */
+const CLEAN_KEY = 'chart-indicators-clean';
 const ADDED_LATER: [string, IndicatorId[]][] = [
   ['chart-indicators-smart', ['liquidity', 'orderblocks', 'premium', 'killzones']],
   ['chart-indicators-patterns', ['patterns', 'wyckoff']],
@@ -23,6 +24,12 @@ const ADDED_LATER: [string, IndicatorId[]][] = [
 function useIndicators(): [Set<IndicatorId>, (id: IndicatorId) => void, () => void] {
   const [ids, setIds] = useState<IndicatorId[]>(() => {
     try {
+      // Once: everyone starts from the clean chart (an older saved choice was the crowded default).
+      if (!localStorage.getItem(CLEAN_KEY)) {
+        localStorage.setItem(CLEAN_KEY, '1');
+        for (const [key] of ADDED_LATER) localStorage.setItem(key, '1');
+        return DEFAULT_INDICATORS;
+      }
       const saved = JSON.parse(localStorage.getItem(STORE_KEY) ?? 'null');
       if (Array.isArray(saved)) {
         const kept = saved.filter((x): x is IndicatorId => INDICATORS.some((i) => i.id === x));
@@ -46,6 +53,21 @@ function useIndicators(): [Set<IndicatorId>, (id: IndicatorId) => void, () => vo
   return [useMemo(() => new Set(ids), [ids]), toggle, (preset: IndicatorId[] = DEFAULT_INDICATORS) => setIds(preset)];
 }
 
+/** One click for a whole set of indicators; the Indicators menu fine-tunes it. */
+function PresetBar({ show, apply }: { show: Set<IndicatorId>; apply: (ids: IndicatorId[]) => void }) {
+  return (
+    <div className="flex overflow-hidden rounded-lg border border-line" role="group" aria-label="Indicator presets">
+      {PRESETS.map((p) => {
+        const on = p.ids.length === show.size && p.ids.every((id) => show.has(id));
+        return (
+          <button key={p.id} onClick={() => apply(p.ids)} title={p.title} aria-pressed={on}
+            className={`px-2.5 py-1 text-xs ${on ? 'bg-accent text-white' : 'bg-card-2 text-ink-2 hover:text-ink'}`}>{p.label}</button>
+        );
+      })}
+    </div>
+  );
+}
+
 function IndicatorPicker({ show, toggle, reset }: { show: Set<IndicatorId>; toggle: (id: IndicatorId) => void; reset: (preset?: IndicatorId[]) => void }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -64,16 +86,6 @@ function IndicatorPicker({ show, toggle, reset }: { show: Set<IndicatorId>; togg
       </button>
       {open && (
         <div className="absolute right-0 z-30 mt-2 max-h-[75vh] w-72 overflow-y-auto rounded-xl border border-line bg-card p-3 shadow-2xl shadow-black/50">
-          <p className="mb-1 text-[11px] uppercase tracking-wider text-ink-3">Presets</p>
-          <div className="mb-3 flex flex-wrap gap-1">
-            {PRESETS.map((p) => {
-              const on = p.ids.length === show.size && p.ids.every((id) => show.has(id));
-              return (
-                <button key={p.id} onClick={() => reset(p.ids)}
-                  className={`rounded-md px-2 py-1 text-xs ${on ? 'bg-accent text-white' : 'bg-card-2 text-ink-2 hover:text-ink'}`}>{p.label}</button>
-              );
-            })}
-          </div>
           {groups.map((g) => (
             <div key={g} className="mb-2">
               <p className="mb-1 text-[11px] uppercase tracking-wider text-ink-3">{g}</p>
@@ -87,7 +99,7 @@ function IndicatorPicker({ show, toggle, reset }: { show: Set<IndicatorId>; togg
               </div>
             </div>
           ))}
-          <button onClick={() => reset()} className="mt-1 text-xs text-accent hover:underline">Back to defaults (Model 4)</button>
+          <button onClick={() => reset()} className="mt-1 text-xs text-accent hover:underline">Clear all (Clean)</button>
         </div>
       )}
     </div>
@@ -287,6 +299,7 @@ export function ChartPage({ symbol, initialTf, setSymbol }: { symbol: string; in
                 <button key={name} onClick={() => setTf(name)} className={`px-2.5 py-1 text-xs ${tf === name ? 'bg-accent text-white' : 'bg-card-2 text-ink-2 hover:text-ink'}`}>{name}</button>
               ))}
             </div>
+            <PresetBar show={show} apply={reset} />
             <IndicatorPicker show={show} toggle={toggle} reset={reset} />
           </div>
         }

@@ -81,7 +81,9 @@ function Dashboard({ user }: { user: User | null }) {
   const { data: status, error, reload } = usePoll<Status>('/api/status', 5_000);
   const live = status?.feed.state === 'live';
   // The engine's time normally trails the clock by about a minute (it moves when each 1m candle closes).
-  const behindMin = status?.engineClock ? Math.floor((Date.now() - status.engineClock) / 60_000) : null;
+  // On standby the engine clock stands still (the other copy trades): freshness then comes from the candles.
+  const freshAs = status?.backup.standby ? status.dataTime : status?.engineClock;
+  const behindMin = freshAs ? Math.floor((Date.now() - freshAs) / 60_000) : null;
   const behind = behindMin !== null && behindMin >= 3;
   const control = async (path: string, confirmText?: string) => {
     if (confirmText && !confirm(confirmText)) return;
@@ -157,15 +159,20 @@ function Dashboard({ user }: { user: User | null }) {
           </nav>
         </header>
 
-        {behind && (
+        {behind ? (
           <div role="alert" className="border-b border-warning/40 bg-warning/15 px-4 py-2 text-sm text-warning md:px-6">
             <b>Data is {duration(behindMin! * 60_000)} behind.</b>{' '}
-            {status?.backup.standby
-              ? 'This copy of the engine is on standby (another copy holds the lock), so it is not processing candles.'
-              : `The server has had no new candles since ${dateTime(status!.engineClock)} UTC${status?.feed.lastError ? ` (last error: ${status.feed.lastError})` : ''}.`}
+            The server has had no new candles since {dateTime(freshAs!)} UTC{status?.binanceBlockedUntil
+              ? `: Binance has blocked this server's IP for too many requests until ${hhmm(status.binanceBlockedUntil)} UTC. The server sends nothing until then (each request would extend the block), then catches up by itself`
+              : status?.feed.lastError ? ` (last error: ${status.feed.lastError})` : ''}.
             {' '}Charts, setups and signals are out of date until it catches up: don't trade from them meanwhile.
           </div>
-        )}
+        ) : status?.backup.standby ? (
+          <div className="border-b border-accent/30 bg-accent/10 px-4 py-1.5 text-xs text-ink-2 md:px-6">
+            View-only for a moment: another copy of the engine (usually the previous one, after a republish) still holds the lock and does the trading.
+            Charts and analysis are live; this copy takes over within about 2 minutes once the other stops. Taking or closing trades works after that.
+          </div>
+        ) : null}
         <main className="flex-1 px-4 py-5 md:px-6">
           {route.page === 'overview' && <Overview go={go} />}
           {route.page === 'ideas' && <Ideas go={go} />}

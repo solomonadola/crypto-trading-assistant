@@ -63,6 +63,24 @@ describe('BinancePublic', () => {
     expect(sleeps[0]).toBeLessThanOrEqual(2000);
   });
 
+  it('asks only for the candles a range needs: a one-minute catch-up costs weight 1, not 10', async () => {
+    const { c, urls } = client([{ body: [kline(0), kline(60_000), kline(120_000)] }]);
+    await c.klinesRange('BTCUSDT', '1m', 0, 120_000);
+    expect(urls[0]).toContain('limit=3&');
+  });
+
+  it('after a 418 ban sends nothing to Binance until the ban ends', async () => {
+    const until = Date.now() + 10 * 60_000;
+    const ban = { status: 418, body: `{"code":-1003,"msg":"Way too many requests; IP(1.2.3.4) banned until ${until}. Please use the websocket for live updates to avoid bans."}` };
+    const { c, urls } = client([ban, { body: { serverTime: 9 } }]);
+    await expect(c.serverTime()).rejects.toThrow(/banned/);
+    expect(c.blockedUntil()).toBe(until);
+    // Later calls fail at once, without a request that would extend the ban.
+    await expect(c.serverTime()).rejects.toThrow(/paused until/);
+    await expect(c.klines('BTCUSDT', '1m', { limit: 5 })).rejects.toThrow(/paused until/);
+    expect(urls).toHaveLength(1);
+  });
+
   it('never retries a 418 ban or a bad request', async () => {
     await expect(client([{ status: 418, body: 'banned' }]).c.serverTime()).rejects.toMatchObject({ status: 418 });
     const bad = client([{ status: 400, body: '{"code":-1121,"msg":"Invalid symbol."}' }]);

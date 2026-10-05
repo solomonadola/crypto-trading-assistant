@@ -104,13 +104,14 @@ export const INDICATORS = [
 ] as const;
 export type IndicatorId = (typeof INDICATORS)[number]['id'];
 /** One-click sets of indicators, each for one way of reading the chart. */
-export const PRESETS: { id: string; label: string; ids: IndicatorId[] }[] = [
-  { id: 'model4', label: 'Model 4', ids: ['htf', 'liquidity', 'plan', 'ema50', 'volume', 'trades', 'positions'] },
-  { id: 'scalp', label: 'Scalp', ids: ['scalp', 'ema20', 'vwap', 'volume', 'trades', 'positions'] },
-  { id: 'patterns', label: 'Patterns', ids: ['patterns', 'wyckoff', 'ema50', 'volume'] },
-  { id: 'minimal', label: 'Minimal', ids: ['volume', 'positions'] },
-  { id: 'all', label: 'Everything', ids: INDICATORS.map((i) => i.id).filter((id) => id !== 'profile7d') },
+export const PRESETS: { id: string; label: string; title: string; ids: IndicatorId[] }[] = [
+  { id: 'clean', label: 'Clean', title: 'Candles with your open positions and trades only', ids: ['positions', 'trades'] },
+  { id: 'model4', label: 'Model 4', title: '4h zones, FVGs and order blocks, liquidity, the plan, EMA50, volume', ids: ['htf', 'liquidity', 'plan', 'ema50', 'volume', 'trades', 'positions'] },
+  { id: 'scalp', label: 'Scalp', title: 'Scalp setups, EMA20, VWAP, volume', ids: ['scalp', 'ema20', 'vwap', 'volume', 'trades', 'positions'] },
+  { id: 'patterns', label: 'Patterns', title: 'Chart patterns, Wyckoff, EMA50, volume', ids: ['patterns', 'wyckoff', 'ema50', 'volume', 'positions'] },
+  { id: 'all', label: 'Everything', title: 'Every layer at once', ids: INDICATORS.map((i) => i.id).filter((id) => id !== 'profile7d') },
 ];
+/** A clean chart by default: candles, your open positions and your trades; a preset adds the rest. */
 export const DEFAULT_INDICATORS: IndicatorId[] = PRESETS[0].ids;
 
 export interface ChartOverlays {

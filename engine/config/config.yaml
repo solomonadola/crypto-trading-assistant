@@ -21,6 +21,10 @@ feed:
   # Coins fed before the scanner exists (Phase 4). BTC is always fed: filters use it.
   watch_symbols: [BTCUSDT, ETHUSDT, SOLUSDT]
   price_poll_ms: 2000           # live prices for the dashboard only; the engine acts on closed candles
+  # Mark prices and funding for every coin, pushed once a second: no REST weight (the REST price check is only a fallback).
+  mark_price_stream: wss://fstream.binance.com/market/ws/!markPrice@arr@1s
+  # Closed candles for every coin and timeframe the feed watches; REST only for history, gaps and late messages.
+  kline_stream: wss://fstream.binance.com/market/stream
   poll_delay_ms: 3000           # wait after each minute closes before asking Binance for it
   concurrency: 8                # requests in flight at once (Binance allows far more)
   stall_after_sec: 120          # no new 1m candle for this long = feed stalled, no new entries
@@ -41,7 +45,7 @@ backup:
   target: firestore             # firestore (AI Studio) | file (VPS/local); BACKUP_TARGET overrides
   namespace: hosted             # production uses this; development uses "local" (ENGINE_NAMESPACE overrides)
   events_flush_sec: 30          # trade events written to Firestore at most this often
-  lock_lease_sec: 300           # single-engine lease, renewed at half this (about 580 writes a day)
+  lock_lease_sec: 90            # single-engine lease, renewed at half this (about 1,900 writes a day); a paused copy loses it this fast
   file_keep_days: 14            # daily SQLite copies in data/engine/backups
 
 scanner:
@@ -100,7 +104,7 @@ speed:
   groups:
     calm:   { risk_pct: 1.0, stop_buffer_atr_15m: 0.3, max_hold_hours: 48, slippage_pct: 0.05 }
     normal: { risk_pct: 1.0, stop_buffer_atr_15m: 0.3, max_hold_hours: 48, slippage_pct: 0.05 }
-    wild:   { risk_pct: 0.5, stop_buffer_atr_15m: 0.6, max_hold_hours: 24, slippage_pct: 0.15, max_open: 2 }
+    wild:   { risk_pct: 0.5, stop_buffer_atr_15m: 0.6, max_hold_hours: 24, slippage_pct: 0.15 }   # add max_open: N to cap open wild trades
   min_history_days: 14           # new listings are skipped until then
 
 timeframes: { bias: 4h, setup: 1h, trigger: 15m, exits: 1m }
@@ -184,10 +188,10 @@ allocation:
     - { min_score: 5, capital_pct: 20 }
     - { min_score: 6, capital_pct: 30 }
     - { min_score: 7, capital_pct: 40 }
-  max_open_trades: 5
+  max_open_trades: null          # no limit (simulation); a number caps trades open at once
   max_total_exposure_pct: 300   # 3x leverage: margin used is at most the equity
   max_loss_per_trade_pct: 1.0
-  max_open_risk_pct: 5.0        # five trades at 1% each
+  max_open_risk_pct: null       # no limit; a number caps the total risk of open trades (1% each)
   max_correlated_trades: 2
   correlation_groups:
     memes: [DOGE, SHIB, PEPE, WIF, BONK, FLOKI]
@@ -230,7 +234,7 @@ exits:
     stagnation: { rvol_max: 0.5, candles: 6, max_peak_pct: 1.0 }
 
 risk:
-  max_trades_per_day: 5          # all coins and models together, manual trades included (UTC day)
+  max_trades_per_day: null       # no limit; a number caps new trades per UTC day (all models and manual trades)
   max_trades_per_symbol_per_day: 2
   daily_loss_limit_pct: 3.0
   max_drawdown_kill_pct: 15.0

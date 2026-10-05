@@ -290,6 +290,9 @@ export interface FeedStatus {
   lastError: string | null;
   /** Local clock minus Binance server time, ms. */
   clockOffsetMs: number;
+  /** Since the start: candles taken from the WebSocket, and REST candle requests made (history, gaps, late messages). */
+  fromStream?: number;
+  restRequests?: number;
 }
 
 /** A confirmation pushed to the dashboard for its notifications (engine/src/notices.ts). */

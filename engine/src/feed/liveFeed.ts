@@ -1,8 +1,10 @@
-// Live candles from Binance's public REST API. A few seconds after every minute
-// closes, asks for each watched symbol's candles newer than the last one
-// stored, stores them, and hands the new ones to listeners in engine order
-// (compareCandles). Polling rather than a WebSocket: it fills gaps by design,
-// and the strategy acts on 15m closes, where seconds do not matter.
+// Live candles. A few seconds after every minute closes, takes each watched
+// symbol's candles newer than the last one stored, stores them, and hands the
+// new ones to listeners in engine order (compareCandles). The candles come
+// from the WebSocket stream when it has every one needed (no request weight,
+// and it keeps working while Binance blocks the IP's REST requests); anything
+// it does not have (history, a gap after a disconnect, a late message) comes
+// from the REST API, so gaps are still filled by design.
 //
 // A symbol seen for the first time gets `history` candles per timeframe as
 // warm-up; those are stored and handed to history listeners (for analysis),
@@ -11,6 +13,7 @@
 // engine processes the gap exactly as if it had been running.
 import { TIMEFRAME_MS, compareCandles, type Candle, type FeedStatus, type Timeframe } from '../../../shared/types';
 import type { BinancePublic } from './binancePublic';
+import type { KlineStream } from './klineStream';
 import type { CandleStore } from './candleStore';
 import type { EngineConfig } from '../config';
 
@@ -27,6 +30,8 @@ export interface LiveFeedDeps {
   config: EngineConfig['feed'];
   /** Symbols to feed; called on every poll so the scanner can change it. */
   symbols: () => string[];
+  /** Closed candles from the WebSocket, used before REST; told which symbols to watch on every poll. */
+  stream?: Pick<KlineStream, 'take' | 'watch'>;
   /**
    * The engine's clock. A symbol with no stored candles but an engine that has
    * already run (a restored database) gets history back to this time, and the
@@ -107,16 +112,26 @@ export class LiveFeed {
     const started = (this.pollStartedAt = this.now());
     try {
       let errors = 0;
-      // Failing to read Binance's clock must not stop the candles: the last offset is kept.
-      await this.syncClock().catch((err) => { errors++; this.fail(err, 'clock sync'); });
+      // While Binance blocks this IP no REST request is sent (each would extend the block): stream candles only.
+      const blocked = this.deps.client.blockedUntil?.() ?? null;
+      if (blocked) {
+        errors++;
+        const msg = `Binance has blocked this IP's REST requests until ${new Date(blocked).toISOString().slice(11, 16)} UTC: candles from the stream only until then`;
+        if (this.st.lastError !== msg) this.log(msg);
+        this.st.lastError = msg;
+      } else {
+        // Failing to read Binance's clock must not stop the candles: the last offset is kept.
+        await this.syncClock().catch((err) => { errors++; this.fail(err, 'clock sync'); });
+      }
       const now = this.now() - this.clockOffsetMs;
       const symbols = this.deps.symbols();
       this.st.symbols = symbols;
+      this.deps.stream?.watch(symbols);
       const fresh: Candle[] = [];
       const jobs = symbols.flatMap((symbol) => this.deps.config.timeframes.map((tf) => ({ symbol, tf })));
       await inParallel(jobs, this.deps.config.concurrency, async ({ symbol, tf }) => {
         try {
-          fresh.push(...await this.catchUp(symbol, tf, now));
+          fresh.push(...await this.catchUp(symbol, tf, now, blocked !== null));
         } catch (err) {
           errors++;
           this.fail(err, `${symbol} ${tf}`);
@@ -136,13 +151,24 @@ export class LiveFeed {
     }
   }
 
-  private async catchUp(symbol: string, tf: Timeframe, now: number): Promise<Candle[]> {
+  private async catchUp(symbol: string, tf: Timeframe, now: number, blocked = false): Promise<Candle[]> {
     const tfMs = TIMEFRAME_MS[tf];
     const lastClosedOpen = Math.floor(now / tfMs) * tfMs - tfMs;
     const stored = this.deps.store.lastOpenTime(symbol, tf);
     if (stored !== null && stored >= lastClosedOpen) return [];
 
     const warmUp = stored === null;
+    // The stream, when it has every candle since the last one stored.
+    const streamed = warmUp ? null : this.deps.stream?.take(symbol, tf, stored + tfMs, lastClosedOpen);
+    if (streamed) {
+      const got = streamed.filter((c) => c.closeTime <= now);
+      this.deps.store.save(got);
+      this.st.fromStream = (this.st.fromStream ?? 0) + got.length;
+      return got;
+    }
+    // Otherwise REST, unless Binance blocks it: then this waits for the stream or the end of the block.
+    if (blocked) return [];
+    this.st.restRequests = (this.st.restRequests ?? 0) + 1;
     if (warmUp) this.st.state = 'backfilling';
     const resume = warmUp ? this.deps.resumeFrom?.() ?? 0 : 0;
     let from = warmUp ? lastClosedOpen - ((this.deps.config.history[tf] ?? 500) - 1) * tfMs : stored + tfMs;

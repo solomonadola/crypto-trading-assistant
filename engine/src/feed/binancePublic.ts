@@ -49,12 +49,18 @@ export interface FundingRate {
 const KLINE_LIMIT = 1500;
 // Binance allows 2400 request weight per minute per IP; stay well below it.
 const WEIGHT_SOFT_LIMIT = 1800;
+/** A pause longer than this (a ban) fails requests at once instead of waiting inside them. */
+const MAX_WAIT_MS = 60_000;
+/** A 418 without a readable end: assume this long. */
+const DEFAULT_BAN_MS = 10 * 60_000;
 
 export class BinancePublic {
   private readonly fetchFn: typeof fetch;
   private readonly sleep: (ms: number) => Promise<void>;
-  /** Until when requests are paused after a 429 or near the weight limit. */
+  /** Until when requests are paused: after a 429, near the weight limit, or for a 418 ban. */
   private pausedUntil = 0;
+  /** Binance's count of this IP's request weight in the current minute (all users of the IP), and when it was read. */
+  private weight = { used: 0, at: 0 };
 
   constructor(private readonly opts: BinancePublicOptions) {
     this.fetchFn = opts.fetchFn ?? fetch;
@@ -66,6 +72,8 @@ export class BinancePublic {
     let lastErr: unknown;
     for (let attempt = 0; attempt <= this.opts.maxRetries; attempt++) {
       const wait = this.pausedUntil - Date.now();
+      // During a ban every request extends it: none is sent, the caller fails at once.
+      if (wait > MAX_WAIT_MS) throw new BinanceError(`Binance requests paused until ${new Date(this.pausedUntil).toISOString().slice(11, 19)} UTC (IP banned or rate limited)`, 418);
       if (wait > 0) await this.sleep(wait);
       let res: Response;
       try {
@@ -76,12 +84,17 @@ export class BinancePublic {
         continue;
       }
       const used = Number(res.headers.get('x-mbx-used-weight-1m'));
+      if (used > 0) this.weight = { used, at: Date.now() };
       if (used > WEIGHT_SOFT_LIMIT) this.pausedUntil = nextMinute();
       if (res.ok) return (await res.json()) as T;
 
       const body = await res.text().catch(() => '');
-      // 418: IP banned for ignoring 429s. Retrying makes it longer.
-      if (res.status === 418) throw new BinanceError(`Binance banned this IP (418): ${body}`, 418);
+      // 418: IP banned for ignoring 429s. Any request before it ends makes it longer, so all of them stop.
+      if (res.status === 418) {
+        const until = Number(/banned until (\d+)/.exec(body)?.[1]);
+        this.pausedUntil = Math.max(this.pausedUntil, until > Date.now() ? until : Date.now() + DEFAULT_BAN_MS);
+        throw new BinanceError(`Binance banned this IP (418): ${body}`, 418);
+      }
       if (res.status === 429) {
         const retryAfter = Number(res.headers.get('retry-after'));
         this.pausedUntil = Date.now() + (retryAfter > 0 ? retryAfter * 1000 : 60_000);
@@ -97,6 +110,16 @@ export class BinancePublic {
       throw new BinanceError(`Binance ${res.status} on ${pathAndQuery}: ${body}`, res.status);
     }
     throw lastErr instanceof Error ? lastErr : new BinanceError(`Request failed: ${pathAndQuery}`, null);
+  }
+
+  /** Until when no request is sent (a ban or a long rate-limit wait); null when requests flow. */
+  blockedUntil(): number | null {
+    return this.pausedUntil - Date.now() > MAX_WAIT_MS ? this.pausedUntil : null;
+  }
+
+  /** This IP's request weight used in the current minute as Binance last reported it (limit 2400), or null if stale. */
+  usedWeight(): number | null {
+    return Date.now() - this.weight.at < 60_000 ? this.weight.used : null;
   }
 
   async serverTime(): Promise<number> {
@@ -117,7 +140,9 @@ export class BinancePublic {
     const out: Candle[] = [];
     let from = startTime;
     while (from <= endTime) {
-      const page = await this.klines(symbol, tf, { startTime: from, endTime, limit: KLINE_LIMIT });
+      // Only as many as the range holds: Binance weighs a request by its limit (1 under 100 candles, 10 over 1000).
+      const needed = Math.floor((endTime - from) / TIMEFRAME_MS[tf]) + 1;
+      const page = await this.klines(symbol, tf, { startTime: from, endTime, limit: Math.min(KLINE_LIMIT, needed) });
       if (!page.length) break;
       out.push(...page);
       const next = page[page.length - 1].openTime + TIMEFRAME_MS[tf];

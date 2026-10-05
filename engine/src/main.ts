@@ -13,6 +13,8 @@ import { EventLog } from './storage/eventLog';
 import { BinancePublic } from './feed/binancePublic';
 import { CandleStore, formingCandle } from './feed/candleStore';
 import { LiveFeed } from './feed/liveFeed';
+import { MarkPriceStream } from './feed/markPriceStream';
+import { KlineStream } from './feed/klineStream';
 import { replayCandles } from './feed/replayFeed';
 import { CommandError, Engine, type EngineCommand } from './core/engine';
 import { Results } from './storage/results';
@@ -187,7 +189,14 @@ function command(cmd: EngineCommand): ReturnType<typeof commandTx> {
 }
 
 function process_(batch: Candle[]): void {
-  if (!started || backup.standby) return;
+  if (!started) return;
+  if (backup.standby) {
+    // View-only: the analysis (setups, trends, patterns) stays current; trading is the lock holder's.
+    engine.seedHistory(batch);
+    ideaCache.clear();
+    broadcast('engine', { clock: engine.now() });
+    return;
+  }
   // A coin fed again after a while brings a gap of candles older than the engine's clock: the engine
   // skips those, so they go to the analysis only.
   const old = batch.filter((c) => c.closeTime < engine.now());
@@ -221,15 +230,25 @@ function pricesMessage() {
   }));
   return { time: Date.now(), prices: livePrices, positions };
 }
+// Mark prices from Binance's WebSocket (no request weight); REST only for coins it has nothing fresh for.
+const marks = new MarkPriceStream({ url: config.feed.mark_price_stream });
+marks.start();
+let lastRestPrices = 0;
 async function pollPrices(): Promise<void> {
   if (streams.size) {
-    try {
-      const all = await client.tickerPrices();
-      livePrices = Object.fromEntries(symbols().filter((s) => all.has(s)).map((s) => [s, all.get(s)!]));
-      broadcast('prices', pricesMessage());
-    } catch (err) {
-      console.log(`[prices] ${err instanceof Error ? err.message : String(err)}`);
+    const want = symbols();
+    const prices = marks.prices(want);
+    if (want.some((s) => !(s in prices)) && Date.now() - lastRestPrices >= 10_000 && !client.blockedUntil()) {
+      lastRestPrices = Date.now();
+      try {
+        const all = await client.tickerPrices();
+        for (const s of want) if (!(s in prices) && all.has(s)) prices[s] = all.get(s)!;
+      } catch (err) {
+        console.log(`[prices] ${message(err)}`);
+      }
     }
+    livePrices = prices;
+    broadcast('prices', pricesMessage());
   }
   setTimeout(() => void pollPrices(), config.feed.price_poll_ms);
 }
@@ -274,6 +293,7 @@ function startEngine(): void {
 const STANDBY_MESSAGE = 'This server copy is on standby: another copy of the engine holds the lock (usually a second Cloud Run instance after a republish). '
   + 'It takes over within about 5 minutes once the other one stops. If this keeps happening, set the service to at most 1 instance.';
 let holding = false;
+let lastStandbyPull = 0;
 async function holdLock(): Promise<void> {
   if (!cloud) {
     if (!started) startEngine();
@@ -301,8 +321,9 @@ async function holdLock(): Promise<void> {
     } else if (!mine && !backup.standby) {
       backup.standby = true;
       console.log('[backup] another engine holds the lock: this one shows data and does not trade');
-    } else if (!mine) {
-      // Still on standby: keep showing what the engine holding the lock has done.
+    } else if (!mine && Date.now() - lastStandbyPull >= 60_000) {
+      // Still on standby: keep showing what the engine holding the lock has done (once a minute: Firestore reads cost).
+      lastStandbyPull = Date.now();
       const pulled = await pullFromCloud();
       if (pulled) startEngine();
     }
@@ -319,7 +340,11 @@ async function holdLock(): Promise<void> {
 
 await holdLock();
 
-const feed = new LiveFeed({ client, store, config: config.feed, symbols, resumeFrom: () => engine.now() });
+// Candles from the WebSocket first; the feed asks REST only for what it does not have.
+const klines = new KlineStream({ url: config.feed.kline_stream, timeframes: config.feed.timeframes });
+klines.watch(symbols());
+klines.start();
+const feed = new LiveFeed({ client, store, config: config.feed, symbols, stream: klines, resumeFrom: () => engine.now() });
 feed.onCandles(process_);
 feed.onHistory((candles) => engine.seedHistory(candles));
 
@@ -336,14 +361,23 @@ const timers = [
     }
   }, 3_600_000),
   setInterval(() => void pushToCloud(), config.backup.events_flush_sec * 1000),
-  setInterval(() => void holdLock(), (config.backup.lock_lease_sec * 1000) / 2),
 ];
+
+// The lock: renewed at half the lease; checked every 15 s while on standby, so this copy takes over soon after
+// the holder stops (a republish, or Cloud Run pausing it) instead of minutes later.
+let lockTimer: ReturnType<typeof setTimeout> | null = null;
+function lockLoop(): void {
+  lockTimer = setTimeout(() => { void holdLock().finally(lockLoop); }, backup.standby ? 15_000 : (config.backup.lock_lease_sec * 1000) / 2);
+}
+lockLoop();
 
 // ---------------------------------------------------------------- scanner
 
 let lastScan: ScanResult | null = null;
 const symbolsCache: { list: SymbolInfo[]; at: number } = { list: [], at: 0 };
 async function rescan(): Promise<void> {
+  // A standby copy takes the coin list from the backup: the scan is the heaviest use of Binance's request limit.
+  if (backup.standby) return;
   try {
     lastScan = await scan(client, config.scanner, Date.now(), symbolsCache);
     engine.setSymbolRules(Object.fromEntries(symbolsCache.list.map((s) => [s.symbol, { stepSize: s.stepSize, minQty: s.minQty, minNotional: s.minNotional }])));
@@ -358,8 +392,11 @@ async function rescan(): Promise<void> {
     console.log(`[scanner] failed, keeping ${universe.length} coins: ${message(err)}`);
   }
   try {
-    const fed = new Set(symbols());
-    for (const p of await client.premiumIndex()) if (fed.has(p.symbol)) engine.onFunding(p.symbol, p.lastFundingRate);
+    const fed = symbols();
+    // Funding from the stream; REST only when it has none for some coin.
+    const missing = fed.filter((s) => marks.funding(s) === null);
+    for (const s of fed) { const f = marks.funding(s); if (f !== null) engine.onFunding(s, f); }
+    if (missing.length) for (const p of await client.premiumIndex()) if (missing.includes(p.symbol)) engine.onFunding(p.symbol, p.lastFundingRate);
   } catch (err) {
     console.log(`[funding] failed: ${message(err)}`);
   }
@@ -394,6 +431,12 @@ app.get('/api/status', (_req, res) => {
     configHash: hash,
     database: dbPath,
     engineClock: engine.now(),
+    // Binance has blocked this server's IP (too many requests) until then: no requests are sent meanwhile.
+    binanceBlockedUntil: client.blockedUntil(),
+    // Of 2400 a minute, counted by Binance per IP: on a shared IP (Cloud Run) other apps' requests count too.
+    binanceWeight: client.usedWeight(),
+    // The newest 1m candle the feed has: how fresh charts and analysis are, also on a standby copy.
+    dataTime: Math.max(0, ...Object.values(feed.status().lastCloseTime)),
     feed: status,
     // The engine has no time until its first candle closes; 0 would read as 1970.
     session: engine.now() ? engine.sessionInfo() : null,
@@ -463,9 +506,9 @@ app.post('/api/positions/open', async (req, res) => {
     res.status(400).json({ ok: false, error: 'symbol and side (long or short) are required' });
     return;
   }
-  let mark: number | undefined;
+  let mark: number | undefined = marks.price(symbol) ?? undefined;
   try {
-    mark = (await client.premiumIndex()).find((x) => x.symbol === symbol)?.markPrice;
+    if (mark === undefined) mark = (await client.premiumIndex()).find((x) => x.symbol === symbol)?.markPrice;
   } catch (err) {
     res.status(502).json({ ok: false, error: `Could not get the mark price from Binance: ${message(err)}` });
     return;
@@ -494,10 +537,12 @@ app.post('/api/positions/open', async (req, res) => {
 });
 /** Binance's mark prices of the open positions' coins; empty when Binance cannot be reached (closes then wait for the next 1m candle). */
 async function markPrices(): Promise<Record<string, number>> {
-  const held = new Set(engine.positions().map((p) => p.symbol));
-  if (!held.size) return {};
+  const held = [...new Set(engine.positions().map((p) => p.symbol))];
+  const fromStream = marks.prices(held);
+  if (held.every((s) => s in fromStream)) return fromStream;
   try {
-    return Object.fromEntries((await client.premiumIndex()).filter((x) => held.has(x.symbol) && x.markPrice > 0).map((x) => [x.symbol, x.markPrice]));
+    const rest = await client.premiumIndex();
+    return { ...Object.fromEntries(rest.filter((x) => held.includes(x.symbol) && x.markPrice > 0).map((x) => [x.symbol, x.markPrice])), ...fromStream };
   } catch (err) {
     console.log(`[control] mark prices unavailable, closing at the next 1m candle instead: ${message(err)}`);
     return {};
@@ -798,6 +843,9 @@ const shutdown = async () => {
   console.log('[engine] shutting down');
   feed.stop();
   for (const t of timers) clearInterval(t);
+  marks.stop();
+  klines.stop();
+  if (lockTimer) clearTimeout(lockTimer);
   try {
     await pushToCloud();
     if (cloud && !backup.standby) await cloud.release(backupState(), Date.now());
