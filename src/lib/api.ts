@@ -27,6 +27,10 @@ export interface Status {
   engineVersion: string;
   configHash: string;
   engineClock: number;
+  /** Binance has blocked the server's IP until then (too many requests); null normally. */
+  binanceBlockedUntil: number | null;
+  /** Close time of the newest 1m candle received: how fresh the data is (on standby the engine clock stands still). */
+  dataTime: number;
   feed: FeedStatus;
   session: SessionInfo | null;
   openPositions: number;
