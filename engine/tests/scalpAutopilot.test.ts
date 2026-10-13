@@ -5,6 +5,7 @@ import type { EngineConfig } from '../src/config';
 
 function mockConfig(): EngineConfig['scalp_autopilot'] {
   return {
+    enabled: true,
     timeframes: ['5m', '15m'],
     kinds: ['sweep_reclaim', 'vwap_bounce', 'ema_pullback', 'orb', 'fvg_retest', 'volume_climax'],
     max_signal_age_sec: 120,
@@ -47,6 +48,24 @@ function makeCandles(count: number, basePrice = 100, tfMinutes = 5): Candle[] {
 }
 
 describe('decideScalp', () => {
+  it('skips if autopilot is disabled in config', () => {
+    const cfg = mockConfig();
+    cfg.enabled = false;
+    const res = decideScalp({
+      symbol: 'TESTUSDT',
+      tf: '5m',
+      candles: makeCandles(50),
+      candles1h: makeCandles(100, 100, 60),
+      btc1h: makeCandles(10, 50000, 60),
+      sessionOpens: [],
+      costPct: 0.2,
+      now: 1_700_000_000_000 + 50 * 300_000,
+      config: cfg,
+    });
+    expect(res.order).toBeNull();
+    expect(res.skipped).toBe('autopilot_disabled');
+  });
+
   it('skips if timeframe is not enabled in config', () => {
     const cfg = mockConfig();
     cfg.timeframes = ['15m'];

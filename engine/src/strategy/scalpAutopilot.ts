@@ -47,6 +47,7 @@ export interface ScalpDecisionResult {
 
 /** The order the autopilot would place for the candle that just closed, or null with the reason. */
 export function decideScalp(i: ScalpDecisionInput): ScalpDecisionResult {
+  if (i.config.enabled === false) return { order: null, skipped: 'autopilot_disabled' };
   if (!i.config.timeframes.includes(i.tf)) return { order: null, skipped: 'timeframe_not_enabled' };
 
   const lastCandle = i.candles[i.candles.length - 1];

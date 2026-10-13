@@ -25,6 +25,8 @@ describe('engine config', () => {
     expect([c.risk.max_trades_per_symbol_per_day, c.risk.daily_loss_limit_pct, c.risk.max_drawdown_kill_pct]).toEqual([2, 3, 15]);
     expect(c.speed.min_history_days).toBe(14);
     expect(c.breakout.enabled).toBe(false);
+    expect(c.scalp_autopilot.enabled).toBe(false);
+    expect(c.scalp_autopilot.kinds).toEqual([]);
     expect(c.feed.watch_symbols).toContain('BTCUSDT');
   });
 

@@ -59,7 +59,7 @@ const config = loadConfig();
 const hash = configHash(config);
 const dbPath = process.env.ENGINE_DB_PATH || config.storage.path;
 const db = openDb(dbPath);
-let quantAutopilot = getKv(db, QUANT_AUTOPILOT_KEY) !== 'false';
+let quantAutopilot = config.scalp_autopilot.enabled && getKv(db, QUANT_AUTOPILOT_KEY) !== 'false';
 const store = new CandleStore(db);
 const events = new EventLog(db);
 const signals = new SignalLog(db);

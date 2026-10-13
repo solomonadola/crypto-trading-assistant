@@ -233,8 +233,9 @@ exits:
 # The Quant Scalp Autopilot (main.ts): scalp setups placed as limit orders at their key level.
 # Its trades go through the engine's risk rules plus these, and are recorded as setup "scalp".
 scalp_autopilot:
+  enabled: false                # disabled: zero setups survived 6-month baseline validation (see BASELINE.md)
   timeframes: [5m, 15m]         # setups on these timeframes are taken (1m is left for trades by hand)
-  kinds: [sweep_reclaim, vwap_bounce, ema_pullback, orb, fvg_retest, volume_climax]
+  kinds: []                     # no surviving setups: all failed or were blocked by fee drag
   max_stop_pct: 2.2             # wider stops are skipped
   max_signal_age_sec: 90        # only a candle that has just closed: never one replayed after a restart or a feed gap
   max_trades_per_day: null      # no daily cap on scalps; a number sets one (UTC day), apart from risk.max_trades_per_day
