@@ -78,6 +78,14 @@ export interface MarketRow {
     change3dPct: number;
     actionPlan: string;
   } | null;
+  htfPoi?: {
+    kind: 'zone' | 'fvg' | 'order_block';
+    dir: 'long' | 'short';
+    low: number;
+    high: number;
+    inPoi: boolean;
+    distPct: number;
+  } | null;
 }
 
 export interface Zone { id: string; type: 'demand' | 'supply'; low: number; high: number; status: string; touches: number; createdAt: number }

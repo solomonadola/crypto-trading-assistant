@@ -1049,6 +1049,24 @@ app.get('/api/market', (_req, res) => {
           speed: idea.speed, movingFast: idea.movingFast, pdPosition: idea.dealingRange?.position ?? null,
         };
       })(),
+      htfPoi: (() => {
+        const pts = engine.htfPoints(symbol);
+        const curPrice = last?.close;
+        if (!pts || curPrice == null || curPrice <= 0) return null;
+        const all = [
+          ...pts.long.map((p) => ({ ...p, dir: 'long' as const })),
+          ...pts.short.map((p) => ({ ...p, dir: 'short' as const })),
+        ];
+        if (!all.length) return null;
+        const withDist = all.map((p) => {
+          const inPoi = curPrice >= p.low && curPrice <= p.high;
+          const distPrice = inPoi ? 0 : curPrice > p.high ? curPrice - p.high : p.low - curPrice;
+          const distPct = (distPrice / curPrice) * 100;
+          return { kind: p.kind, dir: p.dir, low: p.low, high: p.high, inPoi, distPct };
+        });
+        withDist.sort((a, b) => a.distPct - b.distPct);
+        return withDist[0];
+      })(),
     };
   }));
 });

@@ -5,6 +5,7 @@ import { Badge, Card, Empty, Kpi, ModelBadge, Pnl, SessionBadge, SideBadge, Tabl
 import { SessionTimeline } from '../components/SessionTimeline';
 import { EditPosition } from '../components/EditPosition';
 import { EquityChart } from '../components/charts';
+import { DealingRangeRadar } from '../components/DealingRangeRadar';
 
 export function StatusBadge({ status }: { status: string }) {
   const tone = status === 'taken' || status === 'working' ? 'good' : status === 'filtered' ? 'warning' : status === 'armed' ? 'london' : 'muted';
@@ -81,6 +82,8 @@ export function Overview({ go }: { go: (page: string, symbol?: string) => void }
           )}
         </Card>
       </div>
+
+      <DealingRangeRadar go={go} />
 
       <Card title="Equity" icon={<LineChart size={16} />} right={<span className="text-xs text-ink-3">last 7 days · 5-minute points</span>}>
         <EquityChart points={equity ?? []} startingBalance={acct?.startingBalance ?? 1000} />
