@@ -37,6 +37,47 @@ interface RawLevel {
  */
 const isStructural = (source: string) => !/^fib |EMA|VWAP/.test(source);
 
+/** A direction needs a trending market: 1h ADX at least this... */
+const MIN_ADX = 20;
+/** ...and the 1h choppiness index under this (61.8 and up is sideways). */
+const MAX_CHOP = 61.8;
+/** Without a direction: a last-24h range up to this many 1h ATRs is a consolidation, wider is chop. */
+const BOX_ATR = 5;
+
+/**
+ * The market's condition for the ideas (advisory; the engine's entries use
+ * biasAllows alone). A side only when the 1h EMAs line up (biasAllows), the
+ * 1h structure is not against them nor broken, and the 1h market trends (ADX
+ * and choppiness). Otherwise no side: consolidating in a tight box, or choppy.
+ */
+export function marketCondition(ctx: Context): TradeIdea['condition'] {
+  const adx = lastOf(ctx.adx1h);
+  const chop = lastOf(ctx.chop1h);
+  const atr = lastOf(ctx.atr1h);
+  const st1h = ctx.analysis.structure['1h'];
+  const trending = Number.isFinite(adx) && adx >= MIN_ADX && (!Number.isFinite(chop) || chop < MAX_CHOP);
+  const strength = `ADX ${Number.isFinite(adx) ? adx.toFixed(0) : '–'}, choppiness ${Number.isFinite(chop) ? chop.toFixed(0) : '–'}`;
+  const ema = biasAllows(ctx, 'long') ? 'long' : biasAllows(ctx, 'short') ? 'short' : null;
+  const against = ema === 'long' ? 'down' : 'up';
+  const with_ = ema === 'long' ? 'up' : 'down';
+  const structureOk = !!ema && st1h?.trend !== against && st1h?.broken !== with_;
+  const day = ctx.h1.candles.slice(-24);
+  const high = Math.max(...day.map((c) => c.high));
+  const low = Math.min(...day.map((c) => c.low));
+  if (ema && structureOk && trending) {
+    return { kind: ema === 'long' ? 'trend_up' : 'trend_down', reason: `1h EMAs and structure point ${with_}, and it trends (${strength})`, rangeHigh: null, rangeLow: null };
+  }
+  const why = [
+    ema ? `1h EMAs lean ${ema === 'long' ? 'up' : 'down'}` : '1h EMAs not lined up',
+    ema && !structureOk ? (st1h?.broken === with_ ? `the 1h ${with_}trend broke its protected level` : `1h structure is ${against}`) : null,
+    !trending ? `no trend strength (${strength})` : null,
+  ].filter(Boolean).join(', ');
+  const boxAtr = atr > 0 ? (high - low) / atr : Infinity;
+  return boxAtr <= BOX_ATR
+    ? { kind: 'consolidating', reason: `No clear direction: ${why}. Price is boxed in ${fmt(low)} – ${fmt(high)} over 24h (${boxAtr.toFixed(1)} ATR): wait for a close out of the box`, rangeHigh: high, rangeLow: low }
+    : { kind: 'choppy', reason: `No clear direction: ${why}. Swings of ${Number.isFinite(boxAtr) ? boxAtr.toFixed(1) : '–'} ATR both ways over 24h: whipsaws stop out both sides`, rangeHigh: high, rangeLow: low };
+}
+
 /** How far below (long) the price an entry area may be, in 1h ATRs. */
 const MAX_ENTRY_ATR = 3;
 
@@ -139,7 +180,7 @@ export function tradeIdea(ctx: Context, inputs: IdeaInputs): TradeIdea {
     .filter((l) => { const k = `${l.name}|${l.price}`; if (seen.has(k)) return false; seen.add(k); return true; })
     .sort((a, b) => Math.abs(a.distancePct) - Math.abs(b.distancePct));
   return {
-    ...idea, checklist: list, watch: watchLevels(idea, liquidity), quality: quality(idea, list),
+    ...idea, checklist: list, watch: watchLevels(idea, liquidity), quality: idea.bias === 'none' ? 0 : quality(idea, list),
     speed: ctx.speed ?? 'normal',
     movingFast: Number.isFinite(atr15) && m.high[n] - m.low[n] >= 3 * atr15,
     dealingRange: dealingRange(ctx),
@@ -171,17 +212,17 @@ function planIdea(ctx: Context, inputs: IdeaInputs): Planned {
   const levels = clusterLevels(rawLevels(ctx), price, tol);
   const st4h = ctx.analysis.structure['4h']?.trend ?? null;
 
-  // The models' trend (Section 18.3): 1h EMA50/200 and the 4h structure.
-  const long = biasAllows(ctx, 'long');
-  const short = biasAllows(ctx, 'short');
-  const bias: TradeIdea['bias'] = long ? 'long' : short ? 'short' : 'none';
+  // A side only with a clear direction: the models' trend (Section 18.3, 1h EMA50/200 and the 4h structure),
+  // the 1h structure agreeing, and a trending market. Otherwise consolidating or choppy, with no side.
+  const condition = marketCondition(ctx);
+  const bias: TradeIdea['bias'] = condition.kind === 'trend_up' ? 'long' : condition.kind === 'trend_down' ? 'short' : 'none';
   const biasReason = bias === 'none'
-    ? 'No trend for the models: the 1h close, EMA50 and EMA200 are not lined up (or the 4h structure is against them)'
-    : `1h close ${bias === 'long' ? 'above' : 'below'} EMA200, EMA50 ${bias === 'long' ? 'above it and rising' : 'below it and falling'}; 4h structure ${st4h ?? 'unknown'}`;
+    ? condition.reason
+    : `1h close ${bias === 'long' ? 'above' : 'below'} EMA200, EMA50 ${bias === 'long' ? 'above it and rising' : 'below it and falling'}; 4h structure ${st4h ?? 'unknown'}; ${condition.reason.replace(/^1h EMAs and structure point \w+, and it trends /, 'trending ')}`;
 
   const checklistFor: Direction = bias !== 'none' ? bias : st4h === 'down' ? 'short' : 'long';
   const base: Planned = {
-    symbol: ctx.symbol, asOf: ctx.t, price, atr1h: atr, bias, biasReason,
+    symbol: ctx.symbol, asOf: ctx.t, price, atr1h: atr, bias, biasReason, condition,
     trend: { '4h': ctx.analysis.structure['4h']?.trend ?? null, '1h': ctx.analysis.structure['1h']?.trend ?? null, '15m': ctx.analysis.structure['15m']?.trend ?? null },
     longState: ctx.analysis.long.state, shortState: ctx.analysis.short.state, checklistFor,
     levels: levels.map(({ band: _band, ...l }) => l).sort((x, y) => y.price - x.price),

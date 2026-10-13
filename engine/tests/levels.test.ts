@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { loadConfig } from '../src/config';
-import { clusterLevels, tradeIdea } from '../src/analysis/levels';
+import { clusterLevels, marketCondition, tradeIdea } from '../src/analysis/levels';
 import { series, type Context } from '../src/strategy/context';
 import type { Pivot } from '../src/analysis/indicators';
 import type { Zone } from '../src/analysis/zones';
@@ -192,5 +192,32 @@ describe('levels to wait for without a trend', () => {
     const w = tradeIdea(c, { armed: [], entryBlock: null }).watch;
     expect(w.find((x) => x.kind === 'range_top')!.ifBroken!.map((n) => n.price)).toEqual([110]);
     expect(w.find((x) => x.kind === 'range_bottom')!.ifBroken!.map((n) => n.price)).toEqual([92]);
+  });
+});
+
+describe('market condition: no side without a clear direction', () => {
+  it('a trend with ADX and low choppiness keeps its side', () => {
+    expect(marketCondition(v3Ctx()).kind).toBe('trend_up');
+    expect(marketCondition(v3Ctx('short')).kind).toBe('trend_down');
+  });
+
+  it('EMAs lined up but no trend strength: no side, and no quality to rank', () => {
+    const idea = tradeIdea(v3Ctx('long', { adx1h: flat(60, 14) }), { armed: [], entryBlock: null });
+    expect(idea.bias).toBe('none');
+    expect(idea.plan).toBeNull();
+    expect(idea.quality).toBe(0);
+    expect(idea.biasReason).toMatch(/no trend strength \(ADX 14/);
+  });
+
+  it('EMAs up but the 1h structure down: no side', () => {
+    const c = v3Ctx();
+    c.analysis.structure['1h'] = { trend: 'down', broken: null, protectedLow: null, protectedHigh: 101, highs: [], lows: [] };
+    expect(tradeIdea(c, { armed: [], entryBlock: null }).bias).toBe('none');
+  });
+
+  it('a tight 24h box is consolidating, wide swings are choppy', () => {
+    // 1h candles 0.6 tall with an ATR of 2: a 24h box well under 5 ATR.
+    expect(marketCondition(v3Ctx('long', { chop1h: flat(60, 70) }))).toMatchObject({ kind: 'consolidating' });
+    expect(marketCondition(v3Ctx('long', { chop1h: flat(60, 70), atr1h: flat(60, 0.2) })).kind).toBe('choppy');
   });
 });
