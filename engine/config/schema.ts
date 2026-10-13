@@ -267,6 +267,12 @@ export const configSchema = z.object({
     max_drawdown_kill_pct: pct,
     cooldown_after_loss_min: z.number().int().min(0),
     losing_streak_size_cut: z.object({ after_losses: posInt, size_mult: z.number().gt(0).max(1), reset_after_wins: posInt }).strict(),
+    btc_circuit_breaker: z.object({
+      enabled: z.boolean().default(true),
+      drop_5m_pct: z.number().max(0).default(-1.5),
+      cooldown_min: posInt.default(30),
+      cancel_pending_limits: z.boolean().default(true),
+    }).strict().optional(),
   }).strict(),
 
   sim: z.object({

@@ -145,6 +145,8 @@ export class Engine {
   /** Opening-range breakouts already taken, per coin and session. */
   private peakEquity: number;
   private dayStart = { day: -1, equity: 0 };
+  private circuitBreakerUntil = 0;
+  private circuitBreakerReason: string | null = null;
   private readonly cfg: EngineConfig;
 
   constructor(private readonly deps: EngineDeps) {
@@ -271,6 +273,20 @@ export class Engine {
     return this.portfolio.closedTrades();
   }
 
+  isCircuitBreakerActive(): boolean {
+    return this.clock < this.circuitBreakerUntil;
+  }
+
+  circuitBreaker(): { active: boolean; until: number; reason: string | null; btcChange5mPct: number | null } {
+    const active = this.isCircuitBreakerActive();
+    return {
+      active,
+      until: active ? this.circuitBreakerUntil : 0,
+      reason: active ? this.circuitBreakerReason : null,
+      btcChange5mPct: this.btcChange5mPct(),
+    };
+  }
+
   account(): AccountSummary {
     const priceOf = (s: string) => this.priceOf(s);
     const positions = this.portfolio.positions();
@@ -302,6 +318,7 @@ export class Engine {
         positionId: e.positionId, symbol: e.symbol, side: e.side, notional: e.notional, placedAt: e.placedAt,
         price: e.refPrice, orderType: e.orderType, stop: e.stop, target: e.target,
       })),
+      circuitBreaker: this.circuitBreaker(),
     };
   }
 
@@ -452,6 +469,9 @@ export class Engine {
     if (currentPrice !== null && s * (currentPrice - stop) <= 0) {
       throw new CommandError(`The price ${currentPrice} is already ${side === 'long' ? 'below' : 'above'} the stop ${stop}`);
     }
+    if (this.isCircuitBreakerActive() && symbol !== 'BTCUSDT' && side === 'long') {
+      throw new CommandError(`BTC circuit breaker active: ${this.circuitBreakerReason ?? 'rapid BTC flash drop'}`);
+    }
     if (setup === 'scalp') {
       const failures = this.scalpFailures(symbol, side, price, stop, speed);
       if (failures.length) throw new CommandError(`Not taken: ${failures.join(', ')}`);
@@ -490,6 +510,7 @@ export class Engine {
   private scalpFailures(symbol: string, side: Direction, entry: number, stop: number, speed: SpeedGroup): string[] {
     const cfg = this.cfg;
     const failures: string[] = [];
+    if (this.isCircuitBreakerActive() && (symbol !== 'BTCUSDT' || side === 'long')) failures.push('filter_btc_circuit_breaker');
     const block = this.sessions.entryBlock(this.clock);
     if (block === 'weekend' || block === 'funding_window') failures.push(`session_${block}`);
     const stopPct = (Math.abs(entry - stop) / entry) * 100;
@@ -514,6 +535,17 @@ export class Engine {
     const last = candles[candles.length - 1];
     const first = candles[0];
     if (!last || !first || last.closeTime - first.closeTime !== 3_600_000 || !(first.close > 0)) return null;
+    return (last.close / first.close - 1) * 100;
+  }
+
+  /** BTC's rapid change over the last 5 minutes from 1m closes; null without both candles. */
+  private btcChange5mPct(): number | null {
+    const tf = this.cfg.timeframes.exits;
+    const step = TIMEFRAME_MS[tf];
+    const candles = this.market.recent('BTCUSDT', tf, Math.round(300_000 / step) + 1);
+    const last = candles[candles.length - 1];
+    const first = candles[0];
+    if (!last || !first || last.closeTime - first.closeTime !== 300_000 || !(first.close > 0)) return null;
     return (last.close / first.close - 1) * 100;
   }
 
@@ -719,19 +751,42 @@ export class Engine {
 
   // ---------------------------------------------------------------- account-wide limits
 
-  /** Daily loss limit bookkeeping and the drawdown kill switch. */
+  /** Daily loss limit bookkeeping, drawdown kill switch, and BTC flash crash circuit breaker. */
   private guardrails(): TradeEvent[] {
     const equity = equityOf(this.portfolio, (s) => this.priceOf(s));
     const today = Math.floor(this.clock / DAY);
     if (this.dayStart.day !== today) this.dayStart = { day: today, equity };
     if (equity > this.peakEquity) this.peakEquity = equity;
     const drawdown = (1 - equity / this.peakEquity) * 100;
+    const out: TradeEvent[] = [];
     if (!this.portfolio.halted && drawdown >= this.cfg.risk.max_drawdown_kill_pct) {
-      const out = this.closeAll('kill');
+      out.push(...this.closeAll('kill'));
       out.push(this.emit('engine_halted', null, null, { reason: `drawdown ${drawdown.toFixed(1)}% from peak`, equity, peakEquity: this.peakEquity }));
       return out;
     }
-    return [];
+    const cb = this.cfg.risk.btc_circuit_breaker;
+    if (cb && cb.enabled) {
+      const btc5m = this.btcChange5mPct();
+      if (btc5m !== null && btc5m <= cb.drop_5m_pct) {
+        const until = this.clock + cb.cooldown_min * 60_000;
+        if (until > this.circuitBreakerUntil) {
+          this.circuitBreakerUntil = until;
+          this.circuitBreakerReason = `BTC dropped ${btc5m.toFixed(2)}% in 5m (threshold ${cb.drop_5m_pct}%)`;
+          if (cb.cancel_pending_limits) {
+            for (const e of this.portfolio.pendingEntries()) {
+              if (e.symbol !== 'BTCUSDT' && e.side === 'long') {
+                out.push(this.emit('order_cancelled', e.positionId, e.symbol, {
+                  reason: 'btc_circuit_breaker',
+                  placedAt: e.placedAt,
+                  btcDropPct: btc5m,
+                }));
+              }
+            }
+          }
+        }
+      }
+    }
+    return out;
   }
 
   private closeAll(reason: CloseReason, prices: Record<string, number> = {}, time = this.clock): TradeEvent[] {
@@ -845,6 +900,7 @@ export class Engine {
         continue;
       }
       if (windowClosed || busy || newListing) continue;
+      if (this.isCircuitBreakerActive() && symbol !== 'BTCUSDT' && dir === 'long') continue;
       const fresh = armHtfPoi(ctx, dir);
       if (!fresh) continue;
       this.htfArmed.set(key, fresh);
@@ -907,6 +963,7 @@ export class Engine {
       ...(fundingCheck.pass ? [] : ['filter_funding']),
       ...(btcCheck.pass ? [] : ['filter_btc']),
       ...(exhaustCheck.pass ? [] : ['filter_exhaustion']),
+      ...(this.isCircuitBreakerActive() && ctx.symbol !== 'BTCUSDT' && a.direction === 'long' ? ['filter_btc_circuit_breaker'] : []),
     ];
     return this.submit({
       ctx, id: a.id, direction: a.direction, setup: 'htf_poi', plan: planned.plan, score: a.factors.length, failures, level: chochLevel,
@@ -926,6 +983,7 @@ export class Engine {
       ...filters.filter((f) => !f.pass && !(f.name === 'fakeout' && !cfg.filters.fakeout.block_entry)).map((f) => `filter_${f.name}`),
       ...this.planFailures(ctx, plan),
       ...(score.total >= cfg.scoring.min_score ? [] : ['score_too_low']),
+      ...(this.isCircuitBreakerActive() && ctx.symbol !== 'BTCUSDT' && a.direction === 'long' ? ['filter_btc_circuit_breaker'] : []),
     ];
     return this.submit({
       ctx, id: a.id, direction: a.direction, setup: 'pullback', plan, score: score.total, failures, level: conf.level,
@@ -961,6 +1019,7 @@ export class Engine {
       ...(fundingCheck.pass ? [] : ['filter_funding']),
       ...(btcCheck.pass ? [] : ['filter_btc']),
       ...(exhaustCheck.pass ? [] : ['filter_exhaustion']),
+      ...(this.isCircuitBreakerActive() && ctx.symbol !== 'BTCUSDT' && a.direction === 'long' ? ['filter_btc_circuit_breaker'] : []),
     ];
     return this.submit({
       ctx, id: a.id, direction: a.direction, setup: 'zone_sweep', plan: planned.plan, score: a.factors.length, failures, level: conf.level,

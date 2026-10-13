@@ -1,4 +1,4 @@
-import { Activity, Briefcase, Hourglass, LineChart, Radio, X } from 'lucide-react';
+import { Activity, Briefcase, Hourglass, LineChart, Radio, ShieldAlert, X } from 'lucide-react';
 import { post, usePoll, usePrices, type AccountSummary, type ClosedTradeView, type EquityPoint, type SignalRecord } from '../lib/api';
 import { coin, dateTime, duration, hhmm, pct, price, signedUsd, usd, words } from '../lib/format';
 import { Badge, Card, Empty, Kpi, ModelBadge, Pnl, SessionBadge, SideBadge, Table, td } from '../components/ui';
@@ -33,6 +33,21 @@ export function Overview({ go }: { go: (page: string, symbol?: string) => void }
 
   return (
     <div className="space-y-5">
+      {acct?.circuitBreaker?.active && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-warning/40 bg-warning/10 p-3.5 text-sm text-warning">
+          <div className="flex items-center gap-2.5">
+            <ShieldAlert size={20} className="animate-pulse shrink-0 text-warning" />
+            <div>
+              <div className="font-semibold text-ink">BTC Flash-Crash Circuit Breaker Active</div>
+              <div className="text-xs text-ink-2">
+                {acct.circuitBreaker.reason || 'BTC experiencing rapid downward cascade'} · Altcoin long entries halted · Resting limits cancelled
+              </div>
+            </div>
+          </div>
+          <Badge tone="warning">Cooling down until {hhmm(acct.circuitBreaker.until)} UTC</Badge>
+        </div>
+      )}
+
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-6">
         <div className="col-span-2">
           <Kpi label="Equity" value={usd(equityNow)} sub={acct ? <>{pct(ret, 2, true)} since start · balance {usd(acct.balance)}</> : null}

@@ -250,6 +250,11 @@ risk:
   max_drawdown_kill_pct: 15.0
   cooldown_after_loss_min: 30
   losing_streak_size_cut: { after_losses: 3, size_mult: 0.5, reset_after_wins: 2 }
+  btc_circuit_breaker:
+    enabled: true
+    drop_5m_pct: -1.5           # BTC dropping faster than 1.5% in 5 min halts new alt longs
+    cooldown_min: 30            # remain halted for 30m after shock
+    cancel_pending_limits: true # cancels pullback limits waiting to catch falling knives
 
 sim:                            # simulated execution
   taker_fee_pct: 0.05           # every fill is a market or stop order

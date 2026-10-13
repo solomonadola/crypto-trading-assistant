@@ -160,6 +160,7 @@ export interface AccountSummary {
   halted: { reason: string; at: number } | null;
   positions: PositionView[];
   pendingEntries: { positionId: string; symbol: string; side: Direction; notional: number; placedAt: number; price?: number; orderType?: 'market' | 'limit'; stop?: number; target?: number | null }[];
+  circuitBreaker?: { active: boolean; until: number; reason: string | null; btcChange5mPct: number | null };
 }
 
 export interface ClosedTradeView {

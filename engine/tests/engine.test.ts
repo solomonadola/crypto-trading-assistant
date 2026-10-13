@@ -599,3 +599,74 @@ describe("the models' limit entries", () => {
     expect(config.sim.limit_entry_timeout_min).toBe(30);
   });
 });
+
+describe('BTC flash crash circuit breaker', () => {
+  it('triggers when BTC drops 1.5% in 5 minutes, cancelling alt long limits and blocking new longs', () => {
+    const e = engine((c) => {
+      c.risk.btc_circuit_breaker = {
+        enabled: true,
+        drop_5m_pct: -1.5,
+        cooldown_min: 30,
+        cancel_pending_limits: true,
+      };
+    });
+
+    const start = u('2026-07-15T12:00Z');
+    const initialBtc: Candle[] = [];
+    const initialEth: Candle[] = [];
+    for (let i = 0; i < 5; i++) {
+      const close = start + i * 60_000;
+      initialBtc.push({ symbol: 'BTCUSDT', tf: '1m', openTime: close - 60_000, closeTime: close, open: 100, high: 100, low: 100, close: 100, volume: 1, quoteVolume: 100, trades: 1 });
+      initialEth.push({ symbol: 'ETHUSDT', tf: '1m', openTime: close - 60_000, closeTime: close, open: 10, high: 10, low: 10, close: 10, volume: 1, quoteVolume: 10, trades: 1 });
+    }
+    e.onCandles([...initialBtc, ...initialEth]);
+
+    // Place a pending limit order on ETHUSDT (entry 9.5 below current price 10)
+    const placed = e.onCommand({
+      type: 'open',
+      symbol: 'ETHUSDT',
+      side: 'long',
+      price: 9.5,
+      time: start + 4 * 60_000,
+      stop: 9.0,
+      target: 11.0,
+      orderType: 'limit',
+      setup: 'manual',
+    });
+    expect(placed.map((x) => x.type)).toEqual(['order_placed']);
+    expect(e.account().pendingEntries).toHaveLength(1);
+
+    // Now BTC drops by 2.0% over the next 5 minutes (from 100 to 98)
+    const dropClose = start + 5 * 60_000;
+    const dropBtc: Candle = { symbol: 'BTCUSDT', tf: '1m', openTime: dropClose - 60_000, closeTime: dropClose, open: 100, high: 100, low: 97.9, close: 98, volume: 50, quoteVolume: 5000, trades: 10 };
+    const dropEth: Candle = { symbol: 'ETHUSDT', tf: '1m', openTime: dropClose - 60_000, closeTime: dropClose, open: 10, high: 10, low: 9.9, close: 10, volume: 1, quoteVolume: 10, trades: 1 };
+
+    const events = e.onCandles([dropBtc, dropEth]);
+    const cancellations = events.filter((x) => x.type === 'order_cancelled');
+    expect(cancellations).toHaveLength(1);
+    expect(cancellations[0].payload.reason).toBe('btc_circuit_breaker');
+    expect(e.account().pendingEntries).toHaveLength(0);
+    expect(e.isCircuitBreakerActive()).toBe(true);
+
+    // Trying to open a new alt long is rejected
+    expect(() => e.onCommand({
+      type: 'open',
+      symbol: 'ETHUSDT',
+      side: 'long',
+      price: 10,
+      time: dropClose,
+      stop: 9.5,
+      target: 11.5,
+      orderType: 'market',
+      setup: 'manual',
+    })).toThrow(/BTC circuit breaker active/);
+
+    // After 30 minutes, circuit breaker expires
+    const futureClose = dropClose + 31 * 60_000;
+    e.onCandles([
+      { symbol: 'BTCUSDT', tf: '1m', openTime: futureClose - 60_000, closeTime: futureClose, open: 98, high: 98, low: 98, close: 98, volume: 1, quoteVolume: 98, trades: 1 },
+    ]);
+    expect(e.isCircuitBreakerActive()).toBe(false);
+  });
+});
+
