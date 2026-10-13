@@ -27,9 +27,9 @@ describe('engine config', () => {
     expect(c.breakout.enabled).toBe(false);
     expect(c.scalp_autopilot.enabled).toBe(false);
     expect(c.scalp_autopilot.kinds).toEqual([]);
-    expect(c.sessions.entry_delay_min).toBe(0);
-    expect(c.models).toMatchObject({ pullback: false, zone_sweep: true, session_sweep: true, htf_poi: true });
-    expect(c.htf_poi.directions).toEqual(['long', 'short']);
+    expect(c.sessions.entry_delay_min).toBe(15);
+    expect(c.models).toMatchObject({ pullback: false, zone_sweep: false, session_sweep: false, htf_poi: true });
+    expect(c.htf_poi.directions).toEqual(['long']);
     expect(c.feed.watch_symbols).toContain('BTCUSDT');
   });
 

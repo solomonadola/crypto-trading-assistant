@@ -119,6 +119,7 @@ describe('Model 3 in the engine', () => {
   function setup(over: (c: ReturnType<typeof loadConfig>) => void = () => {}) {
     const config = loadConfig('engine/config/config.yaml');
     config.models.pullback = false;   // only the sweep model here
+    config.models.session_sweep = true;
     over(config);
     const e = new Engine({ config, configHash: 't', engineVersion: 't' });
     const m = m15(chart).map((c) => ({ ...c, openTime: c.openTime + shift, closeTime: c.closeTime + shift }));

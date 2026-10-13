@@ -70,7 +70,7 @@ sessions:
     - { name: asian,   tz: Asia/Tokyo,       open: "09:00", close: "18:00" }
     - { name: london,  tz: Europe/London,    open: "08:00", close: "17:00" }
     - { name: newyork, tz: America/New_York, open: "08:00", close: "17:00" }
-  entry_delay_min: 0
+  entry_delay_min: 15
   no_entry_before_end_min: 60
   exit_at_session_end: false     # v3: trades are held up to the speed group's max hold, across sessions
   skip_minutes_around_funding: 10   # 00:00, 08:00, 16:00 UTC
@@ -82,13 +82,13 @@ sessions:
 # Setups the engine trades (ENGINE_PLAN.md Section 18).
 models:
   pullback: false         # the classic zone pullback (Section 8.4); off: Model 1 replaces it
-  zone_sweep: true        # Model 1: sweep + CHoCH at a zone or order block (Section 18.5)
-  session_sweep: true     # Model 3: liquidity sweep in a killzone (Section 18.4)
+  zone_sweep: false       # Step 3: disabled (0 survivors, negative expectancy)
+  session_sweep: false    # Step 3: disabled (0 survivors, negative expectancy)
   htf_poi: true           # Model 4: 4h zone / FVG / order block + 15m CHoCH (htf_poi below)
 
 # Model 4: trade from 4h points of interest, confirmed on 15m CHoCH.
 htf_poi:
-  directions: [long, short]
+  directions: [long]             # Step 3 winning setting: long-only in 4H discount
   confirm_timeframes: [15m]      # strictly the 15m CHoCH confirms
   armed_expiry_hours: 12         # an armed setup with no CHoCH by then expires
   max_hold_hours: 8              # held for hours, not days: closed at the market after this
