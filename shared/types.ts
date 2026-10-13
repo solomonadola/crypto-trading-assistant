@@ -89,7 +89,7 @@ export interface SignalRecord {
   time: number;
   symbol: string;
   /** The model behind it; `manual` for trades taken by hand from the dashboard. */
-  setup: 'pullback' | 'breakout' | 'session_sweep' | 'zone_sweep' | 'htf_poi' | 'manual';
+  setup: 'pullback' | 'breakout' | 'session_sweep' | 'zone_sweep' | 'htf_poi' | 'manual' | 'scalp';
   direction: Direction;
   status: SignalStatus;
   reason: string | null;

@@ -79,8 +79,13 @@ export type EngineCommand =
   /**
    * A trade taken by hand: filled at once at `price` (the mark price when asked, plus slippage) and at
    * `time` (the wall clock), sized and limited by the same risk rules as the engine's own trades.
+   * `setup: 'scalp'` is the scalp autopilot's: it must also pass scalpFailures. `maxHoldMin` closes the
+   * position at the market after that long; `entryTimeoutMin` cancels a limit not filled by then.
    */
-  | { type: 'open'; symbol: string; side: Direction; price: number; time: number; stop: number; target: number | null; orderType?: 'market' | 'limit'; note?: string }
+  | {
+    type: 'open'; symbol: string; side: Direction; price: number; time: number; stop: number; target: number | null;
+    orderType?: 'market' | 'limit'; note?: string; setup?: 'manual' | 'scalp'; maxHoldMin?: number; entryTimeoutMin?: number;
+  }
   /**
    * Edit an open position's stop and/or take-profit (null removes the take-profit). `price` is the
    * current price: the stop must stay on the losing side of it and the take-profit on the winning side.
@@ -109,6 +114,10 @@ interface Shadow {
   sessionClose: number;
   speed: SpeedGroup;
   setup: SignalRecord['setup'];
+  /** Entries are limits at the plan's entry: a shadow only counts once the price comes back to it... */
+  filled: boolean;
+  /** ...by this time (the limit's timeout); otherwise it never happened. */
+  fillBy: number;
 }
 
 export class Engine {
@@ -128,6 +137,8 @@ export class Engine {
   private universe = new Set<string>();
   private readonly funding = new Map<string, number>();
   private readonly rules = new Map<string, SymbolRules>();
+  /** Per symbol, the close time of the newest 1m candle whose fills, stops and targets have been settled. */
+  private readonly settledTo = new Map<string, number>();
   private signals: SignalRecord[] = [];
   private shadows: Shadow[] = [];
   private shadowResults: ShadowResult[] = [];
@@ -307,7 +318,23 @@ export class Engine {
       let j = i;
       while (j < batch.length && batch[j].closeTime === t) j++;
       if (t >= this.clock) out.push(...this.onClose(t, batch.slice(i, j)));
+      else out.push(...this.settleLate(batch.slice(i, j)));
       i = j;
+    }
+    return out;
+  }
+
+  /**
+   * 1m candles that arrive after the clock has passed them: a coin whose fetch failed for a few minutes
+   * while the others came in, or one fed again after a gap. Too late for the setup rules, but the fills,
+   * stops and targets that happened in them are settled at the prices and times they happened, instead
+   * of the position carrying on as if its stop had never been touched. Each candle is settled once.
+   */
+  private settleLate(candles: Candle[]): TradeEvent[] {
+    this.market.add(candles);
+    const out: TradeEvent[] = [];
+    for (const c of candles) {
+      if (c.tf === this.cfg.timeframes.exits && c.closeTime > (this.settledTo.get(c.symbol) ?? 0)) out.push(...this.onMinute(c, c.closeTime));
     }
     return out;
   }
@@ -411,34 +438,76 @@ export class Engine {
     if (target === null) throw new CommandError(`A take-profit is needed: trades must aim for at least ${this.cfg.exits.min_rr}R`);
     const rr = netRewardRisk(price, stop, target, roundTripPct(costsFor(this.cfg, speed)));
     if (rr < this.cfg.exits.min_rr) throw new CommandError(`Reward:risk is ${rr.toFixed(2)}R after costs; at least ${this.cfg.exits.min_rr}R is needed`);
+    const orderType = cmd.orderType ?? 'market';
+    const setup = cmd.setup ?? 'manual';
+    // A market order fills at `price` (the mark), checked above; a limit fills against the latest price.
+    const currentPrice = orderType === 'limit' ? this.priceOf(symbol) : null;
+    if (currentPrice !== null && s * (currentPrice - stop) <= 0) {
+      throw new CommandError(`The price ${currentPrice} is already ${side === 'long' ? 'below' : 'above'} the stop ${stop}`);
+    }
+    if (setup === 'scalp') {
+      const failures = this.scalpFailures(symbol, side, price, stop, speed);
+      if (failures.length) throw new CommandError(`Not taken: ${failures.join(', ')}`);
+    }
     const lastHour = this.market.recent(symbol, '1h', 1)[0];
     const risk = decideEntry({
       config: this.cfg, t: cmd.time, symbol, side, entry: price, stop,
       portfolio: this.portfolio, priceOf: (x) => this.priceOf(x), dayStartEquity: this.dayStart.equity || this.portfolio.balance,
-      lastHourVolume: lastHour ? lastHour.quoteVolume : null, rules: this.rules.get(symbol) ?? null, score: Number.POSITIVE_INFINITY, speed,
+      lastHourVolume: lastHour ? lastHour.quoteVolume : null, rules: this.rules.get(symbol) ?? null, score: Number.POSITIVE_INFINITY, speed, setup,
     });
     if (!risk.ok) throw new CommandError(`Not taken: ${risk.reason!.replace(/^risk_/, '').replace(/_/g, ' ')}`);
-    const id = `manual-${symbol}-${cmd.time}`;
-    const orderType = cmd.orderType ?? 'market';
+    const id = `${setup}-${symbol}-${cmd.time}`;
     const order: OpenOrder = {
       action: 'open', orderType, side, notional: risk.notional, stop, target,
-      chochLevel: null, signalId: null, refPrice: price, speed, setup: 'manual', ...(cmd.note ? { note: cmd.note.slice(0, 200) } : {}),
+      chochLevel: null, signalId: null, refPrice: price, speed, setup, ...(cmd.note ? { note: cmd.note.slice(0, 200) } : {}),
+      ...(cmd.maxHoldMin ? { maxHoldMin: cmd.maxHoldMin } : {}), ...(cmd.entryTimeoutMin ? { entryTimeoutMin: cmd.entryTimeoutMin } : {}),
     };
     const placed = this.emit('order_placed', id, symbol, { ...order }, cmd.time);
     const pending = this.portfolio.pendingEntries().find((e) => e.positionId === id)!;
-    const currentPrice = this.priceOf(symbol);
 
-    // If orderType is limit and price has not pulled back to the limit level yet, keep order pending
-    if (orderType === 'limit' && currentPrice !== null) {
-      const reached = side === 'long' ? currentPrice <= price : currentPrice >= price;
-      if (!reached) {
-        return [placed];
-      }
-    }
+    // A limit the price has not come back to yet waits for it.
+    if (currentPrice !== null && (side === 'long' ? currentPrice > price : currentPrice < price)) return [placed];
 
-    // Filled at once, as a candle opening at the asked price at that moment.
-    const fill = this.fillEntry(pending, { symbol, tf: '1m', openTime: cmd.time, closeTime: cmd.time, open: price, high: price, low: price, close: price, volume: 0, quoteVolume: 0, trades: 0 });
+    // Filled at once, as a candle opening at that moment: a market order at the asked price, a limit the
+    // price is already through at the latest price (the better one, as an exchange would fill it).
+    const at = currentPrice ?? price;
+    const fill = this.fillEntry(pending, { symbol, tf: '1m', openTime: cmd.time, closeTime: cmd.time, open: at, high: at, low: at, close: at, volume: 0, quoteVolume: 0, trades: 0 });
     return [placed, ...fill];
+  }
+
+  /**
+   * The scalp autopilot's checks on top of the risk rules: no entries at the weekend or around funding,
+   * a stop no wider than scalp_autopilot.max_stop_pct and wide enough for the costs, and the funding,
+   * BTC and daily-range filters the engine's own models use (BTC over the hour to now, on 1m).
+   */
+  private scalpFailures(symbol: string, side: Direction, entry: number, stop: number, speed: SpeedGroup): string[] {
+    const cfg = this.cfg;
+    const failures: string[] = [];
+    const block = this.sessions.entryBlock(this.clock);
+    if (block === 'weekend' || block === 'funding_window') failures.push(`session_${block}`);
+    const stopPct = (Math.abs(entry - stop) / entry) * 100;
+    if (stopPct > cfg.scalp_autopilot.max_stop_pct) failures.push('stop_too_wide');
+    if ((roundTripPct(costsFor(cfg, speed)) / stopPct) * 100 > cfg.allocation.max_fee_drag_pct) failures.push('fees_too_high');
+    const last15 = this.market.recent(symbol, cfg.timeframes.trigger, 1)[0];
+    const ctx = last15 ? buildContext(this.market, symbol, last15.closeTime, cfg, this.funding.get(symbol) ?? null) : null;
+    if (ctx) {
+      const now = { ...ctx, btcChange1hPct: this.btcChange1hPct() };
+      if (cfg.filters.funding.enabled && !funding(now, side).pass) failures.push('filter_funding');
+      if (cfg.filters.btc.enabled && !btc(now, side).pass) failures.push('filter_btc');
+      if (!exhaustion(now, side).pass) failures.push('filter_exhaustion');
+    }
+    return failures;
+  }
+
+  /** BTC's change over the hour to the engine's clock, from 1m closes; null without both candles. */
+  private btcChange1hPct(): number | null {
+    const tf = this.cfg.timeframes.exits;
+    const step = TIMEFRAME_MS[tf];
+    const candles = this.market.recent('BTCUSDT', tf, Math.round(3_600_000 / step) + 1);
+    const last = candles[candles.length - 1];
+    const first = candles[0];
+    if (!last || !first || last.closeTime - first.closeTime !== 3_600_000 || !(first.close > 0)) return null;
+    return (last.close / first.close - 1) * 100;
   }
 
   /** Everything that closed at time `t`, larger timeframes first. */
@@ -449,8 +518,8 @@ export class Engine {
       this.clock = t;
       out.push(...this.onTime());
     }
-    // The exits timeframe (1m) drives fills, stops and targets.
-    for (const c of candles) if (c.tf === this.cfg.timeframes.exits) out.push(...this.onMinute(c));
+    // The exits timeframe (1m) drives fills, stops and targets; each candle once, even when handed on again.
+    for (const c of candles) if (c.tf === this.cfg.timeframes.exits && c.closeTime > (this.settledTo.get(c.symbol) ?? 0)) out.push(...this.onMinute(c));
     out.push(...this.guardrails());
     for (const c of candles) {
       if (c.tf !== this.cfg.timeframes.trigger) continue;
@@ -499,27 +568,17 @@ export class Engine {
         out.push(this.emit('funding_charged', p.id, p.symbol, { rate, notional, amount: -sign(p.side) * notional * rate }));
       }
     }
-    // Scalp positions: enforce strict max-hold time stops (45m for 1m, 2h for 5m, 4h for 15m)
+    // Positions with their own max hold (scalps) close at the market once held that long.
     for (const p of this.portfolio.positions()) {
-      if (p.pendingClose) continue;
-      const isScalp = /\b(Scalp|Quant Autopilot)\b/i.test(p.note ?? '');
-      if (isScalp) {
-        const is1m = /\[1m\]|\(1m\)/i.test(p.note ?? '');
-        const is5m = /\[5m\]|\(5m\)/i.test(p.note ?? '');
-        const maxHoldMs = is1m ? 45 * 60_000 : is5m ? 120 * 60_000 : 240 * 60_000;
-        if (t - p.openedAt >= maxHoldMs) {
-          out.push(this.closeOrder(p, 'max_hold'));
-        }
-      }
+      const maxHoldMin = p.maxHoldMin ?? legacyScalp(p.note)?.holdMin;
+      if (!p.pendingClose && maxHoldMin && t - p.openedAt >= maxHoldMin * 60_000) out.push(this.closeOrder(p, 'max_hold'));
     }
 
-    // Entries with no price to fill at or timed out waiting for pullback are cancelled.
+    // Entries with no price to fill at, or limits the price never came back to, are cancelled.
     for (const e of this.portfolio.pendingEntries()) {
-      const isScalp = /\b(Scalp|Quant Autopilot)\b/i.test(e.note ?? '');
-      const is1m = isScalp && /\[1m\]|\(1m\)/i.test(e.note ?? '');
-      const is5m = isScalp && /\[5m\]|\(5m\)/i.test(e.note ?? '');
-      const timeoutMs = is1m ? 15 * 60_000 : is5m ? 35 * 60_000 : e.orderType === 'limit' ? (isScalp ? 60 * 60_000 : 4 * 3_600_000) : this.cfg.sim.entry_timeout_min * 60_000;
-      if (t - e.placedAt > timeoutMs) {
+      const timeoutMin = e.entryTimeoutMin ?? legacyScalp(e.note)?.timeoutMin
+        ?? (e.orderType === 'limit' ? 240 : this.cfg.sim.entry_timeout_min);
+      if (t - e.placedAt > timeoutMin * 60_000) {
         out.push(this.emit('order_cancelled', e.positionId, e.symbol, {
           reason: e.orderType === 'limit' ? 'timeout_missed_pullback' : 'no_price',
           placedAt: e.placedAt,
@@ -531,19 +590,27 @@ export class Engine {
 
   // ---------------------------------------------------------------- 1m: fills, stops, targets
 
-  private onMinute(c: Candle): TradeEvent[] {
+  /** Fills, stops and targets in one 1m candle; closes are recorded at `at` (the candle's close when it came late). */
+  private onMinute(c: Candle, at = this.clock): TradeEvent[] {
     const out: TradeEvent[] = [];
+    this.settledTo.set(c.symbol, Math.max(this.settledTo.get(c.symbol) ?? 0, c.closeTime));
+    // Limits filled inside this candle: whether the price reached the target before or after the fill is unknown.
+    const limitFills = new Set<string>();
     for (const e of this.portfolio.pendingEntries()) {
-      if (e.symbol === c.symbol && e.placedAt <= c.openTime) out.push(...this.fillEntry(e, c));
+      if (e.symbol !== c.symbol || e.placedAt > c.openTime) continue;
+      const events = this.fillEntry(e, c, at);
+      if (e.orderType === 'limit' && events.some((x) => x.type === 'order_filled')) limitFills.add(e.positionId);
+      out.push(...events);
     }
     for (const p of this.portfolio.positions()) {
       if (p.symbol !== c.symbol) continue;
       const costs = costsFor(this.cfg, p.speed);
       if (p.pendingClose && p.pendingClose.placedAt <= c.openTime) {
-        out.push(this.closePosition(p, marketFill(p.side, 'close', c.open, costs), p.pendingClose.reason));
+        out.push(this.closePosition(p, marketFill(p.side, 'close', c.open, costs), p.pendingClose.reason, at));
         continue;
       }
-      if (p.openedAt > c.openTime) continue;
+      // Its stop in this candle was settled with the fill; a target is not counted until the next candle.
+      if (p.openedAt > c.openTime || limitFills.has(p.id)) continue;
       // Stop first: when a candle reaches both, assume the worse happened first.
       if (p.liqPrice !== null && sign(p.side) * (p.liqPrice - p.stop) >= 0 && (p.side === 'long' ? c.low <= p.liqPrice : c.high >= p.liqPrice)) {
         out.push(this.emit('liquidated', p.id, p.symbol, { price: p.liqPrice, qty: p.qty, pnl: grossPnl(p.side, p.entryPrice, p.liqPrice, p.qty), fee: 0 }));
@@ -551,19 +618,19 @@ export class Engine {
       }
       const stopPrice = stopFill(p.side, p.stop, c, costs);
       if (stopPrice !== null) {
-        out.push(this.closePosition(p, stopPrice, 'stop'));
+        out.push(this.closePosition(p, stopPrice, 'stop', at));
         continue;
       }
       if (p.target !== null && !(this.cfg.exits.mode === 'partial_ladder' && p.partialDone)) {
         const tp = targetFill(p.side, p.target, c, costs);
-        if (tp !== null) out.push(...this.takeTarget(p, tp));
+        if (tp !== null) out.push(...this.takeTarget(p, tp, at));
       }
     }
     this.resolveShadows(c);
     return out;
   }
 
-  private fillEntry(e: ReturnType<Portfolio['pendingEntries']>[number], c: Candle): TradeEvent[] {
+  private fillEntry(e: ReturnType<Portfolio['pendingEntries']>[number], c: Candle, at = this.clock): TradeEvent[] {
     const cfg = this.cfg;
     const costs = costsFor(cfg, e.speed);
     const s = sign(e.side);
@@ -571,22 +638,11 @@ export class Engine {
       [this.emit('order_cancelled', e.positionId, e.symbol, { reason, price: e.refPrice, ...extra })];
 
     if (e.orderType === 'limit') {
-      const stopHit = e.side === 'long' ? c.low <= e.stop : c.high >= e.stop;
+      // A candle that runs through the limit and on through the stop filled it on the way (handled below).
       const limitReached = e.side === 'long' ? c.low <= e.refPrice : c.high >= e.refPrice;
-
-      if (stopHit) {
-        return cancel('cancelled_invalidation_hit');
-      }
-
-      if (e.target !== null) {
-        const targetReached = e.side === 'long' ? c.high >= e.target : c.low <= e.target;
-        if (targetReached && !limitReached) {
-          return cancel('target_reached_before_fill');
-        }
-      }
-
       if (!limitReached) {
-        return [];
+        const targetReached = e.target !== null && (e.side === 'long' ? c.high >= e.target : c.low <= e.target);
+        return targetReached ? cancel('target_reached_before_fill') : [];
       }
     }
 
@@ -615,19 +671,25 @@ export class Engine {
       role: 'entry', side: e.side, qty, price, stop: e.stop, target: e.target,
       fee: fee(qty * price, cfg.sim), session: this.sessions.ownerAt(e.placedAt),
       leverage: cfg.leverage, liqPrice, chochLevel: e.chochLevel, signalId: e.signalId, speed: e.speed ?? 'normal', setup: e.setup,
-      ...(e.note ? { note: e.note } : {}),
+      ...(e.note ? { note: e.note } : {}), ...(e.maxHoldMin ? { maxHoldMin: e.maxHoldMin } : {}),
     };
     // Recorded at the candle's open: the moment the fill happened.
-    return [this.emit('order_filled', e.positionId, e.symbol, { ...fill, notional: qty * price, margin: (qty * price) / cfg.leverage }, c.openTime)];
+    const filled = this.emit('order_filled', e.positionId, e.symbol, { ...fill, notional: qty * price, margin: (qty * price) / cfg.leverage }, c.openTime);
+    if (e.orderType !== 'limit') return [filled];
+    // The same candle also reached the stop: filled, then stopped out. Which came first inside the candle is
+    // unknown, so the worse is assumed, as everywhere else; a cancelled order would hide a real loss.
+    const pos = this.portfolio.get(e.positionId);
+    const stopPrice = pos ? stopFill(pos.side, pos.stop, c, costs) : null;
+    return pos && stopPrice !== null ? [filled, this.closePosition(pos, stopPrice, 'stop', at)] : [filled];
   }
 
-  private takeTarget(p: Position, price: number): TradeEvent[] {
+  private takeTarget(p: Position, price: number, at = this.clock): TradeEvent[] {
     const cfg = this.cfg;
-    if (cfg.exits.mode === 'fixed') return [this.closePosition(p, price, 'target')];
+    if (cfg.exits.mode === 'fixed') return [this.closePosition(p, price, 'target', at)];
     // partial_ladder: close part at the first objective, protect the rest at breakeven plus fees.
     const rules = this.rules.get(p.symbol);
     const qty = roundQty(p.qty * (cfg.exits.partial_close_pct / 100), rules?.stepSize ?? 0);
-    if (qty <= 0 || qty >= p.qty) return [this.closePosition(p, price, 'target')];
+    if (qty <= 0 || qty >= p.qty) return [this.closePosition(p, price, 'target', at)];
     const out = [this.emit('partial_closed', p.id, p.symbol, {
       qty, price, pnl: grossPnl(p.side, p.entryPrice, price, qty), fee: fee(qty * price, cfg.sim), reason: 'target',
     })];
@@ -946,6 +1008,7 @@ export class Engine {
         sessionClose: cfg.sessions.exit_at_session_end ? owner?.closeTime ?? ctx.t + DAY
           : ctx.t + Math.min(speedSettings(cfg, ctx.speed).max_hold_hours, setup === 'htf_poi' ? cfg.htf_poi.max_hold_hours : Infinity) * 3_600_000,
         speed: ctx.speed ?? 'normal', setup,
+        filled: false, fillBy: ctx.t + cfg.sim.limit_entry_timeout_min * 60_000,
       });
     }
     if (status !== 'taken') return [];
@@ -954,6 +1017,7 @@ export class Engine {
     const order: OpenOrder = {
       action: 'open', orderType: 'limit', side: direction, notional: risk!.notional, stop: plan.stop, target,
       chochLevel: level, signalId: id, refPrice: plan.entry, speed: ctx.speed ?? 'normal', setup,
+      entryTimeoutMin: cfg.sim.limit_entry_timeout_min,
     };
     return [this.emit('order_placed', `${id}-pos`, symbol, { ...order, plan, score })];
   }
@@ -1016,15 +1080,28 @@ export class Engine {
       const risk = Math.abs(entry - stop);
       let outcome: ShadowResult['outcome'] | null = null;
       let exit = 0;
+      // Like the order it shadows: a limit at the entry, filled when the price comes back to it in time.
+      const fillCandle = !sh.filled;
+      if (!sh.filled) {
+        const targetFirst = sh.direction === 'long' ? c.high >= target : c.low <= target;
+        if (!(sh.direction === 'long' ? c.low <= entry : c.high >= entry)) {
+          if (!targetFirst && c.closeTime < sh.fillBy) return true;
+          this.signal(sh.symbol, sh.direction, 'expired', targetFirst ? 'target_reached_before_fill' : 'not_filled',
+            { armedId: sh.armedId, signalStatus: sh.signalStatus, speed: sh.speed }, sh.setup);
+          return false;
+        }
+        sh.filled = true;
+      }
       const stopHit = sh.direction === 'long' ? c.low <= stop : c.high >= stop;
       const best = sh.direction === 'long' ? c.high : c.low;
-      // Going our way: the first candle that reaches 1R in favour (not one that also hits the stop: order unknown, stop first).
-      if (!sh.working && !stopHit && s * (best - entry) >= risk) {
+      // Going our way: the first candle that reaches 1R in favour (not one that also hits the stop: order unknown,
+      // stop first; not the fill candle: whether the high came before or after the fill is unknown).
+      if (!sh.working && !stopHit && !fillCandle && s * (best - entry) >= risk) {
         sh.working = true;
         this.signal(sh.symbol, sh.direction, 'working', null, { armedId: sh.armedId, price: entry + s * risk, r: 1, signalStatus: sh.signalStatus, speed: sh.speed }, sh.setup);
       }
       if (stopHit) { outcome = 'stop'; exit = stop; }
-      else if (sh.direction === 'long' ? c.high >= target : c.low <= target) { outcome = 'target'; exit = target; }
+      else if (!fillCandle && (sh.direction === 'long' ? c.high >= target : c.low <= target)) { outcome = 'target'; exit = target; }
       else if (c.closeTime >= sh.sessionClose) { outcome = this.cfg.sessions.exit_at_session_end ? 'session_end' : 'max_hold'; exit = c.close; }
       if (!outcome) return true;
       const r = (s * (exit - entry) - (costPct / 100) * entry) / risk;
@@ -1064,6 +1141,16 @@ export class Engine {
     this.portfolio.apply(e);
     return e;
   }
+}
+
+/**
+ * Scalp trades logged before the max hold and entry timeout were fields of the order: read from the
+ * note the dashboard and the autopilot wrote then ("Quant Autopilot [5m]: …", "Quant Scalp (5m): …").
+ */
+function legacyScalp(note: string | null | undefined): { holdMin: number; timeoutMin: number } | null {
+  const tf = /^Quant (?:Autopilot|Scalp) [[(](1m|5m|15m)[\])]/.exec(note ?? '')?.[1];
+  if (!tf) return null;
+  return tf === '1m' ? { holdMin: 45, timeoutMin: 15 } : tf === '5m' ? { holdMin: 120, timeoutMin: 35 } : { holdMin: 240, timeoutMin: 60 };
 }
 
 export { lastOf, TIMEFRAME_MS };

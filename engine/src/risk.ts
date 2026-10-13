@@ -3,6 +3,7 @@
 // including fees and slippage, never exceeds max_loss_per_trade_pct of equity.
 import type { EngineConfig } from './config';
 import type { Position, PendingEntry, Portfolio, Side } from './portfolio';
+import type { SignalRecord } from '../../shared/types';
 import { coinOf } from './symbols';
 import { costsFor, roundTripPct, speedSettings, type SpeedGroup } from './speed';
 
@@ -31,6 +32,8 @@ export interface RiskInput {
   score: number;
   /** The coin's speed group: its risk, slippage and open-trade limit (Section 18.2). */
   speed?: SpeedGroup;
+  /** The model asking: the scalp autopilot's trades have their own daily cap. */
+  setup?: SignalRecord['setup'];
 }
 
 export interface RiskDecision {
@@ -71,7 +74,12 @@ export function decideEntry(i: RiskInput): RiskDecision {
   if (dayLoss >= (c.risk.daily_loss_limit_pct / 100) * i.dayStartEquity) {
     return no('risk_daily_loss_limit', { dayLoss: round(dayLoss), limitPct: c.risk.daily_loss_limit_pct });
   }
-  if (c.risk.max_trades_per_day !== null && pf.entriesOnDay(i.t) >= c.risk.max_trades_per_day) return no('risk_max_trades_per_day', { max: c.risk.max_trades_per_day });
+  const scalpsToday = pf.scalpEntriesOnDay(i.t);
+  if (i.setup === 'scalp') {
+    if (c.scalp_autopilot.max_trades_per_day !== null && scalpsToday >= c.scalp_autopilot.max_trades_per_day) return no('risk_max_scalps_per_day', { max: c.scalp_autopilot.max_trades_per_day });
+  } else if (c.risk.max_trades_per_day !== null && pf.entriesOnDay(i.t) - scalpsToday >= c.risk.max_trades_per_day) {
+    return no('risk_max_trades_per_day', { max: c.risk.max_trades_per_day });
+  }
   const held = (x: { symbol: string }) => x.symbol === i.symbol;
   if (positions.some(held) || pending.some(held)) return no('risk_already_in_symbol');
   if (a.max_open_trades !== null && positions.length + pending.length >= a.max_open_trades) return no('risk_max_open_trades', { open: positions.length + pending.length, max: a.max_open_trades });

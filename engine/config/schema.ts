@@ -245,6 +245,17 @@ export const configSchema = z.object({
     }).strict(),
   }).strict(),
 
+  scalp_autopilot: z.object({
+    timeframes: z.array(z.enum(['1m', '5m', '15m'])).min(1),
+    max_stop_pct: positive,
+    /** A candle closed longer ago than this is not acted on (a replay or a feed catching up). */
+    max_signal_age_sec: posInt,
+    /** New scalp autopilot entries per UTC day, apart from risk.max_trades_per_day; null: no limit. */
+    max_trades_per_day: posInt.nullable(),
+    max_hold_min: z.object({ '1m': posInt, '5m': posInt, '15m': posInt }).strict(),
+    entry_timeout_min: z.object({ '1m': posInt, '5m': posInt, '15m': posInt }).strict(),
+  }).strict(),
+
   risk: z.object({
     /** New entries per UTC day across all coins and models, manual ones included; null: no limit. */
     max_trades_per_day: posInt.nullable(),
@@ -261,6 +272,8 @@ export const configSchema = z.object({
     charge_funding: z.boolean(),
     maintenance_margin_pct: z.number().min(0).max(10),
     entry_timeout_min: posInt,
+    /** The models' limit entries are cancelled when not filled within this. */
+    limit_entry_timeout_min: posInt,
   }).strict(),
 }).strict()
   .superRefine((c, ctx) => {

@@ -37,6 +37,7 @@ import { TIMEFRAME_MS, type Candle, type Timeframe, type WarningNotice, type Dir
 import { PatternMemory } from './analysis/patternMemory';
 import { diagnoseVolume } from './analysis/volumeDiagnosis';
 import { analyzeVolumeSurge } from './analysis/volumeSurge';
+import { autopilotCandles, settledPrices } from './autopilot';
 
 dotenv.config({ path: ['.env.local', '.env'], quiet: true });
 
@@ -253,7 +254,14 @@ async function pollPrices(): Promise<void> {
 /** Closes positions whose stop or take-profit the live price has reached, without waiting for the 1m candle to close. */
 function liveExits(): void {
   if (!started || backup.standby || !engine.positions().length) return;
-  const produced = commandTx({ type: 'live_prices', prices: livePrices, time: Date.now() });
+  // Not before the engine has processed the candles up to now: those settle any stop hit meanwhile at the stop.
+  const prices = settledPrices(livePrices, {
+    engineClock: engine.now(),
+    lastMinuteClose: (s) => { const open = store.lastOpenTime(s, '1m'); return open === null ? null : open + TIMEFRAME_MS['1m']; },
+    now: Date.now(),
+  });
+  if (!Object.keys(prices).length) return;
+  const produced = commandTx({ type: 'live_prices', prices, time: Date.now() });
   if (!produced.length) return;
   for (const e of produced) console.log(`[live] ${e.type} ${e.symbol ?? ''} ${JSON.stringify(e.payload)}`);
   ideaCache.clear();
@@ -526,7 +534,12 @@ app.post('/api/positions/open', async (req, res) => {
     const customEntry = (b.entry !== null && b.entry !== undefined && b.entry !== '') ? Number(b.entry) : null;
     const entryPrice = (customEntry && Number.isFinite(customEntry) && customEntry > 0) ? customEntry : mark;
     const orderType = (b.orderType === 'market') ? 'market' : 'limit';
-    const produced = command({ type: 'open', symbol, side, price: entryPrice, time: Date.now(), stop, target, orderType, note: b.note ? String(b.note) : undefined });
+    // Scalps taken from the Scalp page carry their timeframe's max hold and entry timeout.
+    const minutes = (x: unknown) => { const n = Number(x); return Number.isFinite(n) && n > 0 ? Math.round(n) : undefined; };
+    const produced = command({
+      type: 'open', symbol, side, price: entryPrice, time: Date.now(), stop, target, orderType, note: b.note ? String(b.note) : undefined,
+      maxHoldMin: minutes(b.maxHoldMin), entryTimeoutMin: minutes(b.entryTimeoutMin),
+    });
     for (const e of produced) console.log(`[manual] ${e.type} ${e.symbol ?? ''} ${JSON.stringify(e.payload)}`);
     void pushToCloud();
     // Its candles are needed from now on for the stop and target.
@@ -826,29 +839,21 @@ const autoPlacedScalps = new Set<string>();
 
 function runQuantAutopilot(batch: Candle[]): void {
   if (!quantAutopilot || !started || backup.standby || engine.account().halted) return;
-  // Scalp autopilot focuses on robust 5m and 15m timeframes (1m is left for manual sniping to avoid erratic noise)
-  const candidates = batch.filter((c) => c.tf === '5m' || c.tf === '15m');
-  if (!candidates.length) return;
-
+  const auto = config.scalp_autopilot;
   const currentHeld = new Set([
     ...engine.positions().map((p) => p.symbol),
     ...engine.account().pendingEntries.map((p) => p.symbol),
   ]);
+  // Just-closed candles of the scanner's coins only: never a replay after a restart or a feed gap.
+  const candidates = autopilotCandles(batch, { config: auto, universe: new Set(universe), held: currentHeld, now: Date.now() });
 
   for (const c of candidates) {
     if (currentHeld.has(c.symbol)) continue;
-    const tf = c.tf as '5m' | '15m';
+    const tf = c.tf as '1m' | '5m' | '15m';
     const setups = scalpsFor(c.symbol, tf);
-    // Find open setup triggered on this exact closed candle, MUST be aligned with the 1h trend!
+    // An open setup from this exact closed candle, in the 1h trend's direction.
     const fresh = setups.find((s) => s.status === 'open' && s.time === c.openTime && s.withTrend);
     if (!fresh) continue;
-
-    const stopPct = (Math.abs(fresh.entry - fresh.stop) / fresh.entry) * 100;
-    // Reject wide-stop setups on autopilot (max 2.2% stop distance to avoid high-volatility spikes)
-    if (stopPct > 2.2) {
-      console.log(`[quant-autopilot] Skip ${fresh.symbol}: stop too wide (${stopPct.toFixed(2)}% > 2.2%)`);
-      continue;
-    }
 
     // Guard against active market traps (e.g. failed breakouts / bull traps, blowoffs, dumping BTC, ADR exhaustion)
     const watch = watchFor(fresh.symbol);
@@ -886,11 +891,16 @@ function runQuantAutopilot(batch: Candle[]): void {
         symbol: fresh.symbol,
         side: fresh.side,
         price: limitPrice,
-        time: c.closeTime + 1,
+        // At the close: the next 1m candle, which opens then, can fill it.
+        time: c.closeTime,
         stop: fresh.stop,
         target: fresh.target,
         orderType: 'limit',
         note: `Quant Autopilot [${fresh.tf ?? tf}]: ${SCALP_LABEL[fresh.kind]}`,
+        // The engine checks it as the autopilot's (session, stop width, costs, funding, BTC, daily range) and records it as "scalp".
+        setup: 'scalp',
+        maxHoldMin: auto.max_hold_min[tf],
+        entryTimeoutMin: auto.entry_timeout_min[tf],
       });
       autoPlacedScalps.add(key);
       if (autoPlacedScalps.size > 500) {
@@ -933,7 +943,10 @@ app.get('/api/scalp', (req, res) => {
   const reqTf = String(req.query.tf || 'all');
   const tfs: ('1m' | '5m' | '15m')[] = reqTf === '1m' ? ['1m'] : reqTf === '5m' ? ['5m'] : reqTf === '15m' ? ['15m'] : ['1m', '5m', '15m'];
   const setups = listed().flatMap((sym) => tfs.flatMap((tf) => scalpsFor(sym, tf))).sort((a, b) => b.time - a.time);
-  res.json({ hours: SCALP_HOURS, costPct: SCALP_COST_PCT, setups, stats: scalpStats(setups), autopilot: quantAutopilot });
+  res.json({
+    hours: SCALP_HOURS, costPct: SCALP_COST_PCT, setups, stats: scalpStats(setups), autopilot: quantAutopilot,
+    maxHoldMin: config.scalp_autopilot.max_hold_min, entryTimeoutMin: config.scalp_autopilot.entry_timeout_min,
+  });
 });
 app.get('/api/scalp/:symbol', (req, res) => {
   const sym = req.params.symbol.toUpperCase();

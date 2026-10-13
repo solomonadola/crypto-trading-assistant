@@ -11,7 +11,11 @@ import { post, usePoll, usePrices, type CoinWatch, type PatternMatch, type Trade
 import { coin, pct, price as fmtPrice } from '../lib/format';
 import { chime } from './Notifier';
 
-export interface TakeDefaults { side: 'long' | 'short'; stop: number | null; target: number | null; note: string; entry?: number | null }
+export interface TakeDefaults {
+  side: 'long' | 'short'; stop: number | null; target: number | null; note: string; entry?: number | null;
+  /** Scalps: closed at the market after this many minutes, and the limit cancelled if not filled within entryTimeoutMin. */
+  maxHoldMin?: number; entryTimeoutMin?: number;
+}
 
 interface Filled { price: number; qty: number; notional: number; stop: number; target: number | null }
 
@@ -381,6 +385,8 @@ function Dialog({ symbol, defaults, onClose }: { symbol: string; defaults: TakeD
         target: t,
         orderType: 'limit',
         note: note.trim() || undefined,
+        maxHoldMin: defaults.maxHoldMin,
+        entryTimeoutMin: defaults.entryTimeoutMin,
       });
       if (r.pending) {
         setPendingOrder({ entryPrice: r.entryPrice ?? effectiveEntry!, stop: s, target: t });

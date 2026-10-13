@@ -35,6 +35,8 @@ export interface EntryFill {
   setup?: SignalRecord['setup'];
   /** Manual trades: why it was taken. */
   note?: string;
+  /** Closed at the market once held this long (scalp autopilot trades). */
+  maxHoldMin?: number;
 }
 
 
@@ -60,6 +62,10 @@ export interface OpenOrder {
   speed?: SpeedGroup;
   setup?: SignalRecord['setup'];
   note?: string;
+  /** Closed at the market once held this long; absent: the speed group's max hold. */
+  maxHoldMin?: number;
+  /** A limit entry not filled by then is cancelled; absent: the default for its order type. */
+  entryTimeoutMin?: number;
 }
 
 export interface Position {
@@ -82,6 +88,8 @@ export interface Position {
   setup: SignalRecord['setup'] | null;
   /** Manual trades: why it was taken. */
   note?: string | null;
+  /** Closed at the market once held this long; null: the speed group's max hold. */
+  maxHoldMin?: number | null;
   /** Index of the highest ladder step reached; -1 before the first. */
   ladderStep: number;
   partialDone: boolean;
@@ -131,6 +139,8 @@ export class Portfolio {
   private readonly dayPnl = new Map<number, number>();
   private readonly entriesPerSymbolDay = new Map<string, number>();
   private readonly entriesPerDay = new Map<number, number>();
+  /** Of entriesPerDay, the scalp autopilot's: they have their own daily cap. */
+  private readonly scalpEntriesPerDay = new Map<number, number>();
   private readonly lastLossAt = new Map<string, number>();
   /** Consecutive losing trades, and wins since the size cut began. */
   lossStreak = 0;
@@ -167,11 +177,13 @@ export class Portfolio {
           id, symbol: e.symbol, side: f.side, qty: f.qty, initialQty: f.qty, entryPrice: f.price,
           stop: f.stop, initialStop: f.stop, target: f.target ?? null, openedAt: e.time, session: f.session,
           leverage: f.leverage ?? 1, liqPrice: f.liqPrice ?? null, chochLevel: f.chochLevel ?? null, signalId: f.signalId ?? null, speed: f.speed ?? 'normal', setup: f.setup ?? null, note: f.note ?? null,
+          maxHoldMin: f.maxHoldMin ?? null,
           ladderStep: -1, partialDone: false, fees: fee, funding: 0, realized: 0, pendingClose: null,
         });
         const key = `${e.symbol}|${day(e.time)}`;
         this.entriesPerSymbolDay.set(key, (this.entriesPerSymbolDay.get(key) ?? 0) + 1);
         this.entriesPerDay.set(day(e.time), (this.entriesPerDay.get(day(e.time)) ?? 0) + 1);
+        if (f.setup === 'scalp') this.scalpEntriesPerDay.set(day(e.time), (this.scalpEntriesPerDay.get(day(e.time)) ?? 0) + 1);
         return;
       }
       case 'stop_moved': {
@@ -283,6 +295,11 @@ export class Portfolio {
   /** Positions opened on the UTC day of `t`, all coins together. */
   entriesOnDay(t: number): number {
     return this.entriesPerDay.get(day(t)) ?? 0;
+  }
+
+  /** Scalp autopilot positions opened on the UTC day of `t`. */
+  scalpEntriesOnDay(t: number): number {
+    return this.scalpEntriesPerDay.get(day(t)) ?? 0;
   }
 
   entriesToday(symbol: string, t: number): number {
