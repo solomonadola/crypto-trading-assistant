@@ -5,6 +5,7 @@ import type { Direction } from '../../shared/types';
 import { ema, sma } from './analysis/indicators';
 import { lastOf, sign, type Context } from './strategy/context';
 import { opposingLevels, type Armed, type Confirmation } from './strategy/pullback';
+import { usualDayRange } from './analysis/timing';
 
 export interface FilterResult {
   name: string;
@@ -26,6 +27,7 @@ export function runFilters(ctx: Context, a: Armed, conf: Confirmation): FilterRe
   if (f.room.enabled) out.push(room(ctx, a.direction));
   if (f.funding.enabled) out.push(funding(ctx, a.direction));
   if (f.btc.enabled) out.push(btc(ctx, a.direction));
+  if (f.exhaustion?.enabled ?? true) out.push(exhaustion(ctx, a.direction));
   return out;
 }
 
@@ -142,10 +144,33 @@ export function funding(ctx: Context, dir: Direction): FilterResult {
   return { name: 'funding', pass: against <= max, detail: { fundingPct: r(ctx.funding * 100, 4), againstPct: r(against, 4), max } };
 }
 
-function btc(ctx: Context, dir: Direction): FilterResult {
+export function btc(ctx: Context, dir: Direction): FilterResult {
   const c = ctx.config.filters.btc;
   const ch = ctx.btcChange1hPct;
   if (ch === null) return { name: 'btc', pass: true, detail: { note: 'BTC 1h change unknown' } };
   const pass = dir === 'long' ? ch >= c.block_longs_if_btc_1h_below_pct : ch <= c.block_shorts_if_btc_1h_above_pct;
   return { name: 'btc', pass, detail: { btcChange1hPct: r(ch, 3), limit: dir === 'long' ? c.block_longs_if_btc_1h_below_pct : c.block_shorts_if_btc_1h_above_pct } };
+}
+
+/** Rejects trades when the coin has already used most of its usual daily range (chasing exhaustion). */
+export function exhaustion(ctx: Context, dir: Direction): FilterResult {
+  const c1h = ctx.h1.candles;
+  const now = ctx.t;
+  const range = usualDayRange(c1h, now);
+  const cfg = ctx.config.filters.exhaustion;
+  if (cfg && !cfg.enabled) return { name: 'exhaustion', pass: true, detail: { disabled: 'true' } };
+  const maxPct = cfg?.max_adr_used_pct ?? 85;
+  if (!range || !(range > 0)) return { name: 'exhaustion', pass: true, detail: { note: 'under 5 days of history for ADR' } };
+  const today = c1h.filter((c) => c.openTime >= Math.floor(now / 86_400_000) * 86_400_000);
+  if (!today.length) return { name: 'exhaustion', pass: true, detail: { note: 'no candles today' } };
+  const hi = Math.max(...today.map((c) => c.high));
+  const lo = Math.min(...today.map((c) => c.low));
+  const todayRange = hi - lo;
+  const adrUsedPct = (todayRange / range) * 100;
+  const pass = adrUsedPct <= maxPct;
+  return {
+    name: 'exhaustion',
+    pass,
+    detail: { adrUsedPct: r(adrUsedPct, 1), todayRange: r(todayRange, 4), adr: r(range, 4), max: maxPct },
+  };
 }

@@ -216,6 +216,15 @@ describe('manual trades', () => {
     expect(trade.pnl).toBeLessThan(0);
   });
 
+  it('needs a take-profit at least min_rr (2R) away after costs: no 1:1 trades', () => {
+    const e = engine();
+    e.restore([], at);
+    expect(() => open(e, { target: null })).toThrow(/take-profit is needed/);
+    expect(() => open(e, { target: 102 })).toThrow(/at least 2R/);       // 1:1
+    expect(() => open(e, { target: 104 })).toThrow(/at least 2R/);       // 2R before costs, under it after
+    expect(open(e, { target: 104.5 }).map((x) => x.type)).toEqual(['order_placed', 'order_filled']);
+  });
+
   it('is rebuilt from its events after a restart', () => {
     const e = engine();
     e.restore([], at);
@@ -275,5 +284,126 @@ describe('closing at the mark price', () => {
     expect(events.filter((x) => x.type === 'position_closed').map((x) => x.positionId)).toEqual(['p1']);
     expect(events.filter((x) => x.type === 'order_placed').map((x) => x.positionId)).toEqual(['p2']);
     expect(e.account().halted).not.toBeNull();
+  });
+});
+
+describe('editing positions and live-price exits', () => {
+  const at = u('2026-07-15T10:30Z');
+  const open = (e: Engine, side: 'long' | 'short' = 'long') =>
+    e.onCommand({ type: 'open', symbol: 'BTCUSDT', side, price: 100, time: at + 40_000, stop: side === 'long' ? 98 : 102, target: side === 'long' ? 106 : 94 });
+  const started = (side: 'long' | 'short' = 'long') => {
+    const e = engine((c) => { c.exits.mode = 'fixed'; });
+    e.restore([], at);
+    open(e, side);
+    return { e, id: e.positions()[0].id };
+  };
+
+  it('moves the stop and take-profit, and the edit survives a restart', () => {
+    const e = engine((c) => { c.exits.mode = 'fixed'; });
+    e.restore([], at);
+    const opened = open(e);
+    const id = e.positions()[0].id;
+    const events = e.onCommand({ type: 'modify', positionId: id, stop: 99, target: 110, price: 101 });
+    expect(events.map((x) => [x.type, x.payload.stop ?? x.payload.target])).toEqual([['stop_moved', 99], ['target_moved', 110]]);
+    expect(e.positions()[0]).toMatchObject({ stop: 99, target: 110 });
+    const again = engine();
+    again.restore([...opened, ...events], at + 60_000);
+    expect(again.positions()[0]).toMatchObject({ stop: 99, target: 110 });
+  });
+
+  it('removes the take-profit with null, and leaves an unchanged level alone', () => {
+    const { e, id } = started();
+    const events = e.onCommand({ type: 'modify', positionId: id, target: null, price: 100 });
+    expect(events.map((x) => x.type)).toEqual(['target_moved']);
+    expect(e.positions()[0].target).toBeNull();
+  });
+
+  it('refuses a stop or take-profit on the wrong side of the price', () => {
+    const { e, id } = started();
+    expect(() => e.onCommand({ type: 'modify', positionId: id, stop: 101, price: 100 })).toThrow(/below the current price/);
+    expect(() => e.onCommand({ type: 'modify', positionId: id, target: 99, price: 100 })).toThrow(/above the current price/);
+    const short = started('short');
+    expect(() => short.e.onCommand({ type: 'modify', positionId: short.id, stop: 99, price: 100 })).toThrow(/above the current price/);
+    expect(() => e.onCommand({ type: 'modify', positionId: 'nope', stop: 90, price: 100 })).toThrow(CommandError);
+  });
+
+  it('closes at once when a live price reaches the stop, filled at that price (a gap), not the stop', () => {
+    const { e } = started();
+    expect(e.onCommand({ type: 'live_prices', prices: { BTCUSDT: 99 }, time: at + 50_000 })).toEqual([]);
+    const closed = e.onCommand({ type: 'live_prices', prices: { BTCUSDT: 97 }, time: at + 55_000 });
+    expect(closed.map((x) => [x.type, x.payload.reason, x.time])).toEqual([['position_closed', 'stop', at + 55_000]]);
+    expect(Number(closed[0].payload.price)).toBeLessThan(97);   // the live price, slipped
+    expect(e.positions()).toHaveLength(0);
+    // The 1m candle that follows finds nothing left to close.
+    expect(e.onCandles([{ symbol: 'BTCUSDT', tf: '1m', openTime: at + 60_000, closeTime: at + 120_000, open: 98, high: 98, low: 96, close: 97, volume: 1, quoteVolume: 1, trades: 1 }]).filter((x) => x.type === 'position_closed')).toEqual([]);
+  });
+
+  it('takes the take-profit at the target when a live price reaches it, for longs and shorts', () => {
+    const { e } = started();
+    const closed = e.onCommand({ type: 'live_prices', prices: { BTCUSDT: 106.5 }, time: at + 50_000 });
+    expect(closed.map((x) => x.payload.reason)).toEqual(['target']);
+    expect(Number(closed[0].payload.price)).toBeCloseTo(106 * (1 - 0.0005), 6);
+    const short = started('short');
+    expect(short.e.onCommand({ type: 'live_prices', prices: { BTCUSDT: 102.1 }, time: at + 50_000 }).map((x) => x.payload.reason)).toEqual(['stop']);
+  });
+});
+
+describe('limit pullback orders', () => {
+  const at = u('2026-07-15T10:30Z');
+  const minute = (openTime: number, o: number, h: number, l: number, c: number): Candle =>
+    ({ symbol: 'BTCUSDT', tf: '1m', openTime, closeTime: openTime + 59_999, open: o, high: h, low: l, close: c, volume: 1, quoteVolume: 100, trades: 1 });
+
+  it('stays pending when market price is away from key level, then fills when price pulls back to key level', () => {
+    const e = engine();
+    e.onCandles([minute(at - 60_000, 104, 105.5, 103.8, 105)]);
+
+    const placed = e.onCommand({ type: 'open', symbol: 'BTCUSDT', side: 'long', price: 100, time: at, stop: 98, target: 110, orderType: 'limit' });
+    expect(placed.map((x) => x.type)).toEqual(['order_placed']);
+    expect(e.positions()).toHaveLength(0);
+    expect(e.account().pendingEntries).toHaveLength(1);
+
+    // Next candle low is 102 (no pullback to 100 yet) -> still pending
+    const c1 = e.onCandles([minute(at, 105, 106, 102, 103)]);
+    expect(c1.filter((x) => x.type === 'order_filled')).toHaveLength(0);
+    expect(e.positions()).toHaveLength(0);
+
+    // Next candle low is 99.8 (touches key level 100) -> fills at key level
+    const c2 = e.onCandles([minute(at + 60_000, 103, 103.5, 99.8, 101)]);
+    expect(c2.filter((x) => x.type === 'order_filled')).toHaveLength(1);
+    expect(e.positions()).toHaveLength(1);
+    expect(e.positions()[0].entryPrice).toBe(100);
+  });
+
+  it('cancels without filling if price breaches stop before touching key level (invalidation)', () => {
+    const e = engine();
+    e.onCandles([minute(at - 60_000, 104, 105.5, 103.8, 105)]);
+    e.onCommand({ type: 'open', symbol: 'BTCUSDT', side: 'long', price: 100, time: at, stop: 98, target: 110, orderType: 'limit' });
+
+    // Flash crash through stop 98 on candle
+    const out = e.onCandles([minute(at, 105, 105, 96, 97)]);
+    expect(out.map((x) => `${x.type} ${x.payload.reason}`)).toEqual(['order_cancelled cancelled_invalidation_hit']);
+    expect(e.positions()).toHaveLength(0);
+  });
+
+  it('cancels if target is reached before pulling back to key level (target runaway)', () => {
+    const e = engine();
+    e.onCandles([minute(at - 60_000, 104, 105.5, 103.8, 105)]);
+    e.onCommand({ type: 'open', symbol: 'BTCUSDT', side: 'long', price: 100, time: at, stop: 98, target: 110, orderType: 'limit' });
+
+    // Candle flies to 111 without pulling back to 100 (low is 104)
+    const out = e.onCandles([minute(at, 105, 111, 104, 110.5)]);
+    expect(out.map((x) => `${x.type} ${x.payload.reason}`)).toEqual(['order_cancelled target_reached_before_fill']);
+    expect(e.positions()).toHaveLength(0);
+  });
+
+  it('expires after 4 hours if price never pulls back to key level', () => {
+    const e = engine();
+    e.onCandles([minute(at - 60_000, 104, 105.5, 103.8, 105)]);
+    e.onCommand({ type: 'open', symbol: 'BTCUSDT', side: 'long', price: 100, time: at, stop: 98, target: 110, orderType: 'limit' });
+
+    // 4 hours + 1 minute later
+    const futureTime = at + 4 * 3_600_000 + 60_000;
+    const out = e.onCandles([minute(futureTime, 105, 106, 104, 105)]);
+    expect(out.some((x) => x.type === 'order_cancelled' && x.payload.reason === 'timeout_missed_pullback')).toBe(true);
   });
 });

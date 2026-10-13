@@ -19,7 +19,7 @@ import { Portfolio, type CloseOrder, type CloseReason, type EntryFill, type Open
 import { MarketBook, type SymbolAnalysis } from '../analysis/market';
 import { buildContext, lastOf, sign, type Context } from '../strategy/context';
 import { armedStillValid, planTrade, tryArm, tryConfirm, type Armed, type Confirmation, type TradePlan } from '../strategy/pullback';
-import { funding, runFilters } from '../filters';
+import { btc, exhaustion, funding, runFilters } from '../filters';
 import { scoreSignal } from '../scoring';
 import { decideEntry, equityOf, riskAtStop, unrealized, type SymbolRules } from '../risk';
 import { manage } from '../exits';
@@ -80,7 +80,18 @@ export type EngineCommand =
    * A trade taken by hand: filled at once at `price` (the mark price when asked, plus slippage) and at
    * `time` (the wall clock), sized and limited by the same risk rules as the engine's own trades.
    */
-  | { type: 'open'; symbol: string; side: Direction; price: number; time: number; stop: number; target: number | null; note?: string };
+  | { type: 'open'; symbol: string; side: Direction; price: number; time: number; stop: number; target: number | null; orderType?: 'market' | 'limit'; note?: string }
+  /**
+   * Edit an open position's stop and/or take-profit (null removes the take-profit). `price` is the
+   * current price: the stop must stay on the losing side of it and the take-profit on the winning side.
+   */
+  | { type: 'modify'; positionId: string; stop?: number; target?: number | null; price: number; time?: number }
+  /**
+   * Live prices between candles (the last trade price per symbol): a position whose stop or
+   * take-profit they reach closes at once, the way an exchange's stop order would, instead of
+   * waiting for the 1m candle to close.
+   */
+  | { type: 'live_prices'; prices: Record<string, number>; time: number };
 
 export class CommandError extends Error {}
 
@@ -272,7 +283,10 @@ export class Engine {
           fees: p.fees, funding: p.funding, realized: p.realized, setup: p.setup, note: p.note ?? null,
         };
       }),
-      pendingEntries: this.portfolio.pendingEntries().map((e) => ({ positionId: e.positionId, symbol: e.symbol, side: e.side, notional: e.notional, placedAt: e.placedAt })),
+      pendingEntries: this.portfolio.pendingEntries().map((e) => ({
+        positionId: e.positionId, symbol: e.symbol, side: e.side, notional: e.notional, placedAt: e.placedAt,
+        price: e.refPrice, orderType: e.orderType, stop: e.stop, target: e.target,
+      })),
     };
   }
 
@@ -323,6 +337,10 @@ export class Engine {
         return [this.emit('engine_resumed', null, null, {})];
       case 'open':
         return this.openManual(cmd);
+      case 'modify':
+        return this.modify(cmd);
+      case 'live_prices':
+        return this.liveExits(cmd.prices, cmd.time);
       case 'reset_balance': {
         if (this.portfolio.positions().length || this.portfolio.pendingEntries().length) {
           throw new CommandError('Close all positions before resetting the balance');
@@ -335,6 +353,51 @@ export class Engine {
     }
   }
 
+  /** A stop and/or take-profit edited by hand, checked against the current price. */
+  private modify(cmd: Extract<EngineCommand, { type: 'modify' }>): TradeEvent[] {
+    const p = this.portfolio.get(cmd.positionId);
+    if (!p) throw new CommandError(`No open position ${cmd.positionId}`);
+    if (p.pendingClose) throw new CommandError('This position is already closing');
+    const s = sign(p.side);
+    const price = cmd.price;
+    if (!(price > 0)) throw new CommandError('No current price to check the levels against');
+    const stop = cmd.stop ?? p.stop;
+    const target = cmd.target === undefined ? p.target : cmd.target;
+    if (!(stop > 0) || s * (price - stop) <= 0) {
+      throw new CommandError(`The stop must be ${p.side === 'long' ? 'below' : 'above'} the current price ${price}`);
+    }
+    if (target !== null && (!(target > 0) || s * (target - price) <= 0)) {
+      throw new CommandError(`The take-profit must be ${p.side === 'long' ? 'above' : 'below'} the current price ${price}`);
+    }
+    if (p.liqPrice !== null && s * (stop - p.liqPrice) <= 0) {
+      throw new CommandError(`The stop is beyond the liquidation price ${p.liqPrice}`);
+    }
+    const time = Math.max(cmd.time ?? this.clock, p.openedAt);
+    const out: TradeEvent[] = [];
+    if (stop !== p.stop) out.push(this.emit('stop_moved', p.id, p.symbol, { stop, reason: 'edited by hand' }, time));
+    if (target !== p.target) out.push(this.emit('target_moved', p.id, p.symbol, { target, reason: 'edited by hand' }, time));
+    return out;
+  }
+
+  /** Stops and take-profits reached by a live price: closed at once (a stop at that price plus slippage, a take-profit at the target). */
+  private liveExits(prices: Record<string, number>, time: number): TradeEvent[] {
+    const out: TradeEvent[] = [];
+    for (const p of this.portfolio.positions()) {
+      const price = prices[p.symbol];
+      if (!(price > 0) || p.pendingClose) continue;
+      const at = Math.max(time, p.openedAt);
+      const costs = costsFor(this.cfg, p.speed);
+      const s = sign(p.side);
+      if (s * (price - p.stop) <= 0) {
+        // A live price can skip past the stop (a gap): the fill is that price, never better than the stop.
+        out.push(this.closePosition(p, marketFill(p.side, 'close', s > 0 ? Math.min(price, p.stop) : Math.max(price, p.stop), costs), 'stop', at));
+      } else if (p.target !== null && this.cfg.exits.mode === 'fixed' && s * (price - p.target) >= 0) {
+        out.push(this.closePosition(p, marketFill(p.side, 'close', p.target, costs), 'target', at));
+      }
+    }
+    return out;
+  }
+
   /** A manual trade: the risk rules, then an order and its fill at the given price. */
   private openManual(cmd: Extract<EngineCommand, { type: 'open' }>): TradeEvent[] {
     const { symbol, side, price, stop, target } = cmd;
@@ -344,6 +407,10 @@ export class Engine {
     if (s * (price - stop) <= 0) throw new CommandError(`The stop must be ${side === 'long' ? 'below' : 'above'} the price (${price})`);
     if (target !== null && (!Number.isFinite(target) || s * (target - price) <= 0)) throw new CommandError(`The target must be ${side === 'long' ? 'above' : 'below'} the price (${price})`);
     const speed = buildContext(this.market, symbol, this.clock, this.cfg, this.funding.get(symbol) ?? null)?.speed ?? 'normal';
+    // The same reward:risk floor as the engine's own trades, after fees and slippage: no 1:1 trades.
+    if (target === null) throw new CommandError(`A take-profit is needed: trades must aim for at least ${this.cfg.exits.min_rr}R`);
+    const rr = netRewardRisk(price, stop, target, roundTripPct(costsFor(this.cfg, speed)));
+    if (rr < this.cfg.exits.min_rr) throw new CommandError(`Reward:risk is ${rr.toFixed(2)}R after costs; at least ${this.cfg.exits.min_rr}R is needed`);
     const lastHour = this.market.recent(symbol, '1h', 1)[0];
     const risk = decideEntry({
       config: this.cfg, t: cmd.time, symbol, side, entry: price, stop,
@@ -352,12 +419,23 @@ export class Engine {
     });
     if (!risk.ok) throw new CommandError(`Not taken: ${risk.reason!.replace(/^risk_/, '').replace(/_/g, ' ')}`);
     const id = `manual-${symbol}-${cmd.time}`;
+    const orderType = cmd.orderType ?? 'market';
     const order: OpenOrder = {
-      action: 'open', orderType: 'market', side, notional: risk.notional, stop, target,
+      action: 'open', orderType, side, notional: risk.notional, stop, target,
       chochLevel: null, signalId: null, refPrice: price, speed, setup: 'manual', ...(cmd.note ? { note: cmd.note.slice(0, 200) } : {}),
     };
     const placed = this.emit('order_placed', id, symbol, { ...order }, cmd.time);
     const pending = this.portfolio.pendingEntries().find((e) => e.positionId === id)!;
+    const currentPrice = this.priceOf(symbol);
+
+    // If orderType is limit and price has not pulled back to the limit level yet, keep order pending
+    if (orderType === 'limit' && currentPrice !== null) {
+      const reached = side === 'long' ? currentPrice <= price : currentPrice >= price;
+      if (!reached) {
+        return [placed];
+      }
+    }
+
     // Filled at once, as a candle opening at the asked price at that moment.
     const fill = this.fillEntry(pending, { symbol, tf: '1m', openTime: cmd.time, closeTime: cmd.time, open: price, high: price, low: price, close: price, volume: 0, quoteVolume: 0, trades: 0 });
     return [placed, ...fill];
@@ -421,10 +499,31 @@ export class Engine {
         out.push(this.emit('funding_charged', p.id, p.symbol, { rate, notional, amount: -sign(p.side) * notional * rate }));
       }
     }
-    // Entries with no price to fill at are cancelled.
+    // Scalp positions: enforce strict max-hold time stops (45m for 1m, 2h for 5m, 4h for 15m)
+    for (const p of this.portfolio.positions()) {
+      if (p.pendingClose) continue;
+      const isScalp = /\b(Scalp|Quant Autopilot)\b/i.test(p.note ?? '');
+      if (isScalp) {
+        const is1m = /\[1m\]|\(1m\)/i.test(p.note ?? '');
+        const is5m = /\[5m\]|\(5m\)/i.test(p.note ?? '');
+        const maxHoldMs = is1m ? 45 * 60_000 : is5m ? 120 * 60_000 : 240 * 60_000;
+        if (t - p.openedAt >= maxHoldMs) {
+          out.push(this.closeOrder(p, 'max_hold'));
+        }
+      }
+    }
+
+    // Entries with no price to fill at or timed out waiting for pullback are cancelled.
     for (const e of this.portfolio.pendingEntries()) {
-      if (t - e.placedAt > this.cfg.sim.entry_timeout_min * 60_000) {
-        out.push(this.emit('order_cancelled', e.positionId, e.symbol, { reason: 'no_price', placedAt: e.placedAt }));
+      const isScalp = /\b(Scalp|Quant Autopilot)\b/i.test(e.note ?? '');
+      const is1m = isScalp && /\[1m\]|\(1m\)/i.test(e.note ?? '');
+      const is5m = isScalp && /\[5m\]|\(5m\)/i.test(e.note ?? '');
+      const timeoutMs = is1m ? 15 * 60_000 : is5m ? 35 * 60_000 : e.orderType === 'limit' ? (isScalp ? 60 * 60_000 : 4 * 3_600_000) : this.cfg.sim.entry_timeout_min * 60_000;
+      if (t - e.placedAt > timeoutMs) {
+        out.push(this.emit('order_cancelled', e.positionId, e.symbol, {
+          reason: e.orderType === 'limit' ? 'timeout_missed_pullback' : 'no_price',
+          placedAt: e.placedAt,
+        }));
       }
     }
     return out;
@@ -467,10 +566,37 @@ export class Engine {
   private fillEntry(e: ReturnType<Portfolio['pendingEntries']>[number], c: Candle): TradeEvent[] {
     const cfg = this.cfg;
     const costs = costsFor(cfg, e.speed);
-    const price = marketFill(e.side, 'open', c.open, costs);
     const s = sign(e.side);
     const cancel = (reason: string, extra: Record<string, unknown> = {}) =>
-      [this.emit('order_cancelled', e.positionId, e.symbol, { reason, price, ...extra })];
+      [this.emit('order_cancelled', e.positionId, e.symbol, { reason, price: e.refPrice, ...extra })];
+
+    if (e.orderType === 'limit') {
+      const stopHit = e.side === 'long' ? c.low <= e.stop : c.high >= e.stop;
+      const limitReached = e.side === 'long' ? c.low <= e.refPrice : c.high >= e.refPrice;
+
+      if (stopHit) {
+        return cancel('cancelled_invalidation_hit');
+      }
+
+      if (e.target !== null) {
+        const targetReached = e.side === 'long' ? c.high >= e.target : c.low <= e.target;
+        if (targetReached && !limitReached) {
+          return cancel('target_reached_before_fill');
+        }
+      }
+
+      if (!limitReached) {
+        return [];
+      }
+    }
+
+    const rawPrice = e.orderType === 'limit'
+      ? (e.side === 'long' ? Math.min(e.refPrice, c.open) : Math.max(e.refPrice, c.open))
+      : c.open;
+    const price = e.orderType === 'limit'
+      ? rawPrice
+      : marketFill(e.side, 'open', c.open, costs);
+
     if (s * (price - e.stop) <= 0) return cancel('filled_beyond_stop');
 
     // Size from the fill: the loss at the stop must still fit the cap.
@@ -702,14 +828,18 @@ export class Engine {
     }
     const block = this.htfBlock(ctx.t);
     const fundingCheck = funding(ctx, a.direction);
+    const btcCheck = btc(ctx, a.direction);
+    const exhaustCheck = exhaustion(ctx, a.direction);
     const failures = [
       ...(block ? [`session_${block}`] : []),
       ...this.planFailures(ctx, planned.plan),
       ...(fundingCheck.pass ? [] : ['filter_funding']),
+      ...(btcCheck.pass ? [] : ['filter_btc']),
+      ...(exhaustCheck.pass ? [] : ['filter_exhaustion']),
     ];
     return this.submit({
       ctx, id: a.id, direction: a.direction, setup: 'htf_poi', plan: planned.plan, score: a.factors.length, failures, level: chochLevel,
-      payload: { ...detail, filters: [fundingCheck] },
+      payload: { ...detail, filters: [fundingCheck, btcCheck, exhaustCheck] },
     });
   }
 
@@ -751,15 +881,19 @@ export class Engine {
       return [];
     }
     const fundingCheck = funding(ctx, a.direction);
+    const btcCheck = btc(ctx, a.direction);
+    const exhaustCheck = exhaustion(ctx, a.direction);
     const failures = [
       ...(block ? [`session_${block}`] : []),
       ...(conf.sweep ? [] : ['no_sweep']),
       ...this.planFailures(ctx, planned.plan),
       ...(fundingCheck.pass ? [] : ['filter_funding']),
+      ...(btcCheck.pass ? [] : ['filter_btc']),
+      ...(exhaustCheck.pass ? [] : ['filter_exhaustion']),
     ];
     return this.submit({
       ctx, id: a.id, direction: a.direction, setup: 'zone_sweep', plan: planned.plan, score: a.factors.length, failures, level: conf.level,
-      payload: { ...detail, filters: [fundingCheck] },
+      payload: { ...detail, filters: [fundingCheck, btcCheck, exhaustCheck] },
     });
   }
 
@@ -818,7 +952,7 @@ export class Engine {
 
     const target = cfg.exits.mode === 'ladder' ? null : plan.target;
     const order: OpenOrder = {
-      action: 'open', orderType: 'market', side: direction, notional: risk!.notional, stop: plan.stop, target,
+      action: 'open', orderType: 'limit', side: direction, notional: risk!.notional, stop: plan.stop, target,
       chochLevel: level, signalId: id, refPrice: plan.entry, speed: ctx.speed ?? 'normal', setup,
     };
     return [this.emit('order_placed', `${id}-pos`, symbol, { ...order, plan, score })];
@@ -853,10 +987,17 @@ export class Engine {
         continue;
       }
       const fundingCheck = funding(ctx, dir);
-      const failures = [...this.planFailures(ctx, sig.plan), ...(fundingCheck.pass ? [] : ['filter_funding'])];
+      const btcCheck = btc(ctx, dir);
+      const exhaustCheck = exhaustion(ctx, dir);
+      const failures = [
+        ...this.planFailures(ctx, sig.plan),
+        ...(fundingCheck.pass ? [] : ['filter_funding']),
+        ...(btcCheck.pass ? [] : ['filter_btc']),
+        ...(exhaustCheck.pass ? [] : ['filter_exhaustion']),
+      ];
       out.push(...this.submit({
         ctx, id, direction: dir, setup: 'session_sweep', plan: sig.plan, score: sig.confluence.length, failures, level: sig.swept.price,
-        payload: { ...detail, filters: [fundingCheck] },
+        payload: { ...detail, filters: [fundingCheck, btcCheck, exhaustCheck] },
       }));
     }
     // Forget levels from more than two days ago.

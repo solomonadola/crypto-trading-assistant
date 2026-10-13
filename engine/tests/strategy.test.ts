@@ -295,19 +295,32 @@ describe('scanner', () => {
     expect(dropped).toEqual({ excluded: 1, volume: 1, change_24h: 1 });
   });
 
-  it('ranks by ATR% x log(volume), dropping low volatility and keeping the top max_symbols', () => {
+  const trend = (points: number, direction: 'long' | 'short' | null = 'long', pumping = false) => ({ direction, points, pumping, why: '' });
+  const m = (atrPct: number, points = 70, recentVolume24h = 1e8, tq = trend(points)) => ({ atrPct, recentVolume24h, trend: tq });
+
+  it('keeps only coins with a clear 4h trend and enough quality, best first, at most max_symbols', () => {
     const dropped: Record<string, number> = {};
-    const m = (atrPct: number, recentVolume24h = 1e8) => ({ atrPct, recentVolume24h });
-    const rows = rank([t('AUSDT', 1e9), t('BUSDT', 1e8), t('CUSDT', 1e8)], new Map([['AUSDT', m(2.5)], ['BUSDT', m(4)], ['CUSDT', m(1)]]), cfg.scanner, dropped);
-    expect(rows.map((r) => r.symbol)).toEqual(['BUSDT', 'AUSDT']);
-    expect(dropped).toEqual({ atr: 1 });
+    const rows = rank(
+      [t('AUSDT', 1e9), t('BUSDT', 1e8), t('CUSDT', 1e8), t('DUSDT', 1e9), t('EUSDT', 1e9)],
+      new Map([['AUSDT', m(1.5, 60)], ['BUSDT', m(2, 75)], ['CUSDT', m(2, 70, 1e8, trend(0, null))], ['DUSDT', m(2, 20)], ['EUSDT', m(2, 70, 1e8, trend(80, 'long', true))]]),
+      { ...cfg.scanner, max_symbols: 1 }, dropped);
+    // A: 60 + 11 liquidity = 71; B: 75 + 3 = 78. B first, A cut by max_symbols.
+    expect(rows.map((r) => [r.symbol, r.rank, r.direction])).toEqual([['BUSDT', 78, 'long']]);
+    expect(dropped).toEqual({ no_4h_trend: 1, low_quality: 1, pumping: 1, not_top: 1 });
+  });
+
+  it('leaves out coins too quiet to reach a target, and wild ones', () => {
+    const dropped: Record<string, number> = {};
+    const rows = rank([t('QUIETUSDT', 1e9), t('WILDUSDT', 1e9), t('OKUSDT', 1e9)], new Map([['QUIETUSDT', m(0.3)], ['WILDUSDT', m(6)], ['OKUSDT', m(1.5)]]), cfg.scanner, dropped);
+    expect(rows.map((r) => r.symbol)).toEqual(['OKUSDT']);
+    expect(dropped).toEqual({ atr: 1, too_wild: 1 });
   });
 
   it('drops coins whose 24h volume came from an earlier spike but trade little now', () => {
     const dropped: Record<string, number> = {};
     // Both had 172M over 24h; QUIET trades at a 14M-a-day pace over the last hours, BUSY at 60M.
     const rows = rank([t('QUIETUSDT', 1.72e8), t('BUSYUSDT', 1.72e8)],
-      new Map([['QUIETUSDT', { atrPct: 3, recentVolume24h: 1.4e7 }], ['BUSYUSDT', { atrPct: 3, recentVolume24h: 6e7 }]]), cfg.scanner, dropped);
+      new Map([['QUIETUSDT', m(3, 70, 1.4e7)], ['BUSYUSDT', m(3, 70, 6e7)]]), cfg.scanner, dropped);
     expect(rows.map((r) => r.symbol)).toEqual(['BUSYUSDT']);
     expect(rows[0].recentVolume24h).toBe(6e7);
     expect(dropped).toEqual({ recent_volume: 1 });

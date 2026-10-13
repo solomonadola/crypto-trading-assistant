@@ -48,7 +48,7 @@ export interface CloseOrder {
 /** Payload of an `order_placed` event asking for a position to be opened at market. */
 export interface OpenOrder {
   action: 'open';
-  orderType: 'market';
+  orderType: 'market' | 'limit';
   side: Side;
   /** Position size in USDT at the reference price; qty is fixed at the fill. */
   notional: number;
@@ -179,6 +179,11 @@ export class Portfolio {
         if (!pos) return;
         pos.stop = Number(p.stop);
         if (typeof p.ladderStep === 'number') pos.ladderStep = p.ladderStep;
+        return;
+      }
+      case 'target_moved': {
+        const pos = id ? this.open.get(id) : undefined;
+        if (pos) pos.target = p.target === null ? null : Number(p.target);
         return;
       }
       case 'partial_closed': {

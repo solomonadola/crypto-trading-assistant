@@ -19,7 +19,7 @@ feed:
     1h: 500
     4h: 500
   # Coins fed before the scanner exists (Phase 4). BTC is always fed: filters use it.
-  watch_symbols: [BTCUSDT, ETHUSDT, SOLUSDT]
+  watch_symbols: [BTCUSDT, ETHUSDT, SOLUSDT, NEARUSDT, APTUSDT, ENAUSDT, METUSDT, SUIUSDT, DOGEUSDT, AVAXUSDT]
   price_poll_ms: 2000           # live prices for the dashboard only; the engine acts on closed candles
   poll_delay_ms: 3000           # wait after each minute closes before asking Binance for it
   concurrency: 8                # requests in flight at once (Binance allows far more)
@@ -50,7 +50,9 @@ scanner:
   # spiked yesterday keeps a big 24h volume for a day after trading has died down.
   min_recent_quote_volume_24h: 50000000
   recent_volume_hours: 4
-  min_atr_pct_1h: 2.0
+  min_atr_pct_1h: 0.8
+  max_atr_pct_1h: 4.5
+  min_quality: 40
   max_change_24h_pct: 30
   # Stablecoins, wrapped/staked copies, tokenised gold and tokenised shares:
   # they rank high on volume but do not move like crypto.
@@ -59,7 +61,7 @@ scanner:
             CRCLB, SNDKB, NVDAB, MSTRB, SOXLB, SPCXB, QQQB]
   blacklist: []
   rescan_interval_sec: 300
-  max_symbols: 30
+  max_symbols: 20               # broader scanner coverage for market view
 
 sessions:
   enabled: true
@@ -74,22 +76,22 @@ sessions:
   skip_minutes_around_funding: 10   # 00:00, 08:00, 16:00 UTC
   # New entries only in these windows (local time; DST follows the local clock).
   killzones:
-    - { name: london,  tz: Europe/London,    start: "07:00", end: "10:00" }
-    - { name: newyork, tz: America/New_York, start: "07:30", end: "11:00" }
+    - { name: london,  tz: Europe/London,    start: "08:00", end: "10:00" }   # the first 2 hours after the London open
+    - { name: newyork, tz: America/New_York, start: "09:30", end: "11:30" }   # the first 2 hours after the New York (stock) open
 
 # Setups the engine trades (ENGINE_PLAN.md Section 18).
 models:
   pullback: false         # the classic zone pullback (Section 8.4); off: Model 1 replaces it
   zone_sweep: true        # Model 1: sweep + CHoCH at a zone or order block (Section 18.5)
   session_sweep: true     # Model 3: liquidity sweep in a killzone (Section 18.4)
-  htf_poi: true           # Model 4: 4h zone / FVG / order block + 5m or 15m CHoCH (htf_poi below)
+  htf_poi: true           # Model 4: 4h zone / FVG / order block + 15m CHoCH (htf_poi below)
 
-# Model 4: trade from 4h points of interest, confirmed on a lower timeframe.
+# Model 4: trade from 4h points of interest, confirmed on 15m CHoCH.
 htf_poi:
-  confirm_timeframes: [5m, 15m]  # the first CHoCH on either confirms
+  confirm_timeframes: [15m]      # strictly the 15m CHoCH confirms
   armed_expiry_hours: 12         # an armed setup with no CHoCH by then expires
   max_hold_hours: 8              # held for hours, not days: closed at the market after this
-  killzones_only: false          # true: entries only inside the killzones, like Models 1 and 3
+  killzones_only: true           # entries only inside the open windows (killzones), like Models 1 and 3
   zone_lookback_4h: 180          # 4h candles (30 days) to find supply and demand zones in
   zone_max_width_pct: 8.0        # 4h zones are wider than 1h ones
 
@@ -100,7 +102,7 @@ speed:
   groups:
     calm:   { risk_pct: 1.0, stop_buffer_atr_15m: 0.3, max_hold_hours: 48, slippage_pct: 0.05 }
     normal: { risk_pct: 1.0, stop_buffer_atr_15m: 0.3, max_hold_hours: 48, slippage_pct: 0.05 }
-    wild:   { risk_pct: 0.5, stop_buffer_atr_15m: 0.6, max_hold_hours: 24, slippage_pct: 0.15, max_open: 2 }
+    wild:   { risk_pct: 0.5, stop_buffer_atr_15m: 0.6, max_hold_hours: 24, slippage_pct: 0.15 }   # no cap on open wild trades (max_open: N would set one)
   min_history_days: 14           # new listings are skipped until then
 
 timeframes: { bias: 4h, setup: 1h, trigger: 15m, exits: 1m }
@@ -162,17 +164,16 @@ trigger:                        # the 15m CHoCH close is always required
   lookback_candles: 3           # engulfing/rejection/RSI-cross may be on the trigger or the 2 candles before
 
 filters:                        # every filter can be switched off individually
-  # Virtual trading settings (2026-10): chop, squeeze and the fakeout entry check off, so the
-  # engine takes more trades. Set them back on to go strict.
-  chop:       { enabled: false, adx_min_1h: 20, choppiness_max_1h: 61.8, ema_cross_max_1h: 2, ema20_slope_min_atr: 0.1, range_lookback_1h: 12, range_min_pct: 3.0 }
+  chop:       { enabled: true, adx_min_1h: 20, choppiness_max_1h: 61.8, ema_cross_max_1h: 2, ema20_slope_min_atr: 0.1, range_lookback_1h: 12, range_min_pct: 3.0 }
   squeeze:    { enabled: false, bb_width_percentile_min: 20 }
   stagnation: { enabled: true, volume_vs_7d_min: 0.7, atr_vs_avg_min: 0.7 }
-  fakeout:    { enabled: true, block_entry: false, close_beyond_atr: 0.2, min_close_position: 0.7, max_upper_wick_ratio: 0.4, min_rvol: 2.0, failed_breakout_candles: 3 }
+  fakeout:    { enabled: true, block_entry: true, close_beyond_atr: 0.2, min_close_position: 0.7, max_upper_wick_ratio: 0.4, min_rvol: 2.0, failed_breakout_candles: 3 }
   extension:  { enabled: true, max_distance_ema20_atr_15m: 3.0 }
   wicks:      { enabled: true, max_avg_wick_body_ratio_1h: 2.5 }
   room:       { enabled: true, htf_room_min_pct: 2.5 }
   funding:    { enabled: true, max_against_pct_8h: 0.05 }
   btc:        { enabled: true, block_longs_if_btc_1h_below_pct: -1.5, block_shorts_if_btc_1h_above_pct: 1.5 }
+  exhaustion: { enabled: true, max_adr_used_pct: 85 }
 
 scoring: { min_score: 4 }
 
@@ -184,10 +185,10 @@ allocation:
     - { min_score: 5, capital_pct: 20 }
     - { min_score: 6, capital_pct: 30 }
     - { min_score: 7, capital_pct: 40 }
-  max_open_trades: 5
+  max_open_trades: 4            # at most 4 trades open at once
   max_total_exposure_pct: 300   # 3x leverage: margin used is at most the equity
   max_loss_per_trade_pct: 1.0
-  max_open_risk_pct: 5.0        # five trades at 1% each
+  max_open_risk_pct: 3.0        # at most 3% total portfolio risk across open trades
   max_correlated_trades: 2
   correlation_groups:
     memes: [DOGE, SHIB, PEPE, WIF, BONK, FLOKI]
@@ -230,7 +231,7 @@ exits:
     stagnation: { rvol_max: 0.5, candles: 6, max_peak_pct: 1.0 }
 
 risk:
-  max_trades_per_day: 5          # all coins and models together, manual trades included (UTC day)
+  max_trades_per_day: 6         # daily cap on new trades (all coins and models, manual included, UTC day)
   max_trades_per_symbol_per_day: 2
   daily_loss_limit_pct: 3.0
   max_drawdown_kill_pct: 15.0

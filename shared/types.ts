@@ -47,6 +47,7 @@ export type TradeEventType =
   | 'order_filled'
   | 'order_cancelled'
   | 'stop_moved'
+  | 'target_moved'
   | 'partial_closed'
   | 'funding_charged'
   | 'position_closed'
@@ -158,7 +159,7 @@ export interface AccountSummary {
   drawdownPct: number;
   halted: { reason: string; at: number } | null;
   positions: PositionView[];
-  pendingEntries: { positionId: string; symbol: string; side: Direction; notional: number; placedAt: number }[];
+  pendingEntries: { positionId: string; symbol: string; side: Direction; notional: number; placedAt: number; price?: number; orderType?: 'market' | 'limit'; stop?: number; target?: number | null }[];
 }
 
 export interface ClosedTradeView {
@@ -226,13 +227,20 @@ export interface TradeIdea {
   asOf: number;
   price: number;
   atr1h: number;
+  /** Long or short only with a clear direction (see condition); 'none' while consolidating or choppy. */
   bias: Direction | 'none';
   biasReason: string;
+  /**
+   * The market's condition: trending up or down (a side), or no clear
+   * direction: consolidating (a tight 24h box, wait for a close out of it) or
+   * choppy (wide swings both ways). rangeHigh/rangeLow: the 24h box, without a direction.
+   */
+  condition: { kind: 'trend_up' | 'trend_down' | 'consolidating' | 'choppy'; reason: string; rangeHigh: number | null; rangeLow: number | null };
   trend: Record<'4h' | '1h' | '15m', string | null>;
   longState: string;
   shortState: string;
   levels: KeyLevel[];
-  /** The direction the checklist is for: the bias, or the 4h lean when there is none. */
+  /** The direction the checklist is for: the bias, or the 4h lean when there is none (then the dashboard does not show it). */
   checklistFor: Direction;
   checklist: ChecklistItem[];
   /** The prices to wait for, nearest first. */
@@ -251,6 +259,7 @@ export interface TradeIdea {
    * Setup quality, 0 to 100: share of the checklist met (50), reward:risk to
    * the first target up to 3R (25), stage (15), fits the stop and R rules (10).
    * A ranking of how close the coin is to a clean setup, not a win probability.
+   * 0 without a clear direction: there is no setup to rank.
    */
   quality: number;
   plan: null | {
@@ -307,4 +316,95 @@ export interface ConfirmationNotice {
   speed: string | null;
   /** The liquidity level or what Model 1 swept. */
   swept: string | null;
+}
+
+/** A warning on a coin that just appeared (a pump's stage, a failed break, structure turning): see pumpWatch.ts. */
+export interface WarningNotice {
+  symbol: string;
+  code: string;
+  level: 'caution' | 'danger';
+  side: 'long' | 'short' | 'both';
+  title: string;
+  detail: string;
+  time: number;
+  /** The pump's stage when the coin is in one. */
+  phase: string | null;
+}
+
+export type PatternVerdict = 'strong_edge' | 'positive_edge' | 'neutral' | 'negative_edge' | 'severe_hazard';
+
+export interface VolumeDiagnosis {
+  regime: 'expansion' | 'climax' | 'drying' | 'divergence' | 'normal';
+  rvol: number;
+  label: string;
+  whyItHappened: string;
+}
+
+export interface PatternFeatureStat {
+  category: 'trend' | 'zone' | 'adr' | 'session' | 'setup' | 'volume';
+  tag: string;
+  label: string;
+  tradesCount: number;
+  winRatePct: number;
+  avgR: number;
+  totalPnlUsd: number;
+  expectancyR: number;
+  verdict: PatternVerdict;
+  advice: string;
+}
+
+export interface PatternProfile {
+  trendAlign: 'with_trend' | 'counter_trend' | 'ranging';
+  dealingZone: 'discount' | 'premium' | 'equilibrium';
+  adrStatus: 'fresh' | 'extended' | 'exhausted';
+  session: 'killzone' | 'off_session';
+  volumeRegime: 'expansion' | 'climax' | 'drying' | 'divergence' | 'normal';
+}
+
+export interface PatternMatch {
+  symbol: string;
+  side: Direction;
+  profile: PatternProfile;
+  compositeVerdict: PatternVerdict;
+  winRatePct: number;
+  expectancyR: number;
+  sampleSize: number;
+  warnings: string[];
+  strengths: string[];
+  summary: string;
+  volumeDiagnosis?: VolumeDiagnosis;
+}
+
+export interface PatternMemoryReport {
+  stats: PatternFeatureStat[];
+  totalTrades: number;
+  overallWinRatePct: number;
+  overallAvgR: number;
+  overallExpectancyR: number;
+}
+
+export type RunnerStage = 'early_ramp' | 'ignition' | 'continuation_runner' | 'parabolic_blowoff';
+
+export interface VolumeSurgeRunner {
+  symbol: string;
+  price: number;
+  change24hPct: number;
+  change3dPct: number;
+  volume24hUsd: number;
+  baselineVolumeUsd: number;
+  rvol: number; // e.g. 4.2x
+  stage: RunnerStage;
+  stageLabel: string;
+  stageTone: 'good' | 'accent' | 'warning' | 'danger';
+  consecutiveUpDays: number;
+  why: string;
+  catalystSummary: string;
+  actionPlan: string;
+  potentialMultiplier: string; // e.g. "2x - 3x Setup Candidate"
+  score: number; // 0-100 runner ranking
+}
+
+export interface VolumeSurgeReport {
+  asOf: number;
+  runners: VolumeSurgeRunner[];
 }

@@ -116,27 +116,27 @@ describe('entry window', () => {
     expect(block('2026-07-15T07:15Z', { entry_delay_min: 15 })).toBeNull();
   });
 
-  it('killzones: entries only in London 07:00-10:00 and New York 07:30-11:00 local time, DST included', () => {
+  it('killzones: entries only in the first 2 hours after the London (08:00) and New York (09:30) opens, local time, DST included', () => {
     const kz = { killzones: loadConfig('engine/config/config.yaml').sessions.killzones };
-    // Summer: London 07:00-10:00 BST = 06:00-09:00 UTC; New York 07:30-11:00 EDT = 11:30-15:00 UTC.
-    expect(block('2026-07-15T05:50Z', kz)).toBe('outside_killzone');
-    expect(block('2026-07-15T06:10Z', kz)).toBeNull();                 // before London opens, in the Asian session
+    // Summer: London 08:00-10:00 BST = 07:00-09:00 UTC; New York 09:30-11:30 EDT = 13:30-15:30 UTC.
+    expect(block('2026-07-15T06:50Z', kz)).toBe('outside_killzone');
+    expect(block('2026-07-15T07:10Z', kz)).toBeNull();
     expect(block('2026-07-15T09:00Z', kz)).toBe('outside_killzone');   // the end is not included
-    expect(block('2026-07-15T11:45Z', kz)).toBeNull();
+    expect(block('2026-07-15T13:45Z', kz)).toBeNull();
     expect(block('2026-07-15T15:30Z', kz)).toBe('outside_killzone');
-    // Winter: London 07:00-10:00 GMT = UTC; New York 07:30-11:00 EST = 12:30-16:00 UTC.
-    expect(block('2026-01-15T06:30Z', kz)).toBe('outside_killzone');
-    expect(block('2026-01-15T07:30Z', kz)).toBeNull();
-    expect(block('2026-01-15T12:15Z', kz)).toBe('outside_killzone');
-    expect(block('2026-01-15T15:30Z', kz)).toBeNull();
-    expect(cal(kz).killzoneAt(u('2026-01-15T15:30Z'))).toBe('newyork');
+    // Winter: London 08:00-10:00 GMT = UTC; New York 09:30-11:30 EST = 14:30-16:30 UTC.
+    expect(block('2026-01-15T07:30Z', kz)).toBe('outside_killzone');
+    expect(block('2026-01-15T08:30Z', kz)).toBeNull();
+    expect(block('2026-01-15T13:45Z', kz)).toBe('outside_killzone');
+    expect(block('2026-01-15T16:15Z', kz)).toBeNull();
+    expect(cal(kz).killzoneAt(u('2026-01-15T16:15Z'))).toBe('newyork');
   });
 
   it('killzone windows for the chart, in UTC, following DST', () => {
     const c = cal({ killzones: loadConfig('engine/config/config.yaml').sessions.killzones });
     const span = (from: string, to: string) => c.killzonesBetween(u(from), u(to)).map((k) => `${k.name} ${iso(k.openTime)!.slice(11)}-${iso(k.closeTime)!.slice(11)}`);
-    expect(span('2026-07-15T00:00Z', '2026-07-16T00:00Z')).toEqual(['london 06:00Z-09:00Z', 'newyork 11:30Z-15:00Z']);
-    expect(span('2026-01-15T00:00Z', '2026-01-16T00:00Z')).toEqual(['london 07:00Z-10:00Z', 'newyork 12:30Z-16:00Z']);
+    expect(span('2026-07-15T00:00Z', '2026-07-16T00:00Z')).toEqual(['london 07:00Z-09:00Z', 'newyork 13:30Z-15:30Z']);
+    expect(span('2026-01-15T00:00Z', '2026-01-16T00:00Z')).toEqual(['london 08:00Z-10:00Z', 'newyork 14:30Z-16:30Z']);
     expect(span('2026-07-15T00:00Z', '2026-07-17T00:00Z')).toHaveLength(4);
   });
 

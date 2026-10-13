@@ -71,6 +71,10 @@ export const configSchema = z.object({
     min_recent_quote_volume_24h: z.number().min(0),
     recent_volume_hours: z.number().int().min(1).max(24),
     min_atr_pct_1h: pct,
+    /** Wilder than this (1h ATR as a percent of price) is left out: pumps and gamblers' coins. */
+    max_atr_pct_1h: pct,
+    /** Trend quality (0-100, scanner.ts trendQuality plus liquidity) a coin needs to be picked. */
+    min_quality: z.number().min(0).max(100),
     max_change_24h_pct: z.number().positive(),
     exclude: z.array(z.string()),
     blacklist: z.array(z.string()),
@@ -184,6 +188,7 @@ export const configSchema = z.object({
     room: onOff({ htf_room_min_pct: pct }),
     funding: onOff({ max_against_pct_8h: z.number().min(0) }),
     btc: onOff({ block_longs_if_btc_1h_below_pct: z.number(), block_shorts_if_btc_1h_above_pct: z.number() }),
+    exhaustion: onOff({ max_adr_used_pct: pct }).optional(),
   }).strict(),
 
   scoring: z.object({ min_score: z.number().int().min(0) }).strict(),

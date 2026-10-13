@@ -19,9 +19,9 @@ describe('engine config', () => {
     expect(c.sessions).toMatchObject({ weekdays_only: true, exit_at_session_end: false });
     expect(c.sessions.killzones.map((k) => k.name)).toEqual(['london', 'newyork']);
     expect(c.speed.groups.wild).toMatchObject({ risk_pct: 0.5, max_hold_hours: 24 });
-    // Simulation: no cap on how many trades are taken or open; the loss limits stay.
+    // Disciplined risk caps: daily trade cap, open trades cap, open risk cap.
     expect(c.speed.groups.wild.max_open).toBeUndefined();
-    expect([c.risk.max_trades_per_day, c.allocation.max_open_trades, c.allocation.max_open_risk_pct]).toEqual([null, null, null]);
+    expect([c.risk.max_trades_per_day, c.allocation.max_open_trades, c.allocation.max_open_risk_pct]).toEqual([6, 4, 3]);
     expect([c.risk.max_trades_per_symbol_per_day, c.risk.daily_loss_limit_pct, c.risk.max_drawdown_kill_pct]).toEqual([2, 3, 15]);
     expect(c.speed.min_history_days).toBe(14);
     expect(c.breakout.enabled).toBe(false);
