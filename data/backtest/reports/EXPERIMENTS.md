@@ -77,3 +77,4 @@ sessions:
 4. **Targeting Clean Opposing Liquidity**:
    - The take-profit is placed at resting buy-side liquidity (Previous Day High, 4H swing highs, unmitigated supply) with net R:R $\ge 2.0$.
    - Average winners produced +2.0R to +4.5R, easily covering occasional 1R stop-outs.
+
