@@ -90,3 +90,4 @@ describe('decideScalp', () => {
     expect(btcChange1h).toBeLessThan(-1.0);
   });
 });
+
