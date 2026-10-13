@@ -830,6 +830,7 @@ export class Engine {
     const newListing = ctx.h1.candles.length < this.cfg.speed.min_history_days * 24;
     const busy = this.portfolio.positions().some((p) => p.symbol === symbol) || this.portfolio.pendingEntries().some((e) => e.symbol === symbol);
     for (const dir of DIRECTIONS) {
+      if (this.cfg.htf_poi.directions && !this.cfg.htf_poi.directions.includes(dir)) continue;
       const key = `${symbol}|${dir}`;
       const armed = this.htfArmed.get(key);
       if (armed) {
@@ -855,6 +856,7 @@ export class Engine {
   private confirmHtf(c: Candle, done: Set<string>): TradeEvent[] {
     const out: TradeEvent[] = [];
     for (const dir of DIRECTIONS) {
+      if (this.cfg.htf_poi.directions && !this.cfg.htf_poi.directions.includes(dir)) continue;
       const key = `${c.symbol}|${dir}`;
       const a = this.htfArmed.get(key);
       if (!a || done.has(key) || c.closeTime <= a.armedAt) continue;

@@ -88,6 +88,7 @@ models:
 
 # Model 4: trade from 4h points of interest, confirmed on 15m CHoCH.
 htf_poi:
+  directions: [long, short]
   confirm_timeframes: [15m]      # strictly the 15m CHoCH confirms
   armed_expiry_hours: 12         # an armed setup with no CHoCH by then expires
   max_hold_hours: 8              # held for hours, not days: closed at the market after this

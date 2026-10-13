@@ -36,7 +36,9 @@ function applySetOverride(cfg: Record<string, any>, keyVal: string) {
   const rawVal = keyVal.slice(eqIdx + 1).trim();
 
   let val: unknown = rawVal;
-  if (rawVal === 'true') val = true;
+  if (rawVal.startsWith('[') && rawVal.endsWith(']')) {
+    val = rawVal.slice(1, -1).split(',').map((s) => s.trim()).filter(Boolean);
+  } else if (rawVal === 'true') val = true;
   else if (rawVal === 'false') val = false;
   else if (rawVal === 'null') val = null;
   else if (!Number.isNaN(Number(rawVal))) val = Number(rawVal);

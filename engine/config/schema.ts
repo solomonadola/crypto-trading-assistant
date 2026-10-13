@@ -144,6 +144,7 @@ export const configSchema = z.object({
 
   /** Model 4: 4h point of interest + 5m/15m CHoCH. */
   htf_poi: z.object({
+    directions: z.array(z.enum(['long', 'short'])).default(['long', 'short']),
     confirm_timeframes: z.array(z.enum(['5m', '15m'])).min(1),
     armed_expiry_hours: positive,
     max_hold_hours: positive,
