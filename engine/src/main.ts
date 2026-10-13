@@ -594,8 +594,10 @@ app.post('/api/control/kill', async (req, res) => {
   control(() => ({ type: 'kill', reason: 'manual kill', prices, time: Date.now() }))(req, res);
 });
 app.post('/api/control/pause', control(() => ({ type: 'pause', reason: 'paused from the dashboard' })));
-app.post('/api/control/resume', control(() => ({ type: 'resume' })));
-app.post('/api/control/reset', control((req) => ({ type: 'reset_balance', balance: Number(req.body?.balance) || undefined })));
+app.post('/api/control/reset', control((req) => {
+  const b = Number(req.body?.balance);
+  return { type: 'reset_balance', balance: b > 0 ? b : undefined };
+}));
 
 app.get('/api/sessions', (req, res) => {
   const to = Number(req.query.to) || engine.now() || Date.now();
@@ -828,11 +830,12 @@ function scalpsFor(symbol: string, tf: '1m' | '5m' | '15m' = '5m'): ScalpSetup[]
   const from = candles[0]?.openTime ?? lastOpen;
   const sessionOpens = engine.sessions.between(from, lastOpen + 300_000)
     .filter((sn) => sn.name === 'london' || sn.name === 'newyork').map((sn) => sn.openTime);
+  const costPct = roundTripPct(costsFor(config, engine.speed(symbol)));
   const setups = findScalps(candles, {
     symbol,
     bias1h: chartReading(symbol, '1h')?.trend?.direction ?? 'range',
     sessionOpens,
-    costPct: SCALP_COST_PCT,
+    costPct,
   }).filter((x) => x.time >= lastOpen - SCALP_HOURS * 3_600_000);
   scalpCache.set(cacheKey, { asOf: lastOpen, setups });
   return setups;

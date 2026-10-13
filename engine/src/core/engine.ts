@@ -364,7 +364,7 @@ export class Engine {
         return this.portfolio.halted ? [] : [this.emit('engine_halted', null, null, { reason: cmd.reason ?? 'paused' })];
       case 'resume':
         if (!this.portfolio.halted) return [];
-        this.peakEquity = equityOf(this.portfolio, (s) => this.priceOf(s));
+        this.peakEquity = Math.max(this.peakEquity, equityOf(this.portfolio, (s) => this.priceOf(s)));
         return [this.emit('engine_resumed', null, null, {})];
       case 'open':
         return this.openManual(cmd);
@@ -375,6 +375,9 @@ export class Engine {
       case 'reset_balance': {
         if (this.portfolio.positions().length || this.portfolio.pendingEntries().length) {
           throw new CommandError('Close all positions before resetting the balance');
+        }
+        if (cmd.balance !== undefined && (!(cmd.balance > 0) || !Number.isFinite(cmd.balance))) {
+          throw new CommandError('Balance must be a positive number');
         }
         const balance = cmd.balance ?? this.cfg.starting_balance_usdt;
         this.peakEquity = balance;

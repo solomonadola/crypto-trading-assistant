@@ -212,8 +212,9 @@ export async function scanVolumeSurgeRunners(
   ]);
 
   const minVolume = opts.min24hQuoteVolume ?? 10_000_000;
+  const isBanned = (sym: string) => banned.has(sym) || banned.has(baseName(sym));
   const validTickers = tickers.filter(
-    (t) => symbolSet.has(t.symbol) && !banned.has(t.symbol) && t.quoteVolume >= minVolume
+    (t) => symbolSet.has(t.symbol) && !isBanned(t.symbol) && t.quoteVolume >= minVolume
   );
 
   // Pick top candidates: top gainers and top volume leaders with positive price action

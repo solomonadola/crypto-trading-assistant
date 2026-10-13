@@ -108,7 +108,8 @@ function Dialog({ symbol, defaults, onClose }: { symbol: string; defaults: TakeD
   const stopOk = effectiveEntry !== null && s > 0 && dir * (effectiveEntry - s) > 0;
   const targetSide = t !== null && effectiveEntry !== null && t > 0 && dir * (t - effectiveEntry) > 0;
   const stopPct = stopOk && effectiveEntry !== null ? (Math.abs(effectiveEntry - s) / effectiveEntry) * 100 : null;
-  const rr = stopOk && targetSide && effectiveEntry !== null ? (Math.abs(t! - effectiveEntry) - 0.002 * effectiveEntry) / Math.abs(effectiveEntry - s) : null;
+  const costFraction = idea?.speed === 'wild' ? 0.004 : 0.002;
+  const rr = stopOk && targetSide && effectiveEntry !== null ? (Math.abs(t! - effectiveEntry) - costFraction * effectiveEntry) / Math.abs(effectiveEntry - s) : null;
   const targetOk = rr !== null && rr >= MIN_RR;
 
   // ---------------- Patience Enforcer (Wait for Level / Wait for Confirmation) ----------------
