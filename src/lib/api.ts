@@ -8,6 +8,7 @@ export type { ChartPattern, ChartReading, TrendRead, WyckoffRange } from '../../
 export type { ScalpSetup, ScalpStats } from '../../engine/src/analysis/scalp';
 export type { StructureBreak, SwingPoint, SwingStructure } from '../../engine/src/analysis/swingStructure';
 export type { CoinWatch, MarketWarning, PumpRead } from '../../engine/src/analysis/pumpWatch';
+export type { ForwardTestBenchmark, ForwardTestLive, ForwardTestReport } from '../../engine/src/stats';
 
 /** One timeframe's chart reading, in brief, for the market table. */
 export interface ReadingBrief {

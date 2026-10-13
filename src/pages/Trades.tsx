@@ -1,8 +1,204 @@
 import { useState, useMemo } from 'react';
-import { Brain, History, PieChart, Sparkles } from 'lucide-react';
-import { usePoll, type ClosedTradeView, type PatternFeatureStat, type PatternMemoryReport } from '../lib/api';
+import { Brain, History, PieChart, Scale, Sparkles } from 'lucide-react';
+import { usePoll, type ClosedTradeView, type ForwardTestReport, type PatternFeatureStat, type PatternMemoryReport } from '../lib/api';
 import { SESSION_LABEL, coin, dateTime, duration, price, signedUsd, words } from '../lib/format';
-import { Card, Empty, Kpi, ModelBadge, Pnl, SessionBadge, SideBadge, SpeedBadge, Table, td } from '../components/ui';
+import { Badge, Card, Empty, Kpi, ModelBadge, Pnl, SessionBadge, SideBadge, SpeedBadge, Table, td } from '../components/ui';
+
+function ForwardTestPanel({ data }: { data: ForwardTestReport | null }) {
+  if (!data) return null;
+  const { benchmark, live } = data;
+  const isAwaiting = live.status === 'awaiting_signals';
+  const progressText = `${live.tradesCount} / ${benchmark.targetTrades} trades (${live.progressPct}%)`;
+
+  return (
+    <Card
+      title="Forward-Test Monitor: Backtest Benchmark vs Live Paper (Step 4)"
+      icon={<Scale size={16} />}
+      right={
+        <div className="flex items-center gap-2">
+          <ModelBadge setup="htf_poi" />
+          <Badge
+            tone={
+              live.status === 'edge_confirmed'
+                ? 'good'
+                : live.status === 'divergence_warning'
+                ? 'critical'
+                : live.status === 'accumulating_sample'
+                ? 'london'
+                : 'muted'
+            }
+          >
+            {live.status === 'edge_confirmed'
+              ? 'Edge Validated'
+              : live.status === 'divergence_warning'
+              ? 'Divergence Warning'
+              : live.status === 'accumulating_sample'
+              ? 'Accumulating Sample'
+              : 'Awaiting Signals'}
+          </Badge>
+        </div>
+      }
+    >
+      <div className="space-y-4">
+        {/* Progress bar towards 50-trade statistical checkpoint */}
+        <div>
+          <div className="flex items-center justify-between text-xs mb-1.5">
+            <span className="font-semibold text-ink">
+              Forward-Test Progress towards Statistical Significance (50 Trades)
+            </span>
+            <span className="tabular text-ink-2 font-medium">{progressText}</span>
+          </div>
+          <div className="relative h-2.5 w-full rounded-full bg-card-2 overflow-hidden border border-line">
+            <div
+              className="h-full rounded-full transition-all duration-500"
+              style={{
+                width: `${Math.max(2, live.progressPct)}%`,
+                background:
+                  live.status === 'divergence_warning'
+                    ? 'var(--color-critical)'
+                    : 'linear-gradient(90deg, var(--color-london), var(--color-good))',
+              }}
+            />
+          </div>
+          <p className="mt-1 text-[11px] text-ink-3">
+            Per ROADMAP Step 4: live expectancy is benchmarked over ~50 closed trades across London & NY sessions before real capital deployment.
+          </p>
+        </div>
+
+        {/* Side-by-side comparison table */}
+        <div className="overflow-x-auto rounded-xl border border-line bg-card-2/40">
+          <table className="w-full text-left text-xs">
+            <thead>
+              <tr className="border-b border-line bg-card-2/80 text-ink-3 font-medium">
+                <th className="px-3.5 py-2.5">Key Metric</th>
+                <th className="px-3.5 py-2.5">6-Month Backtest Target (OOS)</th>
+                <th className="px-3.5 py-2.5">Live Forward-Test (Paper)</th>
+                <th className="px-3.5 py-2.5">Evaluation Status</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-line/60">
+              <tr>
+                <td className="px-3.5 py-2 font-medium text-ink">Win Rate</td>
+                <td className="px-3.5 py-2 tabular text-ink-2">
+                  <b className="text-ink">{benchmark.winRatePct}%</b> (53.3% blended / 62.5% OOS)
+                </td>
+                <td className="px-3.5 py-2 tabular">
+                  {isAwaiting ? <span className="text-ink-3">Calibrating…</span> : <b className={live.winRatePct >= 50 ? 'text-good' : 'text-critical'}>{live.winRatePct}%</b>}
+                </td>
+                <td className="px-3.5 py-2">
+                  {isAwaiting ? (
+                    <Badge tone="muted">Sampling</Badge>
+                  ) : live.winRatePct >= 45 ? (
+                    <Badge tone="good">On Track</Badge>
+                  ) : (
+                    <Badge tone="warning">Below Target</Badge>
+                  )}
+                </td>
+              </tr>
+              <tr>
+                <td className="px-3.5 py-2 font-medium text-ink">Expectancy (Average R)</td>
+                <td className="px-3.5 py-2 tabular text-ink-2">
+                  <b className="text-good">+{benchmark.avgR}R</b> (+0.62R in OOS)
+                </td>
+                <td className="px-3.5 py-2 tabular">
+                  {isAwaiting ? <span className="text-ink-3">Calibrating…</span> : <b className={live.avgR >= 0 ? 'text-good' : 'text-critical'}>{live.avgR >= 0 ? '+' : ''}{live.avgR}R</b>}
+                </td>
+                <td className="px-3.5 py-2">
+                  {isAwaiting ? (
+                    <Badge tone="muted">Sampling</Badge>
+                  ) : live.avgR >= 0.2 ? (
+                    <Badge tone="good">Positive Edge</Badge>
+                  ) : (
+                    <Badge tone="critical">Negative Drift</Badge>
+                  )}
+                </td>
+              </tr>
+              <tr>
+                <td className="px-3.5 py-2 font-medium text-ink">Profit Factor</td>
+                <td className="px-3.5 py-2 tabular text-ink-2">
+                  <b className="text-ink">{benchmark.profitFactor}</b> (Gross Win / Gross Loss)
+                </td>
+                <td className="px-3.5 py-2 tabular">
+                  {isAwaiting ? <span className="text-ink-3">Calibrating…</span> : <b className={live.profitFactor >= 1.5 ? 'text-good' : 'text-critical'}>{live.profitFactor.toFixed(2)}</b>}
+                </td>
+                <td className="px-3.5 py-2">
+                  {isAwaiting ? (
+                    <Badge tone="muted">Sampling</Badge>
+                  ) : live.profitFactor >= 1.5 ? (
+                    <Badge tone="good">Healthy</Badge>
+                  ) : (
+                    <Badge tone="warning">Sub-optimal</Badge>
+                  )}
+                </td>
+              </tr>
+              <tr>
+                <td className="px-3.5 py-2 font-medium text-ink">Max Drawdown</td>
+                <td className="px-3.5 py-2 tabular text-ink-2">
+                  <b className="text-ink">&le; {benchmark.maxDrawdownPct}%</b> (Kill Switch @ 15.0%)
+                </td>
+                <td className="px-3.5 py-2 tabular">
+                  <b className={live.maxDrawdownPct < 5 ? 'text-good' : 'text-critical'}>{live.maxDrawdownPct}%</b>
+                </td>
+                <td className="px-3.5 py-2">
+                  {live.maxDrawdownPct < 5 ? <Badge tone="good">Safe (&lt; 5%)</Badge> : <Badge tone="critical">Elevated</Badge>}
+                </td>
+              </tr>
+              <tr>
+                <td className="px-3.5 py-2 font-medium text-ink">Average Hold Duration</td>
+                <td className="px-3.5 py-2 tabular text-ink-2">
+                  ~6.8 hours (408m)
+                </td>
+                <td className="px-3.5 py-2 tabular">
+                  {isAwaiting ? <span className="text-ink-3">Calibrating…</span> : duration(live.avgHoldMin * 60_000)}
+                </td>
+                <td className="px-3.5 py-2">
+                  <Badge tone="muted">Day / Swing</Badge>
+                </td>
+              </tr>
+              <tr>
+                <td className="px-3.5 py-2 font-medium text-ink">Trading Windows</td>
+                <td className="px-3.5 py-2 text-ink-2">
+                  London (08:00–10:00) & NY (09:30–11:30)
+                </td>
+                <td className="px-3.5 py-2">
+                  Enforced (15m opening delay)
+                </td>
+                <td className="px-3.5 py-2">
+                  <Badge tone="london">Killzones Only</Badge>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        {/* Institutional Rules & Quotation */}
+        <div className="grid gap-3 pt-1 md:grid-cols-2">
+          <div className="rounded-xl border border-line bg-card-2/60 p-3 text-xs">
+            <p className="font-semibold text-accent mb-1.5 flex items-center gap-1.5">
+              Institutional Framework (SMC / Dealing Range)
+            </p>
+            <ul className="space-y-1 text-ink-2">
+              {benchmark.rules.map((rule, idx) => (
+                <li key={idx} className="flex items-start gap-1.5">
+                  <span className="text-good font-bold">✓</span>
+                  <span>{rule}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+          <div className="rounded-xl border border-line bg-card-2/60 p-3 text-xs flex flex-col justify-center">
+            <p className="italic text-ink-2">
+              "Discipline is doing nothing when nothing is there. The hardest skill in trading is not execution — it’s restraint. No setup means no trade."
+            </p>
+            <p className="mt-2 text-right text-[11px] font-medium text-ink-3">
+              — Ace Trades Academy (ATA) · Level 5 HTF Dealing Range Rule
+            </p>
+          </div>
+        </div>
+      </div>
+    </Card>
+  );
+}
 
 interface Group { key: string; count: number; net: number; wins: number }
 
@@ -100,6 +296,7 @@ const CATEGORIES = [
 export function Trades({ go }: { go: (page: string, symbol?: string) => void }) {
   const { data: trades } = usePoll<ClosedTradeView[]>('/api/trades?limit=2000', 30_000);
   const { data: memory } = usePoll<PatternMemoryReport>('/api/pattern-memory', 30_000);
+  const { data: forwardTest } = usePoll<ForwardTestReport>('/api/forward-test', 15_000);
   const [cat, setCat] = useState<(typeof CATEGORIES)[number][0]>('all');
 
   const t = trades ?? [];
@@ -122,10 +319,19 @@ export function Trades({ go }: { go: (page: string, symbol?: string) => void }) 
   }, [memory, cat]);
 
   if (!t.length) {
-    return <Card title="Trade history" icon={<History size={16} />}><Empty>No closed trades yet. They appear here, with their stats, as soon as the simulator closes one.</Empty></Card>;
+    return (
+      <div className="space-y-5">
+        <ForwardTestPanel data={forwardTest} />
+        <Card title="Trade history" icon={<History size={16} />}>
+          <Empty>No closed trades yet in current history. The engine is armed for institutional 4H POI Longs confirmed on 15m CHoCH during London & NY Killzones.</Empty>
+        </Card>
+      </div>
+    );
   }
   return (
     <div className="space-y-5">
+      <ForwardTestPanel data={forwardTest} />
+
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
         <Kpi label="Net result" value={signedUsd(stats.net)} tone={stats.net > 0 ? 'good' : stats.net < 0 ? 'critical' : null} accent="var(--color-accent)" sub={`${t.length} trades`} />
         <Kpi label="Win rate" value={`${stats.winRate.toFixed(0)}%`} accent="var(--color-london)" />

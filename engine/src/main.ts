@@ -22,7 +22,7 @@ import { backupToFile } from './storage/fileBackup';
 import { HISTORY_TABLES, insertRows, lastKey, rowsAfter } from './storage/history';
 import { authSettings, requireSignIn } from './api/auth';
 import { unrealized } from './risk';
-import { summarize } from './stats';
+import { forwardTestStats, summarize } from './stats';
 import { noticesFor } from './notices';
 import { scan, scanVolumeSurgeRunners, type ScanResult } from './scanner';
 import { resolveSymbol } from './symbols';
@@ -1209,6 +1209,10 @@ app.get('/api/results', (req, res) => {
     followed: summarize(followed),
     skipped: summarize(followed.filter((x) => !x.taken)),
   });
+});
+// Forward-testing benchmark vs live paper monitor (ROADMAP.md Step 4).
+app.get('/api/forward-test', (_req, res) => {
+  res.json(forwardTestStats(engine.closedTrades(), engine.account().drawdownPct));
 });
 app.get('/api/signals/summary', (req, res) => {
   const hours = Number(req.query.hours) || 24;
