@@ -106,3 +106,4 @@ In volatile trending markets:
    - Issue `/api/control/quant-scalp-autopilot` with `{ enabled: false }` to ensure the live server immediately halts all automated scalp order submission.
 3. **Transition to Step 3:**
    - Any future iteration on scalps must solve the structural friction problem (e.g. maker fee execution with rebate/zero fee, wider stop minimums relative to ATR, higher timeframe filters, session open avoidance).
+
