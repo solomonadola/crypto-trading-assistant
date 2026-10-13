@@ -24,12 +24,19 @@ import { authSettings, requireSignIn } from './api/auth';
 import { unrealized } from './risk';
 import { summarize } from './stats';
 import { noticesFor } from './notices';
-import { scan, type ScanResult } from './scanner';
+import { scan, scanVolumeSurgeRunners, type ScanResult } from './scanner';
 import { resolveSymbol } from './symbols';
 import { readChart, type ChartReading } from './analysis/patterns';
-import { findScalps, scalpStats, type ScalpSetup } from './analysis/scalp';
+import { findScalps, scalpStats, SCALP_LABEL, type ScalpSetup } from './analysis/scalp';
+import { readSwingStructure, type SwingStructure } from './analysis/swingStructure';
+import { watchCoin, type CoinWatch } from './analysis/pumpWatch';
+import { timingWarnings, usualDayRange } from './analysis/timing';
+import { atr } from './analysis/indicators';
 import type { SymbolInfo } from './feed/binancePublic';
-import { TIMEFRAME_MS, type Candle, type Timeframe } from '../../shared/types';
+import { TIMEFRAME_MS, type Candle, type Timeframe, type WarningNotice, type Direction, type VolumeSurgeRunner, type VolumeSurgeReport } from '../../shared/types';
+import { PatternMemory } from './analysis/patternMemory';
+import { diagnoseVolume } from './analysis/volumeDiagnosis';
+import { analyzeVolumeSurge } from './analysis/volumeSurge';
 
 dotenv.config({ path: ['.env.local', '.env'], quiet: true });
 
@@ -40,6 +47,7 @@ export const ENGINE_VERSION = '0.6.0';
 const CLOCK_KEY = 'engine_clock';
 const UNIVERSE_KEY = 'universe';
 const WATCHLIST_KEY = 'watchlist';
+const QUANT_AUTOPILOT_KEY = 'quant_scalp_autopilot';
 const MAX_WATCHLIST = 20;
 const SIGNAL_RETENTION_DAYS = 30;
 const isProduction = process.env.NODE_ENV === 'production';
@@ -48,6 +56,7 @@ const config = loadConfig();
 const hash = configHash(config);
 const dbPath = process.env.ENGINE_DB_PATH || config.storage.path;
 const db = openDb(dbPath);
+let quantAutopilot = getKv(db, QUANT_AUTOPILOT_KEY) !== 'false';
 const store = new CandleStore(db);
 const events = new EventLog(db);
 const signals = new SignalLog(db);
@@ -91,7 +100,10 @@ if (backup.target === 'firestore') {
 }
 
 // The universe: the last scan's shortlist, or the configured watch list until the first scan.
-let universe: string[] = JSON.parse(getKv(db, UNIVERSE_KEY) ?? 'null') ?? config.feed.watch_symbols;
+const savedUniverse = JSON.parse(getKv(db, UNIVERSE_KEY) ?? 'null');
+let universe: string[] = Array.isArray(savedUniverse) && savedUniverse.length > 0
+  ? savedUniverse
+  : [...config.feed.watch_symbols];
 // Coins added from the dashboard: fed and analysed like the universe, but never traded.
 let watchlist: string[] = JSON.parse(getKv(db, WATCHLIST_KEY) ?? '[]');
 
@@ -199,6 +211,8 @@ function process_(batch: Candle[]): void {
   broadcast('engine', { clock: engine.now() });
   // Confirmations for the dashboard's notifications: only fresh ones, not those replayed after a restart.
   for (const n of noticesFor(sigs, Date.now())) broadcast('signal', n);
+  announceWarnings();
+  runQuantAutopilot(batch);
 }
 
 // ---------------------------------------------------------------- live updates
@@ -221,17 +235,30 @@ function pricesMessage() {
   }));
   return { time: Date.now(), prices: livePrices, positions };
 }
+// Also while positions are open with no page watching: stops and take-profits act on these prices.
 async function pollPrices(): Promise<void> {
-  if (streams.size) {
+  if (streams.size || engine.positions().length) {
     try {
       const all = await client.tickerPrices();
       livePrices = Object.fromEntries(symbols().filter((s) => all.has(s)).map((s) => [s, all.get(s)!]));
-      broadcast('prices', pricesMessage());
+      liveExits();
+      if (streams.size) broadcast('prices', pricesMessage());
     } catch (err) {
       console.log(`[prices] ${err instanceof Error ? err.message : String(err)}`);
     }
   }
   setTimeout(() => void pollPrices(), config.feed.price_poll_ms);
+}
+
+/** Closes positions whose stop or take-profit the live price has reached, without waiting for the 1m candle to close. */
+function liveExits(): void {
+  if (!started || backup.standby || !engine.positions().length) return;
+  const produced = commandTx({ type: 'live_prices', prices: livePrices, time: Date.now() });
+  if (!produced.length) return;
+  for (const e of produced) console.log(`[live] ${e.type} ${e.symbol ?? ''} ${JSON.stringify(e.payload)}`);
+  ideaCache.clear();
+  broadcast('engine', { clock: engine.now() });
+  void pushToCloud();
 }
 
 /** Trade ideas only change when candles close: cached until the engine next processes some. */
@@ -342,18 +369,37 @@ const timers = [
 // ---------------------------------------------------------------- scanner
 
 let lastScan: ScanResult | null = null;
+let lastSurgeRunners: VolumeSurgeRunner[] = [];
 const symbolsCache: { list: SymbolInfo[]; at: number } = { list: [], at: 0 };
 async function rescan(): Promise<void> {
   try {
     lastScan = await scan(client, config.scanner, Date.now(), symbolsCache);
     engine.setSymbolRules(Object.fromEntries(symbolsCache.list.map((s) => [s.symbol, { stepSize: s.stepSize, minQty: s.minQty, minNotional: s.minNotional }])));
-    universe = lastScan.selected.map((r) => r.symbol);
+
+    // Automatically discover explosive volume surge runners and early volume ramps
+    try {
+      lastSurgeRunners = await scanVolumeSurgeRunners(client, symbolsCache, {
+        exclude: [...config.scanner.exclude, ...config.scanner.blacklist],
+      });
+    } catch (surgeErr) {
+      console.log(`[scanner] volume surge runner scan warning: ${message(surgeErr)}`);
+    }
+
+    const scanSymbols = lastScan.selected.map((r) => r.symbol);
+    const surgeSymbols = lastSurgeRunners.map((r) => r.symbol);
+    const combined = [...new Set([...scanSymbols, ...surgeSymbols])];
+
+    if (combined.length > 0) {
+      universe = combined;
+    } else if (universe.length === 0) {
+      universe = [...config.feed.watch_symbols];
+    }
     engine.setUniverse(universe);
     signals.append(engine.takeSignals());
     setKv(db, UNIVERSE_KEY, JSON.stringify(universe));
     ideaCache.clear();
     broadcast('engine', { clock: engine.now() });
-    console.log(`[scanner] ${universe.length} coins: ${universe.join(' ')}`);
+    console.log(`[scanner] ${universe.length} coins: ${universe.join(' ')} (pullback: ${scanSymbols.length}, surge runners: ${surgeSymbols.length})`);
   } catch (err) {
     console.log(`[scanner] failed, keeping ${universe.length} coins: ${message(err)}`);
   }
@@ -402,6 +448,7 @@ app.get('/api/status', (_req, res) => {
     lastEventId: events.lastId(),
     backup: { ...backup, pushedUpTo: cloud?.lastPushed() ?? null },
     signInRequired: auth.allowed.length > 0,
+    quantAutopilot,
   });
 });
 
@@ -476,18 +523,26 @@ app.post('/api/positions/open', async (req, res) => {
   }
   const wasFed = symbols().includes(symbol);
   try {
-    const produced = command({ type: 'open', symbol, side, price: mark, time: Date.now(), stop, target, note: b.note ? String(b.note) : undefined });
+    const customEntry = (b.entry !== null && b.entry !== undefined && b.entry !== '') ? Number(b.entry) : null;
+    const entryPrice = (customEntry && Number.isFinite(customEntry) && customEntry > 0) ? customEntry : mark;
+    const orderType = (b.orderType === 'market') ? 'market' : 'limit';
+    const produced = command({ type: 'open', symbol, side, price: entryPrice, time: Date.now(), stop, target, orderType, note: b.note ? String(b.note) : undefined });
     for (const e of produced) console.log(`[manual] ${e.type} ${e.symbol ?? ''} ${JSON.stringify(e.payload)}`);
     void pushToCloud();
     // Its candles are needed from now on for the stop and target.
     if (!wasFed) catchUpNow(symbol);
     const filled = produced.find((e) => e.type === 'order_filled');
     if (!filled) {
+      const placed = produced.find((e) => e.type === 'order_placed');
+      if (placed) {
+        res.json({ ok: true, pending: true, mark, entryPrice, orderType, positionId: placed.positionId, account: engine.account() });
+        return;
+      }
       const why = produced.find((e) => e.type === 'order_cancelled')?.payload.reason;
-      res.status(400).json({ ok: false, error: `Not filled: ${String(why ?? 'unknown').replace(/_/g, ' ')}`, mark });
+      res.status(400).json({ ok: false, error: `Not filled: ${String(why ?? 'unknown').replace(/_/g, ' ')}`, mark, entryPrice });
       return;
     }
-    res.json({ ok: true, mark, fill: filled.payload, positionId: filled.positionId, account: engine.account() });
+    res.json({ ok: true, pending: false, mark, entryPrice, fill: filled.payload, positionId: filled.positionId, account: engine.account() });
   } catch (err) {
     res.status(err instanceof CommandError ? 400 : 500).json({ ok: false, error: message(err), mark });
   }
@@ -508,6 +563,16 @@ app.post('/api/positions/:id/close', async (req, res) => {
   const marks = await markPrices();
   const symbol = engine.positions().find((p) => p.id === String(req.params.id))?.symbol;
   control(() => ({ type: 'close', positionId: String(req.params.id), price: symbol ? marks[symbol] : undefined, time: Date.now() }))(req, res);
+});
+// Edit an open position's stop and/or take-profit, checked against the mark price (or the live price when Binance is unreachable).
+app.post('/api/positions/:id/modify', async (req, res) => {
+  const id = String(req.params.id);
+  const symbol = engine.positions().find((p) => p.id === id)?.symbol;
+  const marks = await markPrices();
+  const b = req.body ?? {};
+  const num = (x: unknown) => (x === undefined ? undefined : Number(x));
+  const target = b.target === undefined ? undefined : b.target === null || b.target === '' ? null : Number(b.target);
+  control(() => ({ type: 'modify', positionId: id, stop: num(b.stop), target, price: (symbol && (marks[symbol] ?? livePrices[symbol])) || 0, time: Date.now() }))(req, res);
 });
 app.post('/api/control/kill', async (req, res) => {
   const prices = await markPrices();
@@ -550,19 +615,201 @@ app.get('/api/patterns/:symbol', (req, res) => {
   res.json(READ_TFS.map((tf) => chartReading(symbol, tf)).filter((r): r is ChartReading => r !== null));
 });
 
+// Swing structure (HH/HL/LH/LL, BOS/CHoCH) on any timeframe, worked out again only when a candle closes.
+const structureCache = new Map<string, SwingStructure | null>();
+const structureAsOf = new Map<string, number>();
+function swingStructure(symbol: string, tf: Timeframe): SwingStructure | null {
+  const lastOpen = store.lastOpenTime(symbol, tf);
+  if (lastOpen === null) return null;
+  const key = `${symbol}|${tf}`;
+  if (structureAsOf.get(key) !== lastOpen) {
+    structureCache.set(key, readSwingStructure(store.latest(symbol, tf, config.feed.history[tf] ?? 500), tf));
+    structureAsOf.set(key, lastOpen);
+  }
+  return structureCache.get(key) ?? null;
+}
+app.get('/api/structure/:symbol', (req, res) => {
+  const tf = String(req.query.tf ?? '15m') as Timeframe;
+  if (!config.feed.timeframes.includes(tf)) {
+    res.status(400).json({ error: `tf must be one of ${config.feed.timeframes.join(', ')}` });
+    return;
+  }
+  res.json(swingStructure(req.params.symbol.toUpperCase(), tf));
+});
+
+// Warnings per coin (a pump and its stage, stretched moves, failed breaks, structure turning), read on 1h and 15m.
+const watchCache = new Map<string, { asOf: number; watch: CoinWatch }>();
+function watchFor(symbol: string): CoinWatch | null {
+  const lastOpen = store.lastOpenTime(symbol, '15m');
+  if (lastOpen === null) return null;
+  const cached = watchCache.get(symbol);
+  if (cached?.asOf === lastOpen) return cached.watch;
+  const c1h = store.latest(symbol, '1h', 400);
+  const s1h = swingStructure(symbol, '1h');
+  const s15m = swingStructure(symbol, '15m');
+  const watch = watchCoin(symbol, c1h.slice(-200), s1h, s15m);
+  // Timing (outside the open windows, move already done): warnings for trades by hand; the engine only enters inside the windows.
+  const now = Date.now();
+  // The windows the engine can enter in: weekend ones are left out (no new entries then), so the next one may be Monday's.
+  const windows = engine.sessions.killzonesBetween(now - 86_400_000, now + 4 * 86_400_000)
+    .filter((w) => engine.sessions.entryBlock(w.openTime + 60_000) !== 'weekend');
+  const timing = timingWarnings(c1h, now, windows);
+
+  // BTC Regime check
+  const btc1h = store.latest('BTCUSDT', '1h', 2);
+  const btcChange1h = btc1h.length >= 2 && btc1h[0].close > 0
+    ? ((btc1h[btc1h.length - 1].close - btc1h[0].close) / btc1h[0].close) * 100
+    : null;
+  const btcDumping = btcChange1h !== null && btcChange1h < -1.0;
+  if (btcDumping && symbol !== 'BTCUSDT') {
+    timing.push({
+      code: 'dumping',
+      level: 'danger',
+      side: 'long',
+      title: `BTC is dumping (${btcChange1h.toFixed(1)}% in last hour)`,
+      detail: 'Sharp Bitcoin drops trigger cascade liquidations across altcoins. Avoid taking new long positions until BTC settles.',
+      time: now,
+    });
+  }
+
+  // 4h & 1h structure
+  const analysis = engine.analysis(symbol);
+  const h4Trend = (analysis?.structure['4h']?.trend ?? 'none') as 'up' | 'down' | 'none';
+  const h1Trend = (analysis?.structure['1h']?.trend ?? 'none') as 'up' | 'down' | 'none';
+
+  // ADR exhaustion
+  const adr = usualDayRange(c1h, now);
+  const todayCandles = c1h.filter((c) => c.openTime >= Math.floor(now / 86_400_000) * 86_400_000);
+  let adrInfo: { usualRange: number; todayRange: number; usedPct: number } | null = null;
+  if (adr && adr > 0 && todayCandles.length) {
+    const hi = Math.max(...todayCandles.map((c) => c.high));
+    const lo = Math.min(...todayCandles.map((c) => c.low));
+    const todayRange = hi - lo;
+    adrInfo = {
+      usualRange: adr,
+      todayRange,
+      usedPct: (todayRange / adr) * 100,
+    };
+  }
+
+  // 15m ATR
+  const c15m = store.latest(symbol, '15m', 30);
+  let atr15m: number | null = null;
+  if (c15m.length >= 15) {
+    const atrs = atr(c15m.map((c) => c.high), c15m.map((c) => c.low), c15m.map((c) => c.close), 14);
+    atr15m = atrs[atrs.length - 1] ?? null;
+  }
+
+  const allWarnings = [...watch.warnings, ...timing];
+  const level = allWarnings.some((w) => w.level === 'danger') ? 'danger' : allWarnings.length ? 'caution' : 'ok';
+  const result: CoinWatch = {
+    ...watch,
+    level,
+    warnings: allWarnings,
+    btc: { change1hPct: btcChange1h, isDumping: btcDumping },
+    adr: adrInfo,
+    structure: { h4: h4Trend, h1: h1Trend },
+    atr15m,
+  };
+  watchCache.set(symbol, { asOf: lastOpen, watch: result });
+  return result;
+}
+app.get('/api/watch/:symbol', (req, res) => {
+  res.json(watchFor(req.params.symbol.toUpperCase()));
+});
+/** Warnings already told to the dashboard (symbol|code|time); the first read after a start only fills it. */
+const warned = new Set<string>();
+const warnSeeded = new Set<string>();
+function announceWarnings(): void {
+  for (const symbol of listed()) {
+    const w = watchFor(symbol);
+    if (!w) continue;
+    const seeded = warnSeeded.has(symbol);
+    warnSeeded.add(symbol);
+    for (const x of w.warnings) {
+      const key = `${symbol}|${x.code}|${x.time}`;
+      if (warned.has(key)) continue;
+      warned.add(key);
+      if (seeded) broadcast('warning', { symbol, ...x, phase: w.pump?.phase ?? null } satisfies WarningNotice);
+    }
+
+    // Key Level Notifications: alert when coin reaches key zone or armed level
+    const idea = ideaFor(symbol);
+    if (idea?.plan && (idea.plan.status === 'in_zone' || idea.plan.status === 'armed')) {
+      const plan = idea.plan;
+      const stageTag = plan.status === 'armed' ? 'ARMED' : 'KEY LEVEL';
+      const rangeText = (plan.entryLow !== null && plan.entryHigh !== null)
+        ? `${plan.entryLow.toFixed(2)} – ${plan.entryHigh.toFixed(2)}`
+        : `${(plan.entry ?? 0).toFixed(2)}`;
+      const timeBucket = Math.floor(Date.now() / (30 * 60_000));
+      const key = `${symbol}|key_level_reached|${plan.status}|${timeBucket}`;
+      if (!warned.has(key)) {
+        warned.add(key);
+        if (seeded) {
+          broadcast('warning', {
+            symbol,
+            code: 'key_level_reached',
+            level: 'caution',
+            side: plan.direction,
+            title: `${stageTag}: Reached ${plan.direction.toUpperCase()} Entry Zone (${rangeText})`,
+            detail: `${symbol} reached the planned ${plan.direction === 'long' ? 'demand' : 'supply'} area. Consider setting an entry or waiting for lower-timeframe shift.`,
+            time: Date.now(),
+            phase: w.pump?.phase ?? null,
+          } satisfies WarningNotice);
+        }
+      }
+    }
+
+    // Volume Surge Radar Alert: notify when explosive ignition or early volume ramp is detected
+    const c1h = store.latest(symbol, '1h', 168);
+    if (c1h.length >= 24) {
+      const runner = analyzeVolumeSurge(symbol, c1h, livePrices[symbol]);
+      if (runner && (runner.stage === 'ignition' || runner.stage === 'early_ramp')) {
+        const timeBucket = Math.floor(Date.now() / (60 * 60_000));
+        const key = `${symbol}|${runner.stage}|${timeBucket}`;
+        if (!warned.has(key)) {
+          warned.add(key);
+          if (seeded) {
+            const isEarly = runner.stage === 'early_ramp';
+            broadcast('warning', {
+              symbol,
+              code: isEarly ? 'volume_ramp_detected' : 'volume_surge_ignition',
+              level: 'caution',
+              side: 'long',
+              title: isEarly
+                ? `⚡ Early Volume Ramp (${runner.rvol}x Volume, +${runner.change24hPct}% 24h)`
+                : `🚀 Volume Ignition Surge (${runner.rvol}x Volume, +${runner.change24hPct}% 24h)`,
+              detail: isEarly
+                ? `${symbol} shows consecutive hourly volume growth before markup (${runner.potentialMultiplier}). Auto-added to scanner radar!`
+                : `${symbol} is breaking out with explosive volume expansion (${runner.potentialMultiplier}). Watch for pullback entry!`,
+              time: Date.now(),
+              phase: w.pump?.phase ?? null,
+            } satisfies WarningNotice);
+          }
+        }
+      }
+    }
+  }
+}
+
 // Scalp setups on 5m for the listed coins, over the last 24 hours, each followed to its end.
 // Worked out again for a coin only when its next 5m candle closes.
 const SCALP_HOURS = 24;
 /** Round trip: fees and slippage on the entry and the exit. */
 const SCALP_COST_PCT = 2 * (config.sim.taker_fee_pct + config.sim.slippage_pct);
 const scalpCache = new Map<string, { asOf: number; setups: ScalpSetup[] }>();
-function scalpsFor(symbol: string): ScalpSetup[] {
-  const lastOpen = store.lastOpenTime(symbol, '5m');
+function scalpsFor(symbol: string, tf: '1m' | '5m' | '15m' = '5m'): ScalpSetup[] {
+  const lastOpen = store.lastOpenTime(symbol, tf);
   if (lastOpen === null) return [];
-  const cached = scalpCache.get(symbol);
+  const cacheKey = `${symbol}:${tf}`;
+  const cached = scalpCache.get(cacheKey);
   if (cached?.asOf === lastOpen) return cached.setups;
-  // 24 hours, plus warm-up for the ATR, EMAs and swing points.
-  const candles = store.latest(symbol, '5m', (SCALP_HOURS * 60) / 5 + 72);
+  // Lookback per timeframe, plus warm-up for the ATR, EMAs and swing points.
+  const count = tf === '1m' ? Math.min(240, (SCALP_HOURS * 60) + 60)
+              : tf === '15m' ? (SCALP_HOURS * 4) + 60
+              : (SCALP_HOURS * 12) + 72;
+  const candles = store.latest(symbol, tf, count);
+  if (candles.length < 40) return [];
   const from = candles[0]?.openTime ?? lastOpen;
   const sessionOpens = engine.sessions.between(from, lastOpen + 300_000)
     .filter((sn) => sn.name === 'london' || sn.name === 'newyork').map((sn) => sn.openTime);
@@ -572,29 +819,160 @@ function scalpsFor(symbol: string): ScalpSetup[] {
     sessionOpens,
     costPct: SCALP_COST_PCT,
   }).filter((x) => x.time >= lastOpen - SCALP_HOURS * 3_600_000);
-  scalpCache.set(symbol, { asOf: lastOpen, setups });
+  scalpCache.set(cacheKey, { asOf: lastOpen, setups });
   return setups;
 }
-app.get('/api/scalp', (_req, res) => {
-  const setups = listed().flatMap((sym) => scalpsFor(sym)).sort((a, b) => b.time - a.time);
-  res.json({ hours: SCALP_HOURS, costPct: SCALP_COST_PCT, setups, stats: scalpStats(setups) });
+const autoPlacedScalps = new Set<string>();
+
+function runQuantAutopilot(batch: Candle[]): void {
+  if (!quantAutopilot || !started || backup.standby || engine.account().halted) return;
+  // Scalp autopilot focuses on robust 5m and 15m timeframes (1m is left for manual sniping to avoid erratic noise)
+  const candidates = batch.filter((c) => c.tf === '5m' || c.tf === '15m');
+  if (!candidates.length) return;
+
+  const currentHeld = new Set([
+    ...engine.positions().map((p) => p.symbol),
+    ...engine.account().pendingEntries.map((p) => p.symbol),
+  ]);
+
+  for (const c of candidates) {
+    if (currentHeld.has(c.symbol)) continue;
+    const tf = c.tf as '5m' | '15m';
+    const setups = scalpsFor(c.symbol, tf);
+    // Find open setup triggered on this exact closed candle, MUST be aligned with the 1h trend!
+    const fresh = setups.find((s) => s.status === 'open' && s.time === c.openTime && s.withTrend);
+    if (!fresh) continue;
+
+    const stopPct = (Math.abs(fresh.entry - fresh.stop) / fresh.entry) * 100;
+    // Reject wide-stop setups on autopilot (max 2.2% stop distance to avoid high-volatility spikes)
+    if (stopPct > 2.2) {
+      console.log(`[quant-autopilot] Skip ${fresh.symbol}: stop too wide (${stopPct.toFixed(2)}% > 2.2%)`);
+      continue;
+    }
+
+    // Guard against active market traps (e.g. failed breakouts / bull traps, blowoffs, dumping BTC, ADR exhaustion)
+    const watch = watchFor(fresh.symbol);
+    if (watch) {
+      const opposingTrap = watch.warnings.find((w) =>
+        (w.level === 'danger' && (w.side === fresh.side || w.side === 'both')) ||
+        (w.code === 'failed_high' && fresh.side === 'long') ||
+        (w.code === 'failed_low' && fresh.side === 'short') ||
+        (w.code === 'pump_blowoff' && fresh.side === 'long') ||
+        (w.code === 'pump_unwinding' && fresh.side === 'long') ||
+        (w.code === 'dumping' && fresh.side === 'long')
+      );
+      if (opposingTrap) {
+        console.log(`[quant-autopilot] Skip ${fresh.symbol}: active watch warning ${opposingTrap.code} (${opposingTrap.title})`);
+        continue;
+      }
+      if (watch.adr && watch.adr.usedPct >= 85) {
+        console.log(`[quant-autopilot] Skip ${fresh.symbol}: ADR exhausted (${watch.adr.usedPct.toFixed(1)}% >= 85%)`);
+        continue;
+      }
+    }
+
+    const key = `${fresh.symbol}|${fresh.time}|${fresh.kind}|${fresh.side}`;
+    if (autoPlacedScalps.has(key)) continue;
+
+    // Use Key Level limit price if available, waiting for pullback rather than chasing candle close
+    const limitPrice = (fresh.keyLevel && Number.isFinite(fresh.keyLevel))
+      ? (fresh.side === 'long' ? Math.min(fresh.keyLevel, fresh.entry) : Math.max(fresh.keyLevel, fresh.entry))
+      : fresh.entry;
+
+    console.log(`[quant-autopilot] Auto-executing ${fresh.symbol} ${fresh.side} [${fresh.tf ?? tf}] ${fresh.kind} limit pullback @ ${limitPrice}`);
+    try {
+      const produced = command({
+        type: 'open',
+        symbol: fresh.symbol,
+        side: fresh.side,
+        price: limitPrice,
+        time: c.closeTime + 1,
+        stop: fresh.stop,
+        target: fresh.target,
+        orderType: 'limit',
+        note: `Quant Autopilot [${fresh.tf ?? tf}]: ${SCALP_LABEL[fresh.kind]}`,
+      });
+      autoPlacedScalps.add(key);
+      if (autoPlacedScalps.size > 500) {
+        const first = autoPlacedScalps.values().next().value;
+        if (first) autoPlacedScalps.delete(first);
+      }
+      currentHeld.add(fresh.symbol);
+      for (const e of produced) console.log(`[quant-autopilot] ${e.type} ${e.symbol ?? ''} ${JSON.stringify(e.payload)}`);
+      broadcast('warning', {
+        symbol: fresh.symbol,
+        code: 'autopilot_entry',
+        level: 'caution',
+        side: fresh.side,
+        title: `Autopilot: Limit Pullback Placed [${fresh.tf ?? tf}]`,
+        detail: `${SCALP_LABEL[fresh.kind]} limit placed at ${limitPrice}. Waiting for pullback (stop ${fresh.stop}, target ${fresh.target}).`,
+        time: Date.now(),
+        phase: null,
+      } satisfies WarningNotice);
+    } catch (err) {
+      console.log(`[quant-autopilot] Order not opened for ${fresh.symbol}: ${message(err)}`);
+    }
+  }
+}
+
+app.get('/api/quant-scalp/autopilot', (_req, res) => {
+  res.json({ enabled: quantAutopilot });
+});
+
+app.post('/api/control/quant-scalp-autopilot', (req, res) => {
+  const b = req.body ?? {};
+  const next = b.enabled !== undefined ? Boolean(b.enabled) : !quantAutopilot;
+  quantAutopilot = next;
+  setKv(db, QUANT_AUTOPILOT_KEY, String(quantAutopilot));
+  console.log(`[quant-autopilot] Autopilot is now ${quantAutopilot ? 'ACTIVE' : 'OFF'}`);
+  broadcast('engine', { clock: engine.now(), quantAutopilot });
+  res.json({ ok: true, enabled: quantAutopilot });
+});
+
+app.get('/api/scalp', (req, res) => {
+  const reqTf = String(req.query.tf || 'all');
+  const tfs: ('1m' | '5m' | '15m')[] = reqTf === '1m' ? ['1m'] : reqTf === '5m' ? ['5m'] : reqTf === '15m' ? ['15m'] : ['1m', '5m', '15m'];
+  const setups = listed().flatMap((sym) => tfs.flatMap((tf) => scalpsFor(sym, tf))).sort((a, b) => b.time - a.time);
+  res.json({ hours: SCALP_HOURS, costPct: SCALP_COST_PCT, setups, stats: scalpStats(setups), autopilot: quantAutopilot });
 });
 app.get('/api/scalp/:symbol', (req, res) => {
-  res.json(scalpsFor(req.params.symbol.toUpperCase()));
+  const sym = req.params.symbol.toUpperCase();
+  const reqTf = String(req.query.tf || 'all');
+  const tfs: ('1m' | '5m' | '15m')[] = reqTf === '1m' ? ['1m'] : reqTf === '5m' ? ['5m'] : reqTf === '15m' ? ['15m'] : ['1m', '5m', '15m'];
+  const setups = tfs.flatMap((tf) => scalpsFor(sym, tf)).sort((a, b) => b.time - a.time);
+  res.json(setups);
+});
+
+// Explosive Volume Surge & Multi-Day Runner Radar (2x-3x Setup Detector)
+app.get('/api/volume-surge', (_req, res) => {
+  const map = new Map<string, VolumeSurgeRunner>();
+  for (const r of lastSurgeRunners) {
+    map.set(r.symbol, r);
+  }
+  for (const symbol of listed()) {
+    const c1h = store.latest(symbol, '1h', 168);
+    if (c1h.length < 24) continue;
+    const runner = analyzeVolumeSurge(symbol, c1h, livePrices[symbol]);
+    if (runner) map.set(symbol, runner);
+  }
+  const runners = Array.from(map.values()).sort((a, b) => b.score - a.score);
+  res.json({ asOf: Date.now(), runners } satisfies VolumeSurgeReport);
 });
 
 app.get('/api/market', (_req, res) => {
   const rows = new Map((lastScan?.selected ?? []).map((r) => [r.symbol, r]));
+  const surgeMap = new Map(lastSurgeRunners.map((r) => [r.symbol, r]));
   res.json(listed().map((symbol) => {
     const a = engine.analysis(symbol);
     const last = store.latest(symbol, '1m', 1)[0];
+    const sRunner = surgeMap.get(symbol);
     return {
       symbol,
       scanned: universe.includes(symbol),
       watched: watchlist.includes(symbol),
       price: last?.close ?? null,
-      changePct: rows.get(symbol)?.changePct ?? null,
-      quoteVolume: rows.get(symbol)?.quoteVolume ?? null,
+      changePct: rows.get(symbol)?.changePct ?? sRunner?.change24hPct ?? null,
+      quoteVolume: rows.get(symbol)?.quoteVolume ?? sRunner?.volume24hUsd ?? null,
       recentVolume24h: rows.get(symbol)?.recentVolume24h ?? null,
       atrPct1h: rows.get(symbol)?.atrPct1h ?? null,
       long: a?.long ?? null,
@@ -610,13 +988,44 @@ app.get('/api/market', (_req, res) => {
           wyckoff: r.wyckoff ? { kind: r.wyckoff.kind, phase: r.wyckoff.phase } : null,
         }];
       })),
+      watch: (() => {
+        const w = watchFor(symbol);
+        return w && { level: w.level, phase: w.pump?.phase ?? null, titles: w.warnings.map((x) => x.title) };
+      })(),
+      runner: (() => {
+        const c1h = store.latest(symbol, '1h', 168);
+        if (c1h.length >= 24) {
+          const r = analyzeVolumeSurge(symbol, c1h, last?.close);
+          if (r) return {
+            stage: r.stage,
+            stageLabel: r.stageLabel,
+            rvol: r.rvol,
+            score: r.score,
+            potentialMultiplier: r.potentialMultiplier,
+            change3dPct: r.change3dPct,
+            actionPlan: r.actionPlan,
+          };
+        }
+        if (sRunner) {
+          return {
+            stage: sRunner.stage,
+            stageLabel: sRunner.stageLabel,
+            rvol: sRunner.rvol,
+            score: sRunner.score,
+            potentialMultiplier: sRunner.potentialMultiplier,
+            change3dPct: sRunner.change3dPct,
+            actionPlan: sRunner.actionPlan,
+          };
+        }
+        return null;
+      })(),
       armed: engine.armedSetups().filter((x) => x.symbol === symbol).map((x) => x.direction),
       setup: (() => {
         const idea = ideaFor(symbol);
         if (!idea) return null;
         const decided = idea.checklist.filter((c) => c.ok !== null);
         return {
-          bias: idea.bias, stage: idea.plan?.status ?? null, skipped: !!idea.plan?.confirmation && !idea.plan.confirmation.taken,
+          bias: idea.bias, condition: idea.condition.kind, stage: idea.plan?.status ?? null, skipped: !!idea.plan?.confirmation && !idea.plan.confirmation.taken,
           rr: idea.plan?.targets[0]?.r ?? null, meetsRules: idea.plan?.meetsRules ?? false, targetPct: idea.plan?.targetPct ?? null,
           checksMet: decided.filter((c) => c.ok).length, checksDecided: decided.length, quality: idea.quality,
           speed: idea.speed, movingFast: idea.movingFast, pdPosition: idea.dealingRange?.position ?? null,
@@ -653,6 +1062,50 @@ app.get('/api/ideas', (_req, res) => {
   ideas.sort((a, b) => Number(!!b.plan?.meetsRules) - Number(!!a.plan?.meetsRules) || (b.plan?.targetPct ?? -1) - (a.plan?.targetPct ?? -1));
   res.json(ideas);
 });
+
+const patternMemory = new PatternMemory();
+
+app.get('/api/pattern-memory', (_req, res) => {
+  patternMemory.updateTrades(engine.closedTrades());
+  res.json(patternMemory.report());
+});
+
+app.get('/api/pattern-memory/:symbol', (req, res) => {
+  const symbol = req.params.symbol.toUpperCase();
+  const side = (req.query.side === 'short' ? 'short' : 'long') as Direction;
+  const w = watchFor(symbol);
+  const idea = ideaFor(symbol);
+
+  let trendAlign: 'with_trend' | 'counter_trend' | 'ranging' = 'ranging';
+  if (w?.structure?.h4) {
+    const h4 = w.structure.h4;
+    if ((side === 'long' && h4 === 'up') || (side === 'short' && h4 === 'down')) trendAlign = 'with_trend';
+    else if ((side === 'long' && h4 === 'down') || (side === 'short' && h4 === 'up')) trendAlign = 'counter_trend';
+  }
+
+  const pos = idea?.dealingRange?.position ?? 0.5;
+  let dealingZone: 'discount' | 'premium' | 'equilibrium' = 'equilibrium';
+  if (side === 'long') {
+    dealingZone = pos < 0.45 ? 'discount' : pos > 0.55 ? 'premium' : 'equilibrium';
+  } else {
+    dealingZone = pos > 0.55 ? 'premium' : pos < 0.45 ? 'discount' : 'equilibrium';
+  }
+
+  const used = w?.adr?.usedPct ?? 50;
+  const adrStatus: 'fresh' | 'extended' | 'exhausted' = used >= 85 ? 'exhausted' : used >= 65 ? 'extended' : 'fresh';
+
+  const kz = engine.sessions.killzoneAt(engine.now() || Date.now());
+  const session: 'killzone' | 'off_session' = kz ? 'killzone' : 'off_session';
+
+  const candles1h = store.latest(symbol, '1h', 50, engine.now() || Date.now());
+  const volumeDiagnosis = diagnoseVolume(candles1h, side);
+  const volumeRegime = volumeDiagnosis.regime;
+
+  patternMemory.updateTrades(engine.closedTrades());
+  const match = patternMemory.evaluateSetup(symbol, side, { trendAlign, dealingZone, adrStatus, session, volumeRegime }, volumeDiagnosis);
+  res.json(match);
+});
+
 
 /** A coin just added to the feed: its stored candles go to the analysis now, and the feed fetches the rest now rather than at the next minute. */
 function catchUpNow(symbol: string): void {

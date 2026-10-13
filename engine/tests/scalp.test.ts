@@ -40,11 +40,11 @@ describe('scalp setups', () => {
     expect(s.side).toBe('long');
     expect(s.entry).toBe(101.4);
     expect(s.stop).toBeLessThan(100);
-    expect(s.target).toBeCloseTo(s.entry + 2 * (s.entry - s.stop), 6);
+    // The target sits 2R plus the round-trip costs (0.2% of the entry) away: a 2R win after costs.
+    expect(s.target).toBeCloseTo(s.entry + 2 * (s.entry - s.stop) + 0.002 * s.entry, 6);
     expect(s.status).toBe('target');
-    // A 2R win less the round-trip costs (0.2% of the entry).
-    expect(s.resultR).toBeCloseTo((2 * (s.entry - s.stop) - 0.002 * s.entry) / (s.entry - s.stop), 6);
-    expect(s.winR).toBeLessThan(2);
+    expect(s.resultR).toBeCloseTo(2, 6);
+    expect(s.winR).toBeCloseTo(2, 6);
     expect(s.lossR).toBeLessThan(-1);
   });
 
@@ -81,6 +81,55 @@ describe('scalp setups', () => {
     const orHigh = Math.max(...c.slice(70, 73).map((x) => x.high));
     const orLow = Math.min(...c.slice(70, 73).map((x) => x.low));
     expect(s[0].stop).toBeCloseTo((orHigh + orLow) / 2, 6);
+  });
+
+  it('finds a 1m micro-scalp with tf set to 1m', () => {
+    const M1 = 60_000;
+    const c1m: Candle[] = path([...zigzag(80, 101, 103), [81, 101.4], [90, 106]], {
+      81: { open: 101.2, high: 101.5, low: 100, close: 101.4 },
+    }).map((c, i) => ({
+      ...c,
+      tf: '1m',
+      openTime: T0 + i * M1,
+      closeTime: T0 + (i + 1) * M1 - 1,
+    }));
+    const setups = findScalps(c1m, ctx);
+    const s1m = setups.find((x) => x.kind === 'sweep_reclaim');
+    expect(s1m).toBeDefined();
+    expect(s1m?.tf).toBe('1m');
+  });
+
+  it('detects a volume climax reversal on high volume with absorption wick', () => {
+    // Candles with volume 100, then at candle 60 volume surges to 500 with a large lower hammer wick
+    const c = path([[0, 100], [60, 100], [65, 102]], {
+      60: {
+        open: 100.5,
+        close: 101.0,
+        high: 101.1,
+        low: 99.5, // range 1.6, lower wick 100.5 - 99.5 = 1.0 (62.5% of range)
+        volume: 500, // 5x average
+      },
+    });
+    const s = of(findScalps(c, ctx), 'volume_climax');
+    expect(s.length).toBeGreaterThan(0);
+    expect(s[0].side).toBe('long');
+    expect(s[0].kind).toBe('volume_climax');
+    expect(s[0].stop).toBeLessThan(99.5);
+  });
+
+  it('detects an FVG imbalance tap', () => {
+    // Bullish trend where candle 58 has high 100.0, candle 59 leaps up,
+    // candle 60 has low 101.2 (> high 58), candle 61 dips to 100.8 and closes green at 101.5
+    const c = path([[0, 98], [55, 100], [70, 104]], {
+      58: { open: 99.8, close: 100.0, high: 100.0, low: 99.6 },
+      59: { open: 100.1, close: 101.8, high: 102.0, low: 100.0 },
+      60: { open: 101.8, close: 102.2, high: 102.4, low: 101.2 },
+      61: { open: 101.0, close: 101.8, high: 102.0, low: 100.8 },
+    });
+    const s = of(findScalps(c, { ...ctx, bias1h: 'up' }), 'fvg_retest');
+    expect(s.length).toBeGreaterThan(0);
+    expect(s[0].side).toBe('long');
+    expect(s[0].kind).toBe('fvg_retest');
   });
 });
 
