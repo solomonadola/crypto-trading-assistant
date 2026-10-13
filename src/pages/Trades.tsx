@@ -1,8 +1,16 @@
 import { useState, useMemo } from 'react';
 import { Brain, History, PieChart, Scale, Sparkles } from 'lucide-react';
 import { usePoll, type ClosedTradeView, type ForwardTestReport, type PatternFeatureStat, type PatternMemoryReport } from '../lib/api';
-import { SESSION_LABEL, coin, dateTime, duration, price, signedUsd, words } from '../lib/format';
+import { MODEL_LABEL, SESSION_LABEL, coin, dateTime, duration, price, signedUsd, words } from '../lib/format';
 import { Badge, Card, Empty, Kpi, ModelBadge, Pnl, SessionBadge, SideBadge, SpeedBadge, Table, td } from '../components/ui';
+
+const STRATEGY_FILTERS = [
+  { id: 'all', label: 'All Strategies' },
+  { id: 'htf_poi', label: 'Institutional (4H POI)' },
+  { id: 'scalp', label: 'Quant Scalp' },
+  { id: 'manual', label: 'Manual Trades' },
+] as const;
+type StrategyFilterId = (typeof STRATEGY_FILTERS)[number]['id'];
 
 function ForwardTestPanel({ data }: { data: ForwardTestReport | null }) {
   if (!data) return null;
@@ -298,19 +306,26 @@ export function Trades({ go }: { go: (page: string, symbol?: string) => void }) 
   const { data: memory } = usePoll<PatternMemoryReport>('/api/pattern-memory', 30_000);
   const { data: forwardTest } = usePoll<ForwardTestReport>('/api/forward-test', 15_000);
   const [cat, setCat] = useState<(typeof CATEGORIES)[number][0]>('all');
+  const [strategyFilter, setStrategyFilter] = useState<StrategyFilterId>('all');
 
   const t = trades ?? [];
+  const activeTrades = useMemo(() => {
+    if (strategyFilter === 'all') return t;
+    return t.filter((x) => (x.setup ?? 'manual') === strategyFilter);
+  }, [t, strategyFilter]);
+
   const stats = useMemo(() => {
-    const wins = t.filter((x) => x.pnl > 0);
-    const losses = t.filter((x) => x.pnl <= 0);
+    const wins = activeTrades.filter((x) => x.pnl > 0);
+    const losses = activeTrades.filter((x) => x.pnl <= 0);
     const gross = wins.reduce((s, x) => s + x.pnl, 0);
     const lost = -losses.reduce((s, x) => s + x.pnl, 0);
     return {
-      net: gross - lost, winRate: t.length ? (wins.length / t.length) * 100 : 0,
+      net: gross - lost, winRate: activeTrades.length ? (wins.length / activeTrades.length) * 100 : 0,
       avgWin: wins.length ? gross / wins.length : 0, avgLoss: losses.length ? -lost / losses.length : 0,
       pf: lost > 0 ? gross / lost : null,
+      total: activeTrades.length,
     };
-  }, [t]);
+  }, [activeTrades]);
 
   const patternStats = useMemo(() => {
     const raw = memory?.stats ?? [];
@@ -332,8 +347,39 @@ export function Trades({ go }: { go: (page: string, symbol?: string) => void }) 
     <div className="space-y-5">
       <ForwardTestPanel data={forwardTest} />
 
+      {/* Strategy Selector Tabs */}
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-line bg-card p-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-xs font-semibold text-ink-3 uppercase tracking-wider mr-1">Filter Strategy:</span>
+          {STRATEGY_FILTERS.map((f) => {
+            const count = f.id === 'all' ? t.length : t.filter((x) => (x.setup ?? 'manual') === f.id).length;
+            return (
+              <button
+                key={f.id}
+                onClick={() => setStrategyFilter(f.id)}
+                className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition ${
+                  strategyFilter === f.id
+                    ? 'bg-accent text-white shadow-sm'
+                    : 'bg-card-2 text-ink-2 hover:text-ink hover:bg-card-2/80'
+                }`}
+              >
+                <span>{f.label}</span>
+                <span className={`rounded-full px-1.5 py-0.5 text-[10px] ${strategyFilter === f.id ? 'bg-white/20 text-white' : 'bg-card text-ink-3'}`}>
+                  {count}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+        {strategyFilter !== 'all' && (
+          <span className="text-xs text-ink-3">
+            Showing KPI & History for: <b className="text-accent">{STRATEGY_FILTERS.find((f) => f.id === strategyFilter)?.label}</b>
+          </span>
+        )}
+      </div>
+
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
-        <Kpi label="Net result" value={signedUsd(stats.net)} tone={stats.net > 0 ? 'good' : stats.net < 0 ? 'critical' : null} accent="var(--color-accent)" sub={`${t.length} trades`} />
+        <Kpi label="Net result" value={signedUsd(stats.net)} tone={stats.net > 0 ? 'good' : stats.net < 0 ? 'critical' : null} accent="var(--color-accent)" sub={`${stats.total} trades`} />
         <Kpi label="Win rate" value={`${stats.winRate.toFixed(0)}%`} accent="var(--color-london)" />
         <Kpi label="Average win" value={signedUsd(stats.avgWin)} accent="var(--color-good)" />
         <Kpi label="Average loss" value={signedUsd(stats.avgLoss)} accent="var(--color-critical)" />
@@ -370,7 +416,14 @@ export function Trades({ go }: { go: (page: string, symbol?: string) => void }) 
         )}
       </Card>
 
-      <div className="grid gap-5 lg:grid-cols-3">
+      <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
+        <Card title="By strategy" icon={<PieChart size={16} />}>
+          <NetBars
+            groups={groupBy(t, (x) => x.setup ?? 'manual')}
+            label={(k) => MODEL_LABEL[k] ?? words(k)}
+            color={(k) => (k === 'htf_poi' ? 'var(--color-london)' : k === 'scalp' ? 'var(--color-accent)' : 'var(--color-good)')}
+          />
+        </Card>
         <Card title="By session" icon={<PieChart size={16} />}>
           <NetBars groups={groupBy(t, (x) => x.session ?? 'none')} label={(k) => SESSION_LABEL[k] ?? k} color={(k) => `var(--color-${k})`} />
         </Card>
@@ -378,26 +431,30 @@ export function Trades({ go }: { go: (page: string, symbol?: string) => void }) 
         <Card title="By side"><NetBars groups={groupBy(t, (x) => x.side)} label={(k) => k} /></Card>
       </div>
 
-      <Card title="Trade history" icon={<History size={16} />}>
-        <Table head={['Opened (UTC)', 'Coin', 'Side', 'Model', 'Entry', 'Exit', 'Held', 'Exit reason', 'Session', 'Net P&L']}>
-          {t.map((x) => (
-            <tr key={x.id} className="hover:bg-card-2/60">
-              <td className={`${td} tabular text-ink-2`}>{dateTime(x.openedAt)}</td>
-              <td className={td}><button className="font-semibold hover:text-accent" onClick={() => go('chart', x.symbol)}>{coin(x.symbol)}</button></td>
-              <td className={td}><SideBadge side={x.side} /></td>
-              <td className={td} title={x.note}>
-                <span className="flex flex-wrap gap-1"><ModelBadge setup={x.setup} /><SpeedBadge speed={x.speed} /></span>
-                {x.note && <span className="block max-w-48 truncate text-xs text-ink-3">{x.note}</span>}
-              </td>
-              <td className={`${td} tabular`}>{price(x.entryPrice)}</td>
-              <td className={`${td} tabular`}>{price(x.exitPrice)}</td>
-              <td className={`${td} tabular text-ink-2`}>{duration(x.closedAt - x.openedAt)}</td>
-              <td className={`${td} text-ink-2`}>{words(x.reason)}</td>
-              <td className={td}><SessionBadge name={x.session} /></td>
-              <td className={td}><Pnl value={x.pnl} /></td>
-            </tr>
-          ))}
-        </Table>
+      <Card title={`Trade history (${activeTrades.length} ${strategyFilter === 'all' ? 'trades' : STRATEGY_FILTERS.find((f) => f.id === strategyFilter)?.label})`} icon={<History size={16} />}>
+        {!activeTrades.length ? (
+          <Empty>No closed trades found matching "{STRATEGY_FILTERS.find((f) => f.id === strategyFilter)?.label}".</Empty>
+        ) : (
+          <Table head={['Opened (UTC)', 'Coin', 'Side', 'Model', 'Entry', 'Exit', 'Held', 'Exit reason', 'Session', 'Net P&L']}>
+            {activeTrades.map((x) => (
+              <tr key={x.id} className="hover:bg-card-2/60">
+                <td className={`${td} tabular text-ink-2`}>{dateTime(x.openedAt)}</td>
+                <td className={td}><button className="font-semibold hover:text-accent" onClick={() => go('chart', x.symbol)}>{coin(x.symbol)}</button></td>
+                <td className={td}><SideBadge side={x.side} /></td>
+                <td className={td} title={x.note}>
+                  <span className="flex flex-wrap gap-1"><ModelBadge setup={x.setup} /><SpeedBadge speed={x.speed} /></span>
+                  {x.note && <span className="block max-w-48 truncate text-xs text-ink-3">{x.note}</span>}
+                </td>
+                <td className={`${td} tabular`}>{price(x.entryPrice)}</td>
+                <td className={`${td} tabular`}>{price(x.exitPrice)}</td>
+                <td className={`${td} tabular text-ink-2`}>{duration(x.closedAt - x.openedAt)}</td>
+                <td className={`${td} text-ink-2`}>{words(x.reason)}</td>
+                <td className={td}><SessionBadge name={x.session} /></td>
+                <td className={td}><Pnl value={x.pnl} /></td>
+              </tr>
+            ))}
+          </Table>
+        )}
       </Card>
     </div>
   );
