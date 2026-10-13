@@ -247,6 +247,9 @@ export const configSchema = z.object({
 
   scalp_autopilot: z.object({
     timeframes: z.array(z.enum(['1m', '5m', '15m'])).min(1),
+    kinds: z.array(z.enum(['sweep_reclaim', 'vwap_bounce', 'ema_pullback', 'orb', 'fvg_retest', 'volume_climax'])).default([
+      'sweep_reclaim', 'vwap_bounce', 'ema_pullback', 'orb', 'fvg_retest', 'volume_climax',
+    ]),
     max_stop_pct: positive,
     /** A candle closed longer ago than this is not acted on (a replay or a feed catching up). */
     max_signal_age_sec: posInt,

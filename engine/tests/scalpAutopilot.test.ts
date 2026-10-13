@@ -6,6 +6,7 @@ import type { EngineConfig } from '../src/config';
 function mockConfig(): EngineConfig['scalp_autopilot'] {
   return {
     timeframes: ['5m', '15m'],
+    kinds: ['sweep_reclaim', 'vwap_bounce', 'ema_pullback', 'orb', 'fvg_retest', 'volume_climax'],
     max_signal_age_sec: 120,
     max_stop_pct: 2.2,
     max_trades_per_day: null,

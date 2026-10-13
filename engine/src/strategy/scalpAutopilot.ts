@@ -67,6 +67,11 @@ export function decideScalp(i: ScalpDecisionInput): ScalpDecisionResult {
   const fresh = setups.find((s) => s.status === 'open' && s.time === lastCandle.openTime && s.withTrend);
   if (!fresh) return { order: null, skipped: 'no_fresh_setup' };
 
+  // Filter by allowed kinds in config
+  if (i.config.kinds && !i.config.kinds.includes(fresh.kind)) {
+    return { order: null, skipped: `kind_${fresh.kind}_not_allowed` };
+  }
+
   // Max stop distance guard
   const stopPct = (Math.abs(fresh.entry - fresh.stop) / fresh.entry) * 100;
   if (stopPct > i.config.max_stop_pct) {

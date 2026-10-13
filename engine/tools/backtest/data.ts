@@ -81,14 +81,21 @@ export async function ensureBacktestData(opts: BacktestDataOptions): Promise<Bac
       if (start >= fetchTo) continue;
 
       log(`Downloading ${symbol} [${tf}] from ${new Date(start).toISOString().slice(0, 10)} to ${new Date(fetchTo).toISOString().slice(0, 10)}...`);
-      try {
-        const candles = await binance.klinesRange(symbol, tf, start, fetchTo);
-        if (candles.length > 0) {
-          store.save(candles);
-          log(`Saved ${candles.length} candles for ${symbol} [${tf}].`);
+      const chunkDays = tf === '1m' ? 7 : 30;
+      const chunkMs = chunkDays * 86_400_000;
+      let curr = start;
+      while (curr < fetchTo) {
+        const chunkEnd = Math.min(curr + chunkMs - 1, fetchTo);
+        try {
+          const candles = await binance.klinesRange(symbol, tf, curr, chunkEnd);
+          if (candles.length > 0) {
+            store.save(candles);
+            log(`Saved ${candles.length} candles for ${symbol} [${tf}] (${new Date(curr).toISOString().slice(0, 10)} to ${new Date(chunkEnd).toISOString().slice(0, 10)}).`);
+          }
+        } catch (err) {
+          log(`Error fetching ${symbol} [${tf}] chunk: ${String(err)}`);
         }
-      } catch (err) {
-        log(`Error fetching ${symbol} [${tf}]: ${String(err)}`);
+        curr = chunkEnd + tfMs;
       }
     }
   }
