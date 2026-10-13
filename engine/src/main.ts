@@ -38,6 +38,8 @@ import { PatternMemory } from './analysis/patternMemory';
 import { diagnoseVolume } from './analysis/volumeDiagnosis';
 import { analyzeVolumeSurge } from './analysis/volumeSurge';
 import { autopilotCandles, settledPrices } from './autopilot';
+import { decideScalp } from './strategy/scalpAutopilot';
+import { costsFor, roundTripPct } from './speed';
 
 dotenv.config({ path: ['.env.local', '.env'], quiet: true });
 
@@ -849,78 +851,78 @@ function runQuantAutopilot(batch: Candle[]): void {
 
   for (const c of candidates) {
     if (currentHeld.has(c.symbol)) continue;
-    const tf = c.tf as '1m' | '5m' | '15m';
-    const setups = scalpsFor(c.symbol, tf);
-    // An open setup from this exact closed candle, in the 1h trend's direction.
-    const fresh = setups.find((s) => s.status === 'open' && s.time === c.openTime && s.withTrend);
-    if (!fresh) continue;
+    const tf = c.tf as '5m' | '15m';
 
-    // Guard against active market traps (e.g. failed breakouts / bull traps, blowoffs, dumping BTC, ADR exhaustion)
-    const watch = watchFor(fresh.symbol);
-    if (watch) {
-      const opposingTrap = watch.warnings.find((w) =>
-        (w.level === 'danger' && (w.side === fresh.side || w.side === 'both')) ||
-        (w.code === 'failed_high' && fresh.side === 'long') ||
-        (w.code === 'failed_low' && fresh.side === 'short') ||
-        (w.code === 'pump_blowoff' && fresh.side === 'long') ||
-        (w.code === 'pump_unwinding' && fresh.side === 'long') ||
-        (w.code === 'dumping' && fresh.side === 'long')
-      );
-      if (opposingTrap) {
-        console.log(`[quant-autopilot] Skip ${fresh.symbol}: active watch warning ${opposingTrap.code} (${opposingTrap.title})`);
-        continue;
+    const count = tf === '15m' ? (SCALP_HOURS * 4) + 60 : (SCALP_HOURS * 12) + 72;
+    const candles = store.latest(c.symbol, tf, count);
+    const candles1h = store.latest(c.symbol, '1h', 200);
+    const btc1h = store.latest('BTCUSDT', '1h', 2);
+    const from = candles[0]?.openTime ?? c.openTime;
+    const sessionOpens = engine.sessions.between(from, c.openTime + 300_000)
+      .filter((sn) => sn.name === 'london' || sn.name === 'newyork').map((sn) => sn.openTime);
+    const speed = engine.speed(c.symbol);
+    const costPct = roundTripPct(costsFor(config, speed));
+
+    const decision = decideScalp({
+      symbol: c.symbol,
+      tf,
+      candles,
+      candles1h,
+      btc1h,
+      sessionOpens,
+      costPct,
+      now: c.closeTime,
+      config: auto,
+    });
+
+    if (!decision.order) {
+      if (decision.skipped && decision.skipped !== 'no_fresh_setup') {
+        console.log(`[quant-autopilot] Skip ${c.symbol}: ${decision.skipped}`);
       }
-      if (watch.adr && watch.adr.usedPct >= 85) {
-        console.log(`[quant-autopilot] Skip ${fresh.symbol}: ADR exhausted (${watch.adr.usedPct.toFixed(1)}% >= 85%)`);
-        continue;
-      }
+      continue;
     }
 
-    const key = `${fresh.symbol}|${fresh.time}|${fresh.kind}|${fresh.side}`;
+    const o = decision.order;
+    const key = `${o.symbol}|${c.openTime}|${o.kind}|${o.side}`;
     if (autoPlacedScalps.has(key)) continue;
 
-    // Use Key Level limit price if available, waiting for pullback rather than chasing candle close
-    const limitPrice = (fresh.keyLevel && Number.isFinite(fresh.keyLevel))
-      ? (fresh.side === 'long' ? Math.min(fresh.keyLevel, fresh.entry) : Math.max(fresh.keyLevel, fresh.entry))
-      : fresh.entry;
-
-    console.log(`[quant-autopilot] Auto-executing ${fresh.symbol} ${fresh.side} [${fresh.tf ?? tf}] ${fresh.kind} limit pullback @ ${limitPrice}`);
+    console.log(`[quant-autopilot] Auto-executing ${o.symbol} ${o.side} [${o.tf}] ${o.kind} limit pullback @ ${o.limitPrice}`);
     try {
       const produced = command({
         type: 'open',
-        symbol: fresh.symbol,
-        side: fresh.side,
-        price: limitPrice,
+        symbol: o.symbol,
+        side: o.side,
+        price: o.limitPrice,
         // At the close: the next 1m candle, which opens then, can fill it.
         time: c.closeTime,
-        stop: fresh.stop,
-        target: fresh.target,
+        stop: o.stop,
+        target: o.target,
         orderType: 'limit',
-        note: `Quant Autopilot [${fresh.tf ?? tf}]: ${SCALP_LABEL[fresh.kind]}`,
+        note: o.note,
         // The engine checks it as the autopilot's (session, stop width, costs, funding, BTC, daily range) and records it as "scalp".
         setup: 'scalp',
-        maxHoldMin: auto.max_hold_min[tf],
-        entryTimeoutMin: auto.entry_timeout_min[tf],
+        maxHoldMin: o.maxHoldMin,
+        entryTimeoutMin: o.entryTimeoutMin,
       });
       autoPlacedScalps.add(key);
       if (autoPlacedScalps.size > 500) {
         const first = autoPlacedScalps.values().next().value;
         if (first) autoPlacedScalps.delete(first);
       }
-      currentHeld.add(fresh.symbol);
+      currentHeld.add(o.symbol);
       for (const e of produced) console.log(`[quant-autopilot] ${e.type} ${e.symbol ?? ''} ${JSON.stringify(e.payload)}`);
       broadcast('warning', {
-        symbol: fresh.symbol,
+        symbol: o.symbol,
         code: 'autopilot_entry',
         level: 'caution',
-        side: fresh.side,
-        title: `Autopilot: Limit Pullback Placed [${fresh.tf ?? tf}]`,
-        detail: `${SCALP_LABEL[fresh.kind]} limit placed at ${limitPrice}. Waiting for pullback (stop ${fresh.stop}, target ${fresh.target}).`,
+        side: o.side,
+        title: `Autopilot: Limit Pullback Placed [${o.tf}]`,
+        detail: `${SCALP_LABEL[o.kind]} limit placed at ${o.limitPrice}. Waiting for pullback (stop ${o.stop}, target ${o.target}).`,
         time: Date.now(),
         phase: null,
       } satisfies WarningNotice);
     } catch (err) {
-      console.log(`[quant-autopilot] Order not opened for ${fresh.symbol}: ${message(err)}`);
+      console.log(`[quant-autopilot] Order not opened for ${o.symbol}: ${message(err)}`);
     }
   }
 }

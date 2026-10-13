@@ -206,6 +206,10 @@ export class Engine {
     return this.market.get(symbol);
   }
 
+  speed(symbol: string): SpeedGroup {
+    return buildContext(this.market, symbol, this.clock, this.cfg, this.funding.get(symbol) ?? null)?.speed ?? 'normal';
+  }
+
   analysedSymbols(): string[] {
     return this.market.symbols();
   }
