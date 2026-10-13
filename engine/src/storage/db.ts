@@ -92,6 +92,18 @@ const MIGRATIONS: string[] = [
     open_positions INTEGER NOT NULL
   );
   `,
+  // 3: trade journal for post-trade reviews and ATA exercises
+  `
+  CREATE TABLE trade_journal (
+    trade_id TEXT PRIMARY KEY,
+    rating INTEGER,
+    tags TEXT,
+    notes TEXT,
+    ata_checklist TEXT,
+    updated_at INTEGER NOT NULL
+  );
+  CREATE INDEX trade_journal_updated ON trade_journal (updated_at);
+  `,
 ];
 
 export function openDb(file: string): DB {

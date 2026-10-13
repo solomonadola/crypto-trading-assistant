@@ -1,8 +1,9 @@
 import { useState, useMemo } from 'react';
-import { Brain, History, PieChart, Scale, Sparkles } from 'lucide-react';
-import { usePoll, type ClosedTradeView, type ForwardTestReport, type PatternFeatureStat, type PatternMemoryReport } from '../lib/api';
+import { BookOpen, Brain, History, PieChart, Scale, Sparkles } from 'lucide-react';
+import { usePoll, type ClosedTradeView, type ForwardTestReport, type JournalEntry, type PatternFeatureStat, type PatternMemoryReport } from '../lib/api';
 import { MODEL_LABEL, SESSION_LABEL, coin, dateTime, duration, price, signedUsd, words } from '../lib/format';
 import { Badge, Card, Empty, Kpi, ModelBadge, Pnl, SessionBadge, SideBadge, SpeedBadge, Table, td } from '../components/ui';
+import { TradeJournalModal } from '../components/TradeJournalModal';
 
 const STRATEGY_FILTERS = [
   { id: 'all', label: 'All Strategies' },
@@ -303,10 +304,14 @@ const CATEGORIES = [
 
 export function Trades({ go }: { go: (page: string, symbol?: string) => void }) {
   const { data: trades } = usePoll<ClosedTradeView[]>('/api/trades?limit=2000', 30_000);
+  const { data: journalEntries, reload: reloadJournal } = usePoll<JournalEntry[]>('/api/journal', 30_000);
   const { data: memory } = usePoll<PatternMemoryReport>('/api/pattern-memory', 30_000);
   const { data: forwardTest } = usePoll<ForwardTestReport>('/api/forward-test', 15_000);
   const [cat, setCat] = useState<(typeof CATEGORIES)[number][0]>('all');
   const [strategyFilter, setStrategyFilter] = useState<StrategyFilterId>('all');
+  const [selectedTrade, setSelectedTrade] = useState<ClosedTradeView | null>(null);
+
+  const journalMap = useMemo(() => new Map((journalEntries ?? []).map((j) => [j.tradeId, j])), [journalEntries]);
 
   const t = trades ?? [];
   const activeTrades = useMemo(() => {
@@ -435,27 +440,60 @@ export function Trades({ go }: { go: (page: string, symbol?: string) => void }) 
         {!activeTrades.length ? (
           <Empty>No closed trades found matching "{STRATEGY_FILTERS.find((f) => f.id === strategyFilter)?.label}".</Empty>
         ) : (
-          <Table head={['Opened (UTC)', 'Coin', 'Side', 'Model', 'Entry', 'Exit', 'Held', 'Exit reason', 'Session', 'Net P&L']}>
-            {activeTrades.map((x) => (
-              <tr key={x.id} className="hover:bg-card-2/60">
-                <td className={`${td} tabular text-ink-2`}>{dateTime(x.openedAt)}</td>
-                <td className={td}><button className="font-semibold hover:text-accent" onClick={() => go('chart', x.symbol)}>{coin(x.symbol)}</button></td>
-                <td className={td}><SideBadge side={x.side} /></td>
-                <td className={td} title={x.note}>
-                  <span className="flex flex-wrap gap-1"><ModelBadge setup={x.setup} /><SpeedBadge speed={x.speed} /></span>
-                  {x.note && <span className="block max-w-48 truncate text-xs text-ink-3">{x.note}</span>}
-                </td>
-                <td className={`${td} tabular`}>{price(x.entryPrice)}</td>
-                <td className={`${td} tabular`}>{price(x.exitPrice)}</td>
-                <td className={`${td} tabular text-ink-2`}>{duration(x.closedAt - x.openedAt)}</td>
-                <td className={`${td} text-ink-2`}>{words(x.reason)}</td>
-                <td className={td}><SessionBadge name={x.session} /></td>
-                <td className={td}><Pnl value={x.pnl} /></td>
-              </tr>
-            ))}
+          <Table head={['Opened (UTC)', 'Coin', 'Side', 'Model', 'Entry', 'Exit', 'Held', 'Exit reason', 'Session', 'Net P&L', 'Journal']}>
+            {activeTrades.map((x) => {
+              const j = journalMap.get(x.id);
+              return (
+                <tr key={x.id} className="hover:bg-card-2/60">
+                  <td className={`${td} tabular text-ink-2`}>{dateTime(x.openedAt)}</td>
+                  <td className={td}><button className="font-semibold hover:text-accent" onClick={() => go('chart', x.symbol)}>{coin(x.symbol)}</button></td>
+                  <td className={td}><SideBadge side={x.side} /></td>
+                  <td className={td} title={x.note}>
+                    <span className="flex flex-wrap gap-1"><ModelBadge setup={x.setup} /><SpeedBadge speed={x.speed} /></span>
+                    {x.note && <span className="block max-w-48 truncate text-xs text-ink-3">{x.note}</span>}
+                  </td>
+                  <td className={`${td} tabular`}>{price(x.entryPrice)}</td>
+                  <td className={`${td} tabular`}>{price(x.exitPrice)}</td>
+                  <td className={`${td} tabular text-ink-2`}>{duration(x.closedAt - x.openedAt)}</td>
+                  <td className={`${td} text-ink-2`}>{words(x.reason)}</td>
+                  <td className={td}><SessionBadge name={x.session} /></td>
+                  <td className={td}><Pnl value={x.pnl} /></td>
+                  <td className={td}>
+                    <button
+                      onClick={() => setSelectedTrade(x)}
+                      className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs transition ${
+                        j
+                          ? 'border-accent/40 bg-accent/10 text-accent font-semibold hover:bg-accent/20'
+                          : 'border-line text-ink-3 hover:border-ink-3 hover:text-ink'
+                      }`}
+                      title={j ? `Journaled · Rating: ${j.rating}★` : 'Click to journal and record ATA reflection'}
+                    >
+                      <BookOpen size={12} />
+                      {j ? (
+                        <span className="flex items-center gap-1">
+                          <span>Review</span>
+                          {j.rating > 0 && <span className="text-warning font-bold">★{j.rating}</span>}
+                        </span>
+                      ) : (
+                        <span>Journal</span>
+                      )}
+                    </button>
+                  </td>
+                </tr>
+              );
+            })}
           </Table>
         )}
       </Card>
+
+      {selectedTrade && (
+        <TradeJournalModal
+          trade={selectedTrade}
+          initialEntry={journalMap.get(selectedTrade.id)}
+          onClose={() => setSelectedTrade(null)}
+          onSaved={() => reloadJournal()}
+        />
+      )}
     </div>
   );
 }

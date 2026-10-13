@@ -17,6 +17,8 @@ import { replayCandles } from './feed/replayFeed';
 import { CommandError, Engine, type EngineCommand } from './core/engine';
 import { Results } from './storage/results';
 import { SignalLog } from './storage/signals';
+import { TradeJournalStore } from './storage/journal';
+import type { JournalEntry } from '../../shared/types';
 import { FirestoreBackup, type BackupState } from './storage/firestoreBackup';
 import { backupToFile } from './storage/fileBackup';
 import { HISTORY_TABLES, insertRows, lastKey, rowsAfter } from './storage/history';
@@ -64,6 +66,7 @@ const store = new CandleStore(db);
 const events = new EventLog(db);
 const signals = new SignalLog(db);
 const results = new Results(db);
+const journalStore = new TradeJournalStore(db);
 const client = new BinancePublic({
   restBase: config.feed.rest_base,
   timeoutMs: config.feed.request_timeout_ms,
@@ -476,6 +479,31 @@ app.get('/api/account', (_req, res) => {
 app.get('/api/trades', (req, res) => {
   const limit = Math.min(Number(req.query.limit) || 200, 2000);
   res.json(engine.closedTrades().slice(-limit).reverse());
+});
+app.get('/api/journal', (_req, res) => {
+  res.json(journalStore.getAll());
+});
+app.get('/api/journal/:id', (req, res) => {
+  const entry = journalStore.get(req.params.id);
+  if (!entry) {
+    res.status(404).json({ error: 'Journal entry not found' });
+    return;
+  }
+  res.json(entry);
+});
+app.post('/api/journal/:id', (req, res) => {
+  const tradeId = req.params.id;
+  const { rating, tags, notes, ata } = req.body || {};
+  const entry: JournalEntry = {
+    tradeId,
+    rating: Number(rating) || 0,
+    tags: Array.isArray(tags) ? tags : [],
+    notes: String(notes || ''),
+    ata: ata && typeof ata === 'object' ? ata : undefined,
+    updatedAt: Date.now(),
+  };
+  journalStore.save(entry);
+  res.json({ ok: true, entry });
 });
 app.get('/api/events', (req, res) => {
   const positionId = req.query.position ? String(req.query.position) : null;

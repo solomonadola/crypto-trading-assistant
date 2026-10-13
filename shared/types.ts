@@ -184,6 +184,25 @@ export interface ClosedTradeView {
   note?: string;
 }
 
+export interface AtaReflection {
+  pdAlignment?: 'discount' | 'premium' | 'equilibrium' | 'na';
+  majorLiquidityTaken?: boolean;
+  hrlrOrLrlr?: 'lrlr' | 'hrlr' | 'unknown';
+  htfTrendAligned?: boolean;
+  keyPoi?: 'ob' | 'fvg' | 'breaker' | 'none';
+  shiftReason?: string;
+  invalidation?: string;
+}
+
+export interface JournalEntry {
+  tradeId: string;
+  rating: number;
+  tags: string[];
+  notes: string;
+  ata?: AtaReflection;
+  updatedAt: number;
+}
+
 /** A price level where several sources agree. */
 export interface KeyLevel {
   price: number;
