@@ -1,29 +1,36 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { CandlestickChart, CheckCircle2, CircleDashed, Crosshair, Layers, Shapes, SlidersHorizontal, XCircle } from 'lucide-react';
-import { usePoll, usePrices, type AccountSummary, type Analysis, type Candle, type ChartReading, type ClosedTradeView, type MarketRow, type ScalpSetup, type SessionInstance } from '../lib/api';
+import { AlertTriangle, ArrowDownRight, ArrowUpRight, CandlestickChart, CheckCircle2, ChevronDown, CircleDashed, Crosshair, Layers, MoveHorizontal, Shapes, ShieldAlert, SlidersHorizontal, Waves, XCircle } from 'lucide-react';
+import { usePoll, usePrices, type AccountSummary, type Analysis, type Candle, type ChartReading, type ClosedTradeView, type CoinWatch, type MarketRow, type ScalpSetup, type SessionInstance, type SwingStructure } from '../lib/api';
 import { coin, pct, price } from '../lib/format';
 import { Badge, Card, StateBadge, TrendChip } from '../components/ui';
-import { CandleChart, DEFAULT_INDICATORS, INDICATORS, PRESETS, type ChartOverlays, type HtfPoiView, type IndicatorId } from '../components/charts';
-import { TradePlanCard } from '../components/TradePlan';
+import { CandleChart, CORE, DEFAULT_INDICATORS, INDICATORS, PRESETS, type ChartOverlays, type HtfPoiView, type IndicatorId } from '../components/charts';
+import { PlanStatus, TradePlanCard } from '../components/TradePlan';
+import { TradingViewWidget } from '../components/TradingViewWidget';
 import { AddCoin } from '../components/AddCoin';
 import { TakePosition } from '../components/TakePosition';
 import type { TradeIdea, WatchLevel } from '../../shared/types';
 
 const TFS = [['15m', 900_000], ['1h', 3_600_000], ['4h', 14_400_000], ['5m', 300_000], ['1m', 60_000]] as const;
 const STORE_KEY = 'chart-indicators';
+/** Set once the chart has been switched to the Simple preset: a choice saved before it is replaced once. */
+const SIMPLE_KEY = 'chart-indicators-simple';
 /** Indicators added after a viewer may have saved a choice: each group is switched on once, then the key is set. */
 const ADDED_LATER: [string, IndicatorId[]][] = [
   ['chart-indicators-smart', ['liquidity', 'orderblocks', 'premium', 'killzones']],
   ['chart-indicators-patterns', ['patterns', 'wyckoff']],
   ['chart-indicators-scalp', ['scalp']],
   ['chart-indicators-htf', ['htf']],
+  ['chart-indicators-structure', ['structure', 'pump']],
 ];
 
 /** The viewer's indicator choice, remembered in this browser (a convenience: defaults when storage is unavailable). */
 function useIndicators(): [Set<IndicatorId>, (id: IndicatorId) => void, () => void] {
   const [ids, setIds] = useState<IndicatorId[]>(() => {
     try {
-      const saved = JSON.parse(localStorage.getItem(STORE_KEY) ?? 'null');
+      // Saved before the Simple default: start from it, once.
+      const firstSimple = !localStorage.getItem(SIMPLE_KEY);
+      localStorage.setItem(SIMPLE_KEY, '1');
+      const saved = firstSimple ? null : JSON.parse(localStorage.getItem(STORE_KEY) ?? 'null');
       if (Array.isArray(saved)) {
         const kept = saved.filter((x): x is IndicatorId => INDICATORS.some((i) => i.id === x));
         // Saved before some items existed: switch those on, once.
@@ -48,6 +55,7 @@ function useIndicators(): [Set<IndicatorId>, (id: IndicatorId) => void, () => vo
 
 function IndicatorPicker({ show, toggle, reset }: { show: Set<IndicatorId>; toggle: (id: IndicatorId) => void; reset: (preset?: IndicatorId[]) => void }) {
   const [open, setOpen] = useState(false);
+  const [more, setMore] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!open) return;
@@ -55,7 +63,14 @@ function IndicatorPicker({ show, toggle, reset }: { show: Set<IndicatorId>; togg
     document.addEventListener('mousedown', close);
     return () => document.removeEventListener('mousedown', close);
   }, [open]);
-  const groups = [...new Set(INDICATORS.map((i) => i.group))];
+  const extra = INDICATORS.filter((i) => !CORE.has(i.id));
+  const groups = [...new Set(extra.map((i) => i.group))];
+  const item = (i: (typeof INDICATORS)[number]) => (
+    <label key={i.id} className={`flex cursor-pointer items-center gap-2 rounded-md px-2 py-1 text-xs ${show.has(i.id) ? 'bg-accent/15 text-ink' : 'text-ink-2 hover:bg-card-2'}`}>
+      <input type="checkbox" checked={show.has(i.id)} onChange={() => toggle(i.id)} className="accent-[var(--color-accent)]" />
+      {i.label}
+    </label>
+  );
   return (
     <div ref={ref} className="relative">
       <button onClick={() => setOpen((o) => !o)} aria-expanded={open}
@@ -74,20 +89,18 @@ function IndicatorPicker({ show, toggle, reset }: { show: Set<IndicatorId>; togg
               );
             })}
           </div>
-          {groups.map((g) => (
+          <p className="mb-1 text-[11px] uppercase tracking-wider text-ink-3">Main: direction, entry, stop, target</p>
+          <div className="mb-2 grid grid-cols-1 gap-1">{INDICATORS.filter((i) => CORE.has(i.id)).map(item)}</div>
+          <button onClick={() => setMore((m) => !m)} aria-expanded={more} className="mb-2 flex items-center gap-1 text-xs text-ink-2 hover:text-ink">
+            <ChevronDown size={13} className={more ? 'rotate-180' : ''} />More indicators ({extra.filter((i) => show.has(i.id)).length} on)
+          </button>
+          {more && groups.map((g) => (
             <div key={g} className="mb-2">
               <p className="mb-1 text-[11px] uppercase tracking-wider text-ink-3">{g}</p>
-              <div className="grid grid-cols-2 gap-1">
-                {INDICATORS.filter((i) => i.group === g).map((i) => (
-                  <label key={i.id} className={`flex cursor-pointer items-center gap-2 rounded-md px-2 py-1 text-xs ${show.has(i.id) ? 'bg-accent/15 text-ink' : 'text-ink-2 hover:bg-card-2'}`}>
-                    <input type="checkbox" checked={show.has(i.id)} onChange={() => toggle(i.id)} className="accent-[var(--color-accent)]" />
-                    {i.label}
-                  </label>
-                ))}
-              </div>
+              <div className="grid grid-cols-2 gap-1">{extra.filter((i) => i.group === g).map(item)}</div>
             </div>
           ))}
-          <button onClick={() => reset()} className="mt-1 text-xs text-accent hover:underline">Back to defaults (Model 4)</button>
+          <button onClick={() => reset()} className="mt-1 text-xs text-accent hover:underline">Back to defaults (Simple)</button>
         </div>
       )}
     </div>
@@ -140,6 +153,26 @@ function WatchCard({ idea }: { idea: TradeIdea }) {
 }
 
 function ChecklistCard({ idea }: { idea: TradeIdea }) {
+  // Without a clear direction there is no side to check a trade for.
+  if (idea.bias === 'none') {
+    const c = idea.condition;
+    return (
+      <Card title={c.kind === 'choppy' ? 'Choppy: no clear direction' : 'Consolidating: no clear direction'} icon={<CircleDashed size={16} />} className="h-full">
+        <p className="text-sm text-ink-2">{c.reason}.</p>
+        {c.rangeHigh !== null && c.rangeLow !== null && (
+          <div className="mt-3 grid grid-cols-2 gap-2 text-sm tabular">
+            <div className="rounded-lg bg-card-2 px-3 py-2"><p className="text-xs text-ink-3">24h high: a 1h close above it leans up</p><b>{price(c.rangeHigh)}</b></div>
+            <div className="rounded-lg bg-card-2 px-3 py-2"><p className="text-xs text-ink-3">24h low: a 1h close below it leans down</p><b>{price(c.rangeLow)}</b></div>
+          </div>
+        )}
+        <p className="mt-3 text-xs text-ink-3">
+          {c.kind === 'choppy'
+            ? 'Wide swings both ways: stops on either side get hit. No long or short is suggested until the 1h trends again (EMAs and structure agree, ADX 20 or more).'
+            : 'A tight range: breakouts from a box often start the next move, but fake-outs are common. No long or short is suggested until one side is clear.'}
+        </p>
+      </Card>
+    );
+  }
   const met = idea.checklist.filter((i) => i.ok === true).length;
   const decided = idea.checklist.filter((i) => i.ok !== null).length;
   return (
@@ -149,7 +182,6 @@ function ChecklistCard({ idea }: { idea: TradeIdea }) {
       right={<Badge tone={met === decided ? 'good' : met >= decided - 2 ? 'warning' : 'muted'}>{met}/{decided} met</Badge>}
       className="h-full"
     >
-      {idea.bias === 'none' && <p className="mb-2 text-xs text-ink-3">No trend yet: checked for a {idea.checklistFor}, the way the 4h leans.</p>}
       <ul className="space-y-1.5">
         {idea.checklist.map((c) => (
           <li key={c.label} className="flex items-start gap-2 text-sm" title={c.detail}>
@@ -234,6 +266,121 @@ function ReadingsCard({ readings, tf, setTf }: { readings: ChartReading[]; tf: s
   );
 }
 
+const SIDE_TEXT = { long: 'careful with longs', short: 'careful with shorts', both: 'careful either way' } as const;
+const PHASE_TEXT: Record<string, string> = { markup: 'marking up', blowoff: 'blow-off', distribution: 'stalling under the high', unwind: 'unwinding', faded: 'given back' };
+
+/** What doesn't look right on this coin: a pump and its stage, stretched moves, failed breaks, structure turning. Hidden when all is quiet. */
+function WarningsCard({ watch }: { watch: CoinWatch }) {
+  if (!watch.warnings.length) return null;
+  const danger = watch.level === 'danger';
+  const p = watch.pump;
+  return (
+    <div role="alert" className={`rounded-xl border p-3 ${danger ? 'border-critical/60 bg-critical/10' : 'border-warning/50 bg-warning/10'}`}>
+      <p className={`flex flex-wrap items-center gap-2 text-sm font-semibold ${danger ? 'text-critical' : 'text-warning'}`}>
+        {danger ? <ShieldAlert size={16} /> : <AlertTriangle size={16} />}
+        {danger ? "This doesn't look right" : 'Be careful here'}
+        {p && <span className="text-xs font-normal text-ink-2 tabular">pump {price(p.baseLow)} → {price(p.peak)} (+{p.runPct.toFixed(0)}% in {p.hours}h, {p.volumeX.toFixed(0)}x volume) · now {PHASE_TEXT[p.phase] ?? p.phase}, {p.fromPeakPct.toFixed(0)}% off the high</span>}
+      </p>
+      <ul className="mt-2 space-y-1.5">
+        {watch.warnings.map((w) => (
+          <li key={`${w.code}${w.time}`} className="text-sm">
+            <span className="flex flex-wrap items-center gap-1.5">
+              <Badge tone={w.level === 'danger' ? 'critical' : 'warning'}>{w.level}</Badge>
+              <span className="font-semibold text-ink">{w.title}</span>
+              <span className="text-xs text-ink-3">· {SIDE_TEXT[w.side]}</span>
+            </span>
+            <span className="block text-xs text-ink-2">{w.detail}</span>
+          </li>
+        ))}
+      </ul>
+      <p className="mt-2 text-[11px] text-ink-3">Rule-based reads of the 1h and 15m charts to make you look twice, not signals: the engine's entries do not use them.</p>
+    </div>
+  );
+}
+
+const RISK = { ok: ['Low', 'good'], caution: ['Medium', 'warning'], danger: ['High', 'critical'] } as const;
+
+function Tile({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="rounded-xl border border-line bg-card-2 px-4 py-3 text-center">
+      <p className="text-[11px] uppercase tracking-wider text-ink-3">{label}</p>
+      <div className="mt-2 flex justify-center">{children}</div>
+    </div>
+  );
+}
+
+/**
+ * The trade at a glance, under the chart: direction (or no clear direction), setup quality and
+ * risk from the warnings; then the entry, stop and take-profit with their distances and R.
+ */
+function TradeSummary({ idea, watch }: { idea: TradeIdea; watch: CoinWatch | null }) {
+  const plan = idea.plan;
+  const c = idea.condition;
+  const dir = idea.bias;
+  const [riskText, riskTone] = RISK[watch?.level ?? 'ok'];
+  // "Outside the open windows" is the time of day, the same for every coin: not this coin's risk.
+  const coinWarnings = (watch?.warnings ?? []).filter((w) => w.code !== 'outside_window').length;
+  const pill = 'inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-sm font-semibold ring-1';
+  const tone = { good: 'bg-good/15 text-good ring-good/40', critical: 'bg-critical/15 text-critical ring-critical/40', warning: 'bg-warning/15 text-warning ring-warning/40', muted: 'bg-card text-ink-2 ring-line' } as const;
+  const hasLevels = plan && plan.entry !== null && plan.entryLow !== null && plan.entryHigh !== null && plan.stop !== null;
+  const long = dir === 'long';
+  const near = plan ? (long ? plan.entryHigh : plan.entryLow) : null;
+  const far = plan ? (long ? plan.entryLow : plan.entryHigh) : null;
+  return (
+    <Card>
+      <div className="grid gap-3 sm:grid-cols-3">
+        <Tile label="Direction">
+          {dir === 'long' ? <span className={`${pill} ${tone.good}`}><ArrowUpRight size={15} />Long · bullish</span>
+            : dir === 'short' ? <span className={`${pill} ${tone.critical}`}><ArrowDownRight size={15} />Short · bearish</span>
+            : c.kind === 'choppy' ? <span className={`${pill} ${tone.warning}`}><Waves size={15} />Choppy · no trade</span>
+            : <span className={`${pill} ${tone.muted}`}><MoveHorizontal size={15} />Consolidating · wait</span>}
+        </Tile>
+        <Tile label="Setup quality">
+          {dir === 'none' ? <span className={`${pill} ${tone.muted}`}>–</span>
+            : <span className={`${pill} ${idea.quality >= 70 ? tone.good : idea.quality >= 50 ? tone.warning : tone.muted}`}>{idea.quality}/100</span>}
+        </Tile>
+        <Tile label="Risk">
+          <span className={`${pill} ${tone[riskTone]}`}>{riskTone !== 'good' && <AlertTriangle size={14} />}{riskText}{coinWarnings ? ` · ${coinWarnings} warning${coinWarnings > 1 ? 's' : ''}` : ''}</span>
+        </Tile>
+      </div>
+
+      {hasLevels ? (
+        <div className="mt-4 grid gap-4 border-t border-line pt-4 sm:grid-cols-3">
+          <div>
+            <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-warning">Entry zone</p>
+            <p className="flex justify-between text-sm"><span className="text-ink-3">First touch</span><b className="tabular">{price(near)}</b></p>
+            <p className="flex justify-between text-sm"><span className="text-ink-3">Deepest</span><b className="tabular">{price(far)}</b></p>
+          </div>
+          <div>
+            <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-warning">Stop loss</p>
+            <p className="text-2xl font-semibold text-critical tabular">{price(plan.stop)}</p>
+            <p className="text-xs text-ink-3">{pct(plan.riskPct, 2)} from the entry</p>
+          </div>
+          <div>
+            <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-warning">Take profit</p>
+            {plan.targets.length ? plan.targets.map((t, i) => (
+              <p key={t.label} className="flex justify-between text-sm">
+                <span className="text-ink-3">TP{plan.targets.length > 1 ? i + 1 : ''} <span className={t.r >= 2 ? 'text-good' : 'text-warning'}>{t.r.toFixed(2)}R</span></span>
+                <b className="text-good tabular">{price(t.price)}{plan.targetPct !== null && i === 0 ? <span className="ml-1 text-xs font-normal text-ink-3">+{plan.targetPct.toFixed(1)}%</span> : null}</b>
+              </p>
+            )) : <p className="text-sm text-warning">No target 2R away</p>}
+          </div>
+        </div>
+      ) : (
+        <p className="mt-4 border-t border-line pt-4 text-sm text-ink-2">
+          {dir === 'none' ? `${c.reason}.` : plan?.note ?? 'No plan yet.'}
+        </p>
+      )}
+      {plan && (
+        <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-ink-3">
+          <PlanStatus idea={idea} />
+          {hasLevels && <span className={plan.meetsRules ? 'text-good' : 'text-warning'}>{plan.meetsRules ? 'Fits the rules: 2R and 3% or more, stop in limits.' : plan.note}</span>}
+        </div>
+      )}
+    </Card>
+  );
+}
+
 type Tf = (typeof TFS)[number][0];
 const isTf = (x: string | null | undefined): x is Tf => TFS.some(([name]) => name === x);
 
@@ -242,6 +389,7 @@ export function ChartPage({ symbol, initialTf, setSymbol }: { symbol: string; in
   // A link with a timeframe (#/chart/SOLUSDT/5m, from the Scalp page) opens on it.
   useEffect(() => { if (isTf(initialTf)) setTf(initialTf); }, [initialTf, symbol]);
   const [show, toggle, reset] = useIndicators();
+  const [view, setView] = useState<'engine' | 'tradingview'>('engine');
   const { data: market } = usePoll<MarketRow[]>('/api/market', 60_000);
   const { data: candles } = usePoll<Candle[]>(`/api/candles/${symbol}?tf=${tf}&limit=500`, 30_000);
   const { data: analysis } = usePoll<Analysis>(`/api/analysis/${symbol}`, 30_000);
@@ -251,6 +399,8 @@ export function ChartPage({ symbol, initialTf, setSymbol }: { symbol: string; in
   const { data: readings } = usePoll<ChartReading[]>(`/api/patterns/${symbol}`, 60_000);
   const { data: scalps } = usePoll<ScalpSetup[]>(`/api/scalp/${symbol}`, 60_000);
   const { data: htf } = usePoll<{ long: HtfPoiView[]; short: HtfPoiView[] }>(`/api/htf/${symbol}`, 60_000);
+  const { data: structure } = usePoll<SwingStructure | null>(`/api/structure/${symbol}?tf=${tf}`, 30_000);
+  const { data: watch } = usePoll<CoinWatch | null>(`/api/watch/${symbol}`, 60_000);
   // A stable address (from the loaded candles, rounded to the day): a changing one would refetch on every redraw.
   const day = 86_400_000;
   const from = candles?.length ? Math.floor(candles[0].openTime / day) * day : null;
@@ -267,6 +417,7 @@ export function ChartPage({ symbol, initialTf, setSymbol }: { symbol: string; in
 
   return (
     <div className="space-y-5">
+      {watch && <WarningsCard watch={watch} />}
       <Card
         title={<span className="flex items-center gap-2">{coin(symbol)}<span className="text-ink-3">/USDT perpetual</span></span>}
         icon={<CandlestickChart size={16} />}
@@ -274,6 +425,7 @@ export function ChartPage({ symbol, initialTf, setSymbol }: { symbol: string; in
           <div className="flex flex-wrap items-center gap-2">
             <TakePosition symbol={symbol} defaults={{
               side: idea?.plan?.direction ?? 'long',
+              entry: idea?.plan?.entry ?? null,
               stop: idea?.plan?.stop ?? null,
               target: idea?.plan?.targets[0]?.price ?? null,
               note: idea?.plan ? `Chart: ${idea.plan.direction} plan` : 'Chart',
@@ -287,28 +439,48 @@ export function ChartPage({ symbol, initialTf, setSymbol }: { symbol: string; in
                 <button key={name} onClick={() => setTf(name)} className={`px-2.5 py-1 text-xs ${tf === name ? 'bg-accent text-white' : 'bg-card-2 text-ink-2 hover:text-ink'}`}>{name}</button>
               ))}
             </div>
-            <IndicatorPicker show={show} toggle={toggle} reset={reset} />
+            {view === 'engine' && <IndicatorPicker show={show} toggle={toggle} reset={reset} />}
+            <div className="flex overflow-hidden rounded-lg border border-line" role="tablist" aria-label="Chart">
+              {([['engine', 'Engine chart'], ['tradingview', 'TradingView']] as const).map(([v, label]) => (
+                <button key={v} role="tab" aria-selected={view === v} onClick={() => setView(v)}
+                  className={`px-2.5 py-1 text-xs ${view === v ? 'bg-ink text-page' : 'bg-card-2 text-ink-2 hover:text-ink'}`}>{label}</button>
+              ))}
+            </div>
           </div>
         }
       >
+        {view === 'tradingview' ? <TradingViewWidget symbol={symbol} tf={tf} idea={idea ?? null} htf={htf ?? null} /> : <>
         {candles?.length ? (
           <CandleChart
             viewKey={`${symbol}|${tf}`}
             candles={candles}
-            overlays={{ zones: tf === '1m' ? [] : zones, fvgs: analysis?.fvgs ?? [], profiles: analysis?.profiles ?? [], sessions: sessions ?? [], killzones: killzones ?? [], reading: readings?.find((r) => r.tf === tf) ?? null, scalps: scalps ?? [], htf: htf ?? null }}
+            overlays={{ zones: tf === '1m' ? [] : zones, fvgs: analysis?.fvgs ?? [], profiles: analysis?.profiles ?? [], sessions: sessions ?? [], killzones: killzones ?? [], reading: readings?.find((r) => r.tf === tf) ?? null, scalps: scalps ?? [], htf: htf ?? null, structure: structure ?? null, watch: watch ?? null }}
             trades={mine} positions={open} tfMs={tfMs} tf={tf} idea={idea} show={show}
           />
         ) : <div className="grid h-[640px] place-items-center text-sm text-ink-3">Loading candles… (a newly added coin takes a few seconds to fetch its history)</div>}
         <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs text-ink-2">
           {lines.map((l) => <span key={l.id}>{l.label}</span>)}
           {show.has('sessions') && <span className="flex items-center gap-1"><span className="h-1 w-3 rounded bg-asian" />Asian<span className="ml-1 h-1 w-3 rounded bg-london" />London<span className="ml-1 h-1 w-3 rounded bg-newyork" />New York</span>}
+          {show.has('structure') && structure && (
+            <span>
+              <b className={structure.trend === 'up' ? 'text-good' : structure.trend === 'down' ? 'text-critical' : 'text-ink-2'}>{tf} structure {structure.trend === 'none' ? 'unclear' : structure.trend === 'up' ? 'bullish' : 'bearish'}</b>
+              <span className="text-ink-3"> · {structure.detail} · BOS = break with the trend, CHoCH = break against it (the trend changes)</span>
+            </span>
+          )}
           {(show.has('zones') || show.has('fvg')) && <span className="text-ink-3">blue = buy side · orange = sell side · solid box = zone · hatched = FVG (dotted edge = IFVG){tf === '1m' ? ' · none on 1m' : ''}</span>}
           <span className="text-ink-3">drag to scroll, wheel to zoom; the view stays where you leave it</span>
         </div>
+        </>}
       </Card>
 
-      {readings && <ReadingsCard readings={readings} tf={tf} setTf={(t) => { if (isTf(t)) setTf(t); }} />}
+      {idea && <TradeSummary idea={idea} watch={watch ?? null} />}
 
+      <details className="group space-y-5">
+        <summary className="flex cursor-pointer list-none items-center gap-2 rounded-xl border border-line bg-card px-4 py-3 text-sm font-semibold text-ink-2 hover:text-ink">
+          <ChevronDown size={15} className="transition group-open:rotate-180" />
+          Full analysis: levels to wait for, checklist, plan details, patterns, trend meter, volume profile, zones
+        </summary>
+      <div className="mt-5 space-y-5">
       {idea && (
         <div className="grid gap-5 lg:grid-cols-2">
           <WatchCard idea={idea} />
@@ -317,6 +489,8 @@ export function ChartPage({ symbol, initialTf, setSymbol }: { symbol: string; in
       )}
 
       {idea && <TradePlanCard idea={idea} />}
+
+      {readings && <ReadingsCard readings={readings} tf={tf} setTf={(t) => { if (isTf(t)) setTf(t); }} />}
 
       {analysis && (
         <div className="grid gap-5 lg:grid-cols-3">
@@ -395,6 +569,8 @@ export function ChartPage({ symbol, initialTf, setSymbol }: { symbol: string; in
           </Card>
         </div>
       )}
+      </div>
+      </details>
     </div>
   );
 }

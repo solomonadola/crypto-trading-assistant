@@ -1,0 +1,132 @@
+//@version=6
+// Session Engine: the dashboard's analysis on a TradingView chart.
+// Market structure (HH/HL/LH/LL, BOS and CHoCH on closes, the protected level),
+// EMA 50/200, liquidity (previous day high/low, Asian session high/low), the
+// open windows (first 2 hours after the London and New York opens) and a
+// "stretched" warning. The same rules as the dashboard (engine/src/analysis/
+// swingStructure.ts): a swing point is known `k` bars after it formed, and only
+// a close through the latest swing high (low) breaks structure: a BOS with the
+// trend (or starting one), a CHoCH against it.
+indicator("Session Engine: structure & levels", shorttitle = "SE structure", overlay = true, max_labels_count = 500, max_lines_count = 500)
+
+// ---------------------------------------------------------------- inputs
+k            = input.int(3, "Swing size (bars each side)", minval = 1, maxval = 20, tooltip = "The dashboard uses 5 on 1m/5m, 4 on 15m, 3 on 1h/4h")
+showLabels   = input.bool(true, "HH / HL / LH / LL labels", group = "Structure")
+showBreaks   = input.bool(true, "BOS / CHoCH", group = "Structure")
+showProtect  = input.bool(true, "Protected level (the next break)", group = "Structure")
+showEma      = input.bool(true, "EMA 50 / 200", group = "Lines")
+showPd       = input.bool(true, "Previous day high / low", group = "Liquidity")
+showAsia     = input.bool(true, "Asian session high / low", group = "Liquidity")
+showWindows  = input.bool(true, "Open windows (London 08:00-10:00, New York 09:30-11:30)", group = "Timing")
+stretchAtr   = input.float(6.0, "Stretched warning at (ATRs from EMA50)", minval = 1, group = "Warnings")
+
+colUp   = color.new(#26a69a, 0)
+colDown = color.new(#ef5350, 0)
+colBuy  = color.new(#2962ff, 0)
+colSell = color.new(#ff9800, 0)
+
+// ---------------------------------------------------------------- swing points and labels
+ph = ta.pivothigh(high, k, k)
+pl = ta.pivotlow(low, k, k)
+
+var float prevHigh = na
+var float prevLow  = na
+// The latest swing high / low not yet closed through: the levels that break structure.
+var float brkHigh    = na
+var int   brkHighBar = na
+var float brkLow     = na
+var int   brkLowBar  = na
+// 1 up, -1 down, 0 none yet.
+var int trend = 0
+
+if not na(ph)
+    if showLabels and not na(prevHigh)
+        lbl = ph > prevHigh ? "HH" : "LH"
+        label.new(bar_index - k, ph, lbl, yloc = yloc.abovebar, style = label.style_none, textcolor = lbl == "HH" ? colUp : colDown, size = size.small)
+    prevHigh   := ph
+    brkHigh    := ph
+    brkHighBar := bar_index - k
+
+if not na(pl)
+    if showLabels and not na(prevLow)
+        lbl = pl > prevLow ? "HL" : "LL"
+        label.new(bar_index - k, pl, lbl, yloc = yloc.belowbar, style = label.style_none, textcolor = lbl == "HL" ? colUp : colDown, size = size.small)
+    prevLow   := pl
+    brkLow    := pl
+    brkLowBar := bar_index - k
+
+// ---------------------------------------------------------------- breaks of structure (closes only)
+brokeUp   = not na(brkHigh) and close > brkHigh and bar_index > brkHighBar
+brokeDown = not brokeUp and not na(brkLow) and close < brkLow and bar_index > brkLowBar
+if brokeUp
+    kind = trend == -1 ? "CHoCH" : "BOS"
+    if showBreaks
+        line.new(brkHighBar, brkHigh, bar_index, brkHigh, color = colUp, style = kind == "CHoCH" ? line.style_dashed : line.style_dotted, width = kind == "CHoCH" ? 2 : 1)
+        label.new(int(math.round((brkHighBar + bar_index) / 2.0)), brkHigh, kind, style = label.style_label_down, color = color.new(colUp, 100), textcolor = colUp, size = size.small)
+    trend   := 1
+    brkHigh := na
+else if brokeDown
+    kind = trend == 1 ? "CHoCH" : "BOS"
+    if showBreaks
+        line.new(brkLowBar, brkLow, bar_index, brkLow, color = colDown, style = kind == "CHoCH" ? line.style_dashed : line.style_dotted, width = kind == "CHoCH" ? 2 : 1)
+        label.new(int(math.round((brkLowBar + bar_index) / 2.0)), brkLow, kind, style = label.style_label_up, color = color.new(colDown, 100), textcolor = colDown, size = size.small)
+    trend  := -1
+    brkLow := na
+
+// The protected level: in an uptrend the swing low whose close-through breaks it (a downtrend: the swing high).
+var line  protLine  = na
+var label protLabel = na
+if barstate.islast and showProtect
+    line.delete(protLine)
+    label.delete(protLabel)
+    float lvl = trend == 1 ? brkLow : trend == -1 ? brkHigh : na
+    int   from = trend == 1 ? brkLowBar : trend == -1 ? brkHighBar : na
+    if not na(lvl)
+        c = trend == 1 ? colDown : colUp
+        protLine  := line.new(from, lvl, bar_index, lvl, extend = extend.right, color = c, style = line.style_dotted, width = 2)
+        protLabel := label.new(bar_index + 2, lvl, (trend == 1 ? "protected low " : "protected high ") + str.tostring(lvl, format.mintick), style = label.style_label_left, color = color.new(c, 80), textcolor = c, size = size.small)
+
+// ---------------------------------------------------------------- EMAs
+ema50  = ta.ema(close, 50)
+ema200 = ta.ema(close, 200)
+plot(showEma ? ema50 : na, "EMA 50", color.new(#f9a825, 0), 1)
+plot(showEma ? ema200 : na, "EMA 200", color.new(#9e9e9e, 0), 1)
+
+// ---------------------------------------------------------------- liquidity
+[pdh, pdl] = request.security(syminfo.tickerid, "D", [high[1], low[1]], lookahead = barmerge.lookahead_on)
+plot(showPd and timeframe.isintraday ? pdh : na, "Previous day high", colSell, 1, plot.style_stepline)
+plot(showPd and timeframe.isintraday ? pdl : na, "Previous day low", colBuy, 1, plot.style_stepline)
+
+// The Asian session (Tokyo 09:00-18:00): its high and low, drawn from its end until the next one starts.
+inAsia = not na(time(timeframe.period, "0900-1800", "Asia/Tokyo"))
+var float asiaHi   = na
+var float asiaLo   = na
+var float asiaHiOk = na
+var float asiaLoOk = na
+if inAsia and not inAsia[1]
+    asiaHi := high
+    asiaLo := low
+else if inAsia
+    asiaHi := math.max(asiaHi, high)
+    asiaLo := math.min(asiaLo, low)
+if not inAsia and inAsia[1]
+    asiaHiOk := asiaHi
+    asiaLoOk := asiaLo
+showAsiaNow = showAsia and timeframe.isintraday and timeframe.in_seconds() <= 3600 and not inAsia
+plot(showAsiaNow ? asiaHiOk : na, "Asian high", color.new(colSell, 30), 1, plot.style_linebr)
+plot(showAsiaNow ? asiaLoOk : na, "Asian low", color.new(colBuy, 30), 1, plot.style_linebr)
+
+// ---------------------------------------------------------------- open windows
+inLondon = not na(time(timeframe.period, "0800-1000", "Europe/London"))
+inNy     = not na(time(timeframe.period, "0930-1130", "America/New_York"))
+showWin  = showWindows and timeframe.isintraday and timeframe.in_seconds() <= 3600
+bgcolor(showWin and inLondon ? color.new(colBuy, 90) : showWin and inNy ? color.new(#7e57c2, 90) : na, title = "Open windows")
+
+// ---------------------------------------------------------------- warnings
+atr14   = ta.atr(14)
+stretch = atr14 > 0 ? (close - ema50) / atr14 : 0.0
+plotshape(ta.crossover(stretch, stretchAtr), "Stretched up", shape.labeldown, location.abovebar, color.new(#ff9800, 0), text = "stretched", textcolor = color.white, size = size.tiny)
+plotshape(ta.crossunder(stretch, -stretchAtr), "Stretched down", shape.labelup, location.belowbar, color.new(#ff9800, 0), text = "stretched", textcolor = color.white, size = size.tiny)
+
+alertcondition(brokeUp, "Structure broke up", "{{ticker}}: closed above the last swing high")
+alertcondition(brokeDown, "Structure broke down", "{{ticker}}: closed below the last swing low")

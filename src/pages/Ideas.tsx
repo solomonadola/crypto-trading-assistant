@@ -6,12 +6,14 @@ import { coin } from '../lib/format';
 import { Card, Empty } from '../components/ui';
 import { TradePlanCard } from '../components/TradePlan';
 
-const SHOW = [['signals', 'signals'], ['active', 'with a plan'], ['all', 'all coins']] as const;
+const SHOW = [['signals', 'signals'], ['active', 'plans of 2R or more'], ['all', 'all coins']] as const;
+/** Reward:risk after costs a plan needs to be worth showing (config exits.min_rr): no 1:1 trades. */
+const MIN_RR = 2;
 
 export function Ideas({ go }: { go: (page: string, symbol?: string) => void }) {
   const { data } = usePoll<TradeIdea[]>('/api/ideas', 30_000);
   const [show, setShow] = useState<(typeof SHOW)[number][0]>('signals');
-  const ideas = (data ?? []).filter((i) => show === 'all' || (show === 'signals' ? !!i.plan?.meetsRules : !!i.plan && i.plan.status !== 'no_level'));
+  const ideas = (data ?? []).filter((i) => show === 'all' || (show === 'signals' ? !!i.plan?.meetsRules : !!i.plan && i.plan.status !== 'no_level' && (i.plan.targets[0]?.r ?? 0) >= MIN_RR));
 
   return (
     <div className="space-y-5">
@@ -31,7 +33,7 @@ export function Ideas({ go }: { go: (page: string, symbol?: string) => void }) {
           take-profit at least 3% away and at least 2R. Signals come first, from the largest profit down. Click a card to see it on the chart.
         </p>
       </Card>
-      {!data ? <Empty>Loading…</Empty> : !ideas.length ? <Empty>{show === 'signals' ? 'No coin has a signal right now (3% and 2R minimum). Switch to “with a plan” to see the rest.' : 'No coin has a plan right now. Switch to “all coins” to see their levels.'}</Empty> : (
+      {!data ? <Empty>Loading…</Empty> : !ideas.length ? <Empty>{show === 'signals' ? 'No coin has a signal right now (3% and 2R minimum). Switch to “plans of 2R or more” to see setups still forming.' : 'No coin has a plan of 2R or more right now. Switch to “all coins” to see their levels.'}</Empty> : (
         <div className="grid gap-4 md:grid-cols-2 2xl:grid-cols-3">
           {ideas.map((i) => (
             <button key={i.symbol} onClick={() => go('chart', i.symbol)} className="text-left transition hover:-translate-y-0.5">

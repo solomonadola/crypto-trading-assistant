@@ -13,7 +13,7 @@ import {
   type IChartApi, type IPriceLine, type ISeriesApi, type ISeriesMarkersPluginApi, type SeriesMarker, type SeriesType, type Time, type UTCTimestamp,
 } from 'lightweight-charts';
 import type { Candle, ClosedTradeView, EquityPoint, PositionViewLike, TradeIdea, Zone } from './chartTypes';
-import { usePrices, type ChartReading, type Fvg, type ScalpSetup, type SessionInstance, type VolumeProfile } from '../lib/api';
+import { usePrices, type ChartReading, type CoinWatch, type Fvg, type ScalpSetup, type SessionInstance, type SwingStructure, type VolumeProfile } from '../lib/api';
 import { SCALP_LABEL } from '../../engine/src/analysis/scalp';
 import { bollingerBands, ema, rsi, supertrend, vwapDaily } from '../../engine/src/analysis/indicators';
 import { SESSION_LABEL } from '../lib/format';
@@ -25,7 +25,7 @@ const sec = (ms: number) => Math.floor(ms / 1000) as UTCTimestamp;
 function baseChart(el: HTMLElement): IChartApi {
   return createChart(el, {
     autoSize: true,
-    layout: { background: { type: ColorType.Solid, color: 'transparent' }, textColor: css('--color-ink-3'), fontFamily: 'Inter, system-ui, sans-serif', attributionLogo: false },
+    layout: { background: { type: ColorType.Solid, color: 'transparent' }, textColor: css('--color-ink-3'), fontFamily: 'Inter, system-ui, sans-serif', attributionLogo: true },
     grid: { vertLines: { color: 'rgba(38,45,59,0.45)' }, horzLines: { color: 'rgba(38,45,59,0.45)' } },
     rightPriceScale: { borderColor: css('--color-line') },
     timeScale: { borderColor: css('--color-line'), timeVisible: true, secondsVisible: false },
@@ -75,6 +75,10 @@ export function EquityChart({ points, startingBalance }: { points: EquityPoint[]
   );
 }
 
+/** The core indicators: the default, listed first in the picker. Everything else is under "More". */
+const SIMPLE = ['structure', 'ema50', 'ema200', 'htf', 'liquidity', 'plan', 'volume', 'positions', 'pump'] as const satisfies readonly string[];
+export const CORE = new Set<string>(SIMPLE);
+
 /** Everything the chart can show; the picker turns each on or off. */
 export const INDICATORS = [
   { id: 'htf', group: 'Model 4', label: '4h zones, FVGs & order blocks (where Model 4 trades)' },
@@ -94,6 +98,8 @@ export const INDICATORS = [
   { id: 'orderblocks', group: 'Smart money', label: 'Order blocks (1h)' },
   { id: 'premium', group: 'Smart money', label: 'Premium / discount (4h range)' },
   { id: 'killzones', group: 'Smart money', label: 'Killzones (London, New York)' },
+  { id: 'structure', group: 'Structure', label: 'Market structure: HH/HL/LH/LL, BOS & CHoCH' },
+  { id: 'pump', group: 'Structure', label: 'Pump cycle: base, high & retracements' },
   { id: 'patterns', group: 'Patterns (5m, 15m, 1h)', label: 'Chart patterns (triangles, wedges, channels, double tops)' },
   { id: 'wyckoff', group: 'Patterns (5m, 15m, 1h)', label: 'Wyckoff range & events' },
   { id: 'scalp', group: 'Scalp (5m)', label: 'Scalp setups: entry, stop, target' },
@@ -105,13 +111,17 @@ export const INDICATORS = [
 export type IndicatorId = (typeof INDICATORS)[number]['id'];
 /** One-click sets of indicators, each for one way of reading the chart. */
 export const PRESETS: { id: string; label: string; ids: IndicatorId[] }[] = [
-  { id: 'model4', label: 'Model 4', ids: ['htf', 'liquidity', 'plan', 'ema50', 'volume', 'trades', 'positions'] },
+  // The few that answer the trade's questions: direction (structure, EMA 50/200), where to enter (4h zones, liquidity),
+  // the plan's entry, stop and take-profit, volume, warnings (pump), and the open position.
+  { id: 'simple', label: 'Simple', ids: [...SIMPLE] },
+  { id: 'model4', label: 'Model 4', ids: ['htf', 'liquidity', 'plan', 'ema50', 'volume', 'trades', 'positions', 'structure', 'pump'] },
   { id: 'scalp', label: 'Scalp', ids: ['scalp', 'ema20', 'vwap', 'volume', 'trades', 'positions'] },
   { id: 'patterns', label: 'Patterns', ids: ['patterns', 'wyckoff', 'ema50', 'volume'] },
+  { id: 'structure', label: 'Structure', ids: ['structure', 'pump', 'liquidity', 'volume', 'positions'] },
   { id: 'minimal', label: 'Minimal', ids: ['volume', 'positions'] },
   { id: 'all', label: 'Everything', ids: INDICATORS.map((i) => i.id).filter((id) => id !== 'profile7d') },
 ];
-export const DEFAULT_INDICATORS: IndicatorId[] = PRESETS[0].ids;
+export const DEFAULT_INDICATORS: IndicatorId[] = [...SIMPLE];
 
 export interface ChartOverlays {
   zones: Zone[];
@@ -125,7 +135,13 @@ export interface ChartOverlays {
   htf?: { long: HtfPoiView[]; short: HtfPoiView[] } | null;
   /** Scalp setups of the last 24 hours (5m): open ones drawn bright and labelled, those closed in the last 4 hours faint. */
   scalps?: ScalpSetup[];
+  /** Swing structure on the timeframe shown. */
+  structure?: SwingStructure | null;
+  /** The coin's warnings, with its pump (if in one) drawn as base, high and retracements. */
+  watch?: CoinWatch | null;
 }
+
+const PUMP_PHASE: Record<string, string> = { markup: 'marking up', blowoff: 'blow-off', distribution: 'stalling', unwind: 'unwinding', faded: 'given back' };
 
 export interface HtfPoiView { kind: 'zone' | 'fvg' | 'order_block'; id: string; low: number; high: number; from: number }
 const HTF_LABEL = {
@@ -149,6 +165,9 @@ interface Props {
   idea?: TradeIdea | null;
   show: Set<IndicatorId>;
 }
+
+/** Candles in view when a chart opens. */
+const INITIAL_BARS = 150;
 
 const LINE_COLORS: Partial<Record<IndicatorId, string>> = { ema20: '--color-accent', ema50: '--color-warning', ema200: '--color-ink-2', vwap: '--color-newyork' };
 
@@ -263,7 +282,8 @@ export function CandleChart({ viewKey, candles, overlays, trades, positions, tfM
     c.panes().forEach((p, i) => p.setStretchFactor(i === 0 ? 4 : 1));
 
     if (needsFit.current) {
-      c.timeScale().fitContent();
+      // Opens on the latest candles (the structure stays readable); scroll back for more.
+      c.timeScale().setVisibleLogicalRange({ from: Math.max(0, candles.length - INITIAL_BARS), to: candles.length + 5 });
       needsFit.current = false;
     } else if (range) {
       c.timeScale().setVisibleLogicalRange(range);
@@ -309,15 +329,18 @@ export function CandleChart({ viewKey, candles, overlays, trades, positions, tfM
     if (idea && show.has('plan')) {
       const plan = idea.plan;
       if (plan && plan.entryLow !== null && plan.entryHigh !== null && plan.stop !== null) {
-        const accent = css('--color-accent');
-        add({ price: plan.entryHigh, color: accent, lineWidth: 2, lineStyle: LineStyle.Solid, title: `plan ${plan.direction} entry` });
-        add({ price: plan.entryLow, color: accent, lineWidth: 2, lineStyle: LineStyle.Solid, title: '', axisLabelVisible: false });
-        add({ price: plan.stop, color: bad, lineWidth: 2, lineStyle: LineStyle.Dotted, title: 'plan stop' });
-        for (const t of plan.targets) add({ price: t.price, color: good, lineWidth: 2, lineStyle: LineStyle.Dotted, title: `${t.label} ${t.r.toFixed(1)}R` });
+        // Named on the price axis: entry (the edge price reaches first, and the far edge of the zone), stop loss, take-profit.
+        const long = plan.direction === 'long';
+        const [near, far] = long ? [plan.entryHigh, plan.entryLow] : [plan.entryLow, plan.entryHigh];
+        add({ price: near, color: good, lineWidth: 1, lineStyle: LineStyle.Solid, title: `Entry ${plan.direction}` });
+        if (Math.abs(far - near) > 1e-12) add({ price: far, color: good, lineWidth: 1, lineStyle: LineStyle.Dashed, title: 'Entry zone' });
+        add({ price: plan.stop, color: bad, lineWidth: 2, lineStyle: LineStyle.Solid, title: 'Stop Loss' });
+        plan.targets.forEach((t, i) => add({ price: t.price, color: good, lineWidth: 1, lineStyle: LineStyle.Dotted, title: `Take Profit${plan.targets.length > 1 ? ` ${i + 1}` : ''} · ${t.r.toFixed(1)}R` }));
       }
       const planned = new Set([plan?.entryHigh, plan?.entryLow, plan?.stop, ...(plan?.targets ?? []).map((t) => t.price)]);
-      for (const l of idea.levels.filter((x) => Math.abs(x.distancePct) <= 8 && x.strength >= 2 && !planned.has(x.price)).sort((a, b) => b.strength - a.strength).slice(0, 6)) {
-        add({ price: l.price, color: l.kind === 'support' ? css('--color-demand') : css('--color-supply'), lineWidth: 1, lineStyle: LineStyle.SparseDotted, axisLabelVisible: true, title: `${l.kind} ${l.strength}` });
+      // The strongest few key levels near the price, so the chart stays readable.
+      for (const l of idea.levels.filter((x) => Math.abs(x.distancePct) <= 8 && x.strength >= 3 && !planned.has(x.price)).sort((a, b) => b.strength - a.strength).slice(0, 4)) {
+        add({ price: l.price, color: l.kind === 'support' ? css('--color-demand') : css('--color-supply'), lineWidth: 1, lineStyle: LineStyle.SparseDotted, axisLabelVisible: true, title: l.kind === 'support' ? 'Support' : 'Resistance' });
       }
     }
   }, [idea, positions, showKey, viewKey]);
@@ -548,6 +571,98 @@ function Overlay({ chart, series, candles, overlays, show, tf, tfMs, idea, posit
         );
       })()}
 
+      {show.has('pump') && overlays.watch?.pump && (() => {
+        // The pump: its base and high, the ignition candle and the retracements of the run, from the high on.
+        const p = overlays.watch.pump;
+        const xp = x(p.peakTime);
+        const xi = xFree(p.ignitionTime);
+        const yb = y(p.baseLow);
+        const yp = y(p.peak);
+        if (yb === null || yp === null || xp >= width) return null;
+        const danger = 'var(--color-critical)';
+        const warn = 'var(--color-warning)';
+        return (
+          <g>
+            {xi !== null && (
+              <g>
+                <line x1={xi} x2={xi} y1={0} y2={height} stroke={warn} strokeOpacity={0.6} strokeDasharray="2 3" />
+                <text x={xi + 4} y={height - 40} fontSize={10} fill={warn} {...HALO}>pump ignition</text>
+              </g>
+            )}
+            <line x1={x(p.baseTime)} x2={width} y1={yb} y2={yb} stroke={warn} strokeOpacity={0.8} strokeDasharray="6 3" />
+            <text x={Math.min(x(p.baseTime), width - 160) + 4} y={yb + 13} fontSize={10} fill={warn} {...HALO}>pump base {fmtPrice(p.baseLow)}</text>
+            <line x1={xp} x2={width} y1={yp} y2={yp} stroke={danger} strokeOpacity={0.9} strokeWidth={1.5} />
+            {/* Left of the high, above its line: nothing trades up there, and the swing labels sit at the peak itself. */}
+            <text x={Math.max(xp - 14, 250)} y={yp - 5} fontSize={11} fontWeight={700} textAnchor="end" fill={danger} {...HALO}>
+              pump high {fmtPrice(p.peak)} · +{p.runPct.toFixed(0)}% · {PUMP_PHASE[p.phase] ?? p.phase}
+            </text>
+            {p.levels.map((l) => {
+              const yy = y(l.price);
+              if (yy === null || yy < 0 || yy > height) return null;
+              return (
+                <g key={l.ratio}>
+                  <line x1={xp} x2={width} y1={yy} y2={yy} stroke={warn} strokeOpacity={0.55} strokeDasharray="1 3" />
+                  <text x={width - 6} y={yy - 3} fontSize={10} textAnchor="end" fill={warn} {...HALO}>{(l.ratio * 100).toFixed(1)}% {fmtPrice(l.price)}</text>
+                </g>
+              );
+            })}
+          </g>
+        );
+      })()}
+
+      {show.has('structure') && overlays.structure?.tf === tf && (() => {
+        // Swing points joined in a zigzag and named, each break of structure from its swing to the candle that closed through it,
+        // and the levels whose close would break it next.
+        const st = overlays.structure;
+        const up = 'var(--color-good)';
+        const down = 'var(--color-critical)';
+        const pts = st.swings.flatMap((sw) => {
+          const sx = xFree(sw.time);
+          const sy = y(sw.price);
+          return sx === null || sy === null ? [] : [{ ...sw, sx, sy }];
+        });
+        const next = [
+          st.breakDown && { ...st.breakDown, dir: 'down' as const, name: st.trend === 'up' ? 'protected low' : 'break below' },
+          st.breakUp && { ...st.breakUp, dir: 'up' as const, name: st.trend === 'down' ? 'protected high' : 'break above' },
+        ];
+        return (
+          <g>
+            <polyline points={pts.map((q) => `${q.sx},${q.sy}`).join(' ')} fill="none" stroke="var(--color-ink-2)" strokeOpacity={0.55} strokeWidth={1.25} />
+            {pts.map((q) => q.label && (
+              <text key={`sw${q.time}${q.type}`} x={q.sx} y={q.type === 'high' ? q.sy - 7 : q.sy + 15} fontSize={10} fontWeight={700} textAnchor="middle"
+                fill={q.label === 'HH' || q.label === 'HL' ? up : down} {...HALO}>{q.label}</text>
+            ))}
+            {st.breaks.map((b) => {
+              const x1 = xFree(b.from);
+              const x2 = xFree(b.time);
+              const yy = y(b.level);
+              if (x1 === null || x2 === null || yy === null) return null;
+              const color = b.dir === 'up' ? up : down;
+              const choch = b.kind === 'CHoCH';
+              return (
+                <g key={`br${b.time}${b.dir}`}>
+                  <line x1={x1} x2={x2} y1={yy} y2={yy} stroke={color} strokeWidth={choch ? 1.75 : 1.1} strokeDasharray={choch ? '6 2' : '3 3'} />
+                  <text x={(x1 + x2) / 2} y={b.dir === 'up' ? yy - 4 : yy + 12} fontSize={choch ? 11 : 10} fontWeight={choch ? 800 : 600} textAnchor="middle" fill={color} {...HALO}>{b.kind}</text>
+                </g>
+              );
+            })}
+            {next.map((l) => {
+              if (!l) return null;
+              const yy = y(l.price);
+              const x1 = xFree(l.time) ?? 0;
+              if (yy === null || yy < 0 || yy > height) return null;
+              const color = l.dir === 'up' ? up : down;
+              return (
+                <g key={`next${l.dir}`}>
+                  <line x1={x1} x2={width} y1={yy} y2={yy} stroke={color} strokeOpacity={0.75} strokeDasharray="1 3" strokeWidth={1.25} />
+                  <text x={Math.min(x1, width - 170) + 4} y={l.dir === 'up' ? yy - 4 : yy + 12} fontSize={10} fill={color} {...HALO}>{l.name} {fmtPrice(l.price)}</text>
+                </g>
+              );
+            })}
+          </g>
+        );
+      })()}
+
       {show.has('patterns') && overlays.reading?.tf === tf && overlays.reading.patterns.map((p) => {
         const color = BIAS_COLOR[p.bias];
         const ys = [y(p.upper.p1), y(p.upper.p2), y(p.lower.p2), y(p.lower.p1)];
@@ -575,7 +690,9 @@ function Overlay({ chart, series, candles, overlays, show, tf, tfMs, idea, posit
         );
       })}
 
-      {show.has('scalp') && tfMs <= 900_000 && (overlays.scalps ?? []).filter((sc) => sc.status === 'open' || last - (sc.closedAt ?? 0) < 4 * 3_600_000).map((sc) => {
+      {show.has('scalp') && tfMs <= 900_000 && (overlays.scalps ?? [])
+        .filter((sc) => (!sc.tf || sc.tf === (tfMs <= 60_000 ? '1m' : tfMs <= 300_000 ? '5m' : '15m')))
+        .filter((sc) => sc.status === 'open' || last - (sc.closedAt ?? 0) < 4 * 3_600_000).map((sc) => {
         // From the signal candle to where it closed (or the right edge while open).
         const x1 = xFree(sc.time);
         if (x1 === null) return null;
@@ -593,7 +710,7 @@ function Overlay({ chart, series, candles, overlays, show, tf, tfMs, idea, posit
             })}
             {open && ye !== null && (
               <text x={Math.max(x1, 0) + 4} y={sc.side === 'long' ? ye + 13 : ye - 5} fontSize={10} fontWeight={600} fill="var(--color-ink)" {...HALO}>
-                {SCALP_LABEL[sc.kind]} {sc.side}
+                {sc.tf ? `[${sc.tf}] ` : ''}{SCALP_LABEL[sc.kind]} {sc.side}
               </text>
             )}
           </g>

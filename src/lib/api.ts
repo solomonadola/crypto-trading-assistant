@@ -1,11 +1,13 @@
 // Talking to the engine: typed GETs, control POSTs, and a polling hook.
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { AccountSummary, Candle, ClosedTradeView, FeedStatus, ShadowResult, SignalRecord } from '../../shared/types';
+import type { AccountSummary, Candle, ClosedTradeView, FeedStatus, PatternFeatureStat, PatternMatch, PatternMemoryReport, PatternVerdict, RunnerStage, ShadowResult, SignalRecord, TradeIdea, VolumeSurgeReport, VolumeSurgeRunner } from '../../shared/types';
 import { idToken } from './auth';
 
-export type { AccountSummary, Candle, ClosedTradeView, ShadowResult, SignalRecord };
+export type { AccountSummary, Candle, ClosedTradeView, PatternFeatureStat, PatternMatch, PatternMemoryReport, PatternVerdict, RunnerStage, ShadowResult, SignalRecord, TradeIdea, VolumeSurgeReport, VolumeSurgeRunner };
 export type { ChartPattern, ChartReading, TrendRead, WyckoffRange } from '../../engine/src/analysis/patterns';
 export type { ScalpSetup, ScalpStats } from '../../engine/src/analysis/scalp';
+export type { StructureBreak, SwingPoint, SwingStructure } from '../../engine/src/analysis/swingStructure';
+export type { CoinWatch, MarketWarning, PumpRead } from '../../engine/src/analysis/pumpWatch';
 
 /** One timeframe's chart reading, in brief, for the market table. */
 export interface ReadingBrief {
@@ -33,6 +35,7 @@ export interface Status {
   halted: { reason: string; at: number } | null;
   backup: { target: string; namespace: string; ok: boolean; error: string | null; standby: boolean; lastPush: number };
   signInRequired: boolean;
+  quantAutopilot?: boolean;
 }
 
 export interface Direction { state: string; emaAligned: boolean; tradable: boolean }
@@ -54,12 +57,26 @@ export interface MarketRow {
   zones: number;
   /** Trend, patterns and Wyckoff per timeframe (5m, 15m, 1h); null without candles yet. */
   reading: Record<string, ReadingBrief | null>;
+  /** Warnings on the coin: the worst level, the pump's stage if in one, and each warning's title. Null without candles yet. */
+  watch: { level: 'ok' | 'caution' | 'danger'; phase: string | null; titles: string[] } | null;
   armed: string[];
   setup: null | {
-    bias: 'long' | 'short' | 'none'; stage: string | null; skipped: boolean;
+    bias: 'long' | 'short' | 'none';
+    /** Trending (then bias is the side), or no clear direction: consolidating or choppy. */
+    condition: 'trend_up' | 'trend_down' | 'consolidating' | 'choppy';
+    stage: string | null; skipped: boolean;
     rr: number | null; meetsRules: boolean; targetPct: number | null;
     speed: 'calm' | 'normal' | 'wild'; movingFast: boolean; pdPosition: number | null; checksMet: number; checksDecided: number; quality: number;
   };
+  runner?: {
+    stage: RunnerStage;
+    stageLabel: string;
+    rvol: number;
+    score: number;
+    potentialMultiplier: string;
+    change3dPct: number;
+    actionPlan: string;
+  } | null;
 }
 
 export interface Zone { id: string; type: 'demand' | 'supply'; low: number; high: number; status: string; touches: number; createdAt: number }

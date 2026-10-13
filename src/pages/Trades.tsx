@@ -1,6 +1,6 @@
-import { useMemo } from 'react';
-import { History, PieChart } from 'lucide-react';
-import { usePoll, type ClosedTradeView } from '../lib/api';
+import { useState, useMemo } from 'react';
+import { Brain, History, PieChart, Sparkles } from 'lucide-react';
+import { usePoll, type ClosedTradeView, type PatternFeatureStat, type PatternMemoryReport } from '../lib/api';
 import { SESSION_LABEL, coin, dateTime, duration, price, signedUsd, words } from '../lib/format';
 import { Card, Empty, Kpi, ModelBadge, Pnl, SessionBadge, SideBadge, SpeedBadge, Table, td } from '../components/ui';
 
@@ -44,8 +44,64 @@ function NetBars({ groups, label, color }: { groups: Group[]; label: (k: string)
   );
 }
 
+function PatternBars({ stats }: { stats: PatternFeatureStat[] }) {
+  const max = Math.max(0.4, ...stats.map((s) => Math.abs(s.expectancyR)));
+  return (
+    <div className="space-y-2.5">
+      {stats.map((s) => (
+        <div key={s.tag} className="grid grid-cols-[13rem_1fr_11rem] items-center gap-3 text-sm" title={s.advice}>
+          <span className="flex items-center gap-2 truncate text-ink-2">
+            <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${
+              s.verdict === 'strong_edge' || s.verdict === 'positive_edge'
+                ? 'bg-good'
+                : s.verdict === 'neutral'
+                ? 'bg-ink-3'
+                : 'bg-critical'
+            }`} />
+            <span className="truncate font-medium">{s.label}</span>
+            <span className="text-xs text-ink-3">×{s.tradesCount}</span>
+          </span>
+          <div className="relative h-4 rounded bg-card-2">
+            <div className="absolute inset-y-0 left-1/2 w-px bg-line" />
+            <div
+              className="absolute inset-y-0.5 rounded"
+              style={s.expectancyR >= 0
+                ? { left: '50%', width: `${(s.expectancyR / max) * 50}%`, background: 'var(--color-good)' }
+                : { right: '50%', width: `${(-s.expectancyR / max) * 50}%`, background: 'var(--color-critical)' }}
+            />
+          </div>
+          <span className="text-right tabular text-xs text-ink-2">
+            <b className={s.expectancyR >= 0 ? 'text-good' : 'text-critical'}>{s.expectancyR >= 0 ? '+' : ''}{s.expectancyR.toFixed(2)}R EV</b> · {s.winRatePct}% win
+          </span>
+        </div>
+      ))}
+      <div className="grid grid-cols-[13rem_1fr_11rem] text-[11px] text-ink-3">
+        <span />
+        <span className="flex justify-between">
+          <span>−{max.toFixed(1)}R</span>
+          <span>0</span>
+          <span>+{max.toFixed(1)}R</span>
+        </span>
+        <span />
+      </div>
+    </div>
+  );
+}
+
+const CATEGORIES = [
+  ['all', 'All Features'],
+  ['trend', 'Trend Alignment'],
+  ['volume', 'Volume Dynamics'],
+  ['zone', 'Dealing Range'],
+  ['adr', 'ADR Gas Tank'],
+  ['session', 'Killzone'],
+] as const;
+
 export function Trades({ go }: { go: (page: string, symbol?: string) => void }) {
   const { data: trades } = usePoll<ClosedTradeView[]>('/api/trades?limit=2000', 30_000);
+  const { data: memory } = usePoll<PatternMemoryReport>('/api/pattern-memory', 30_000);
+  const [cat, setCat] = useState<(typeof CATEGORIES)[number][0]>('all');
+
   const t = trades ?? [];
   const stats = useMemo(() => {
     const wins = t.filter((x) => x.pnl > 0);
@@ -59,6 +115,12 @@ export function Trades({ go }: { go: (page: string, symbol?: string) => void }) 
     };
   }, [t]);
 
+  const patternStats = useMemo(() => {
+    const raw = memory?.stats ?? [];
+    if (cat === 'all') return raw;
+    return raw.filter((s) => s.category === cat);
+  }, [memory, cat]);
+
   if (!t.length) {
     return <Card title="Trade history" icon={<History size={16} />}><Empty>No closed trades yet. They appear here, with their stats, as soon as the simulator closes one.</Empty></Card>;
   }
@@ -71,6 +133,37 @@ export function Trades({ go }: { go: (page: string, symbol?: string) => void }) 
         <Kpi label="Average loss" value={signedUsd(stats.avgLoss)} accent="var(--color-critical)" />
         <Kpi label="Profit factor" value={stats.pf === null ? '–' : stats.pf.toFixed(2)} accent="var(--color-newyork)" sub="gross won ÷ gross lost" />
       </div>
+
+      {/* ---------------- Learned Machine Pattern Memory Card ---------------- */}
+      <Card
+        title="Learned Pattern Memory & Statistical Edge"
+        icon={<Brain size={16} />}
+        right={
+          <div className="flex overflow-hidden rounded-lg border border-line">
+            {CATEGORIES.map(([id, label]) => (
+              <button
+                key={id}
+                onClick={() => setCat(id)}
+                className={`px-2.5 py-1 text-xs ${cat === id ? 'bg-accent text-white font-semibold' : 'bg-card-2 text-ink-2 hover:text-ink'}`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        }
+      >
+        <p className="mb-4 max-w-3xl text-sm text-ink-2">
+          Empirical Bayesian Matrix: continuously learns from historical trades and market structure characteristics.
+          Positive EV patterns (<span className="text-good font-semibold">green</span>) produce long-term mathematical edge;
+          negative EV patterns (<span className="text-critical font-semibold">red</span>) represent high-probability failure traps.
+        </p>
+        {!patternStats.length ? (
+          <Empty>Loading pattern memory matrix…</Empty>
+        ) : (
+          <PatternBars stats={patternStats} />
+        )}
+      </Card>
+
       <div className="grid gap-5 lg:grid-cols-3">
         <Card title="By session" icon={<PieChart size={16} />}>
           <NetBars groups={groupBy(t, (x) => x.session ?? 'none')} label={(k) => SESSION_LABEL[k] ?? k} color={(k) => `var(--color-${k})`} />
@@ -78,6 +171,7 @@ export function Trades({ go }: { go: (page: string, symbol?: string) => void }) 
         <Card title="By exit reason"><NetBars groups={groupBy(t, (x) => x.reason)} label={words} /></Card>
         <Card title="By side"><NetBars groups={groupBy(t, (x) => x.side)} label={(k) => k} /></Card>
       </div>
+
       <Card title="Trade history" icon={<History size={16} />}>
         <Table head={['Opened (UTC)', 'Coin', 'Side', 'Model', 'Entry', 'Exit', 'Held', 'Exit reason', 'Session', 'Net P&L']}>
           {t.map((x) => (

@@ -19,7 +19,7 @@ import { Notifier } from './components/Notifier';
 const PAGES = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
   { id: 'ideas', label: 'Ideas', icon: Compass },
-  { id: 'scalp', label: 'Scalp', icon: Timer },
+  { id: 'scalp', label: 'Quant Scalp', icon: Timer },
   { id: 'market', label: 'Market', icon: Crosshair },
   { id: 'chart', label: 'Chart', icon: CandlestickChart },
   { id: 'signals', label: 'Signals', icon: Radio },

@@ -1,8 +1,9 @@
-import { Activity, Briefcase, LineChart, Radio, X } from 'lucide-react';
+import { Activity, Briefcase, Hourglass, LineChart, Radio, X } from 'lucide-react';
 import { post, usePoll, usePrices, type AccountSummary, type ClosedTradeView, type EquityPoint, type SignalRecord } from '../lib/api';
 import { coin, dateTime, duration, hhmm, pct, price, signedUsd, usd, words } from '../lib/format';
 import { Badge, Card, Empty, Kpi, ModelBadge, Pnl, SessionBadge, SideBadge, Table, td } from '../components/ui';
 import { SessionTimeline } from '../components/SessionTimeline';
+import { EditPosition } from '../components/EditPosition';
 import { EquityChart } from '../components/charts';
 
 export function StatusBadge({ status }: { status: string }) {
@@ -70,8 +71,34 @@ export function Overview({ go }: { go: (page: string, symbol?: string) => void }
         <EquityChart points={equity ?? []} startingBalance={acct?.startingBalance ?? 1000} />
       </Card>
 
-      <Card title="Open positions" icon={<Briefcase size={16} />} right={acct?.pendingEntries.length ? <Badge tone="accent"><Activity size={12} />{acct.pendingEntries.length} filling</Badge> : null}>
-        {!acct?.positions.length ? <Empty>No open positions. The engine opens one when a confirmed setup passes every check and the risk rules.</Empty> : (
+      <Card title="Open positions" icon={<Briefcase size={16} />} right={acct?.pendingEntries.length ? <Badge tone="accent"><Activity size={12} />{acct.pendingEntries.length} limit pullback</Badge> : null}>
+        {acct?.pendingEntries && acct.pendingEntries.length > 0 && (
+          <div className="mb-4 rounded-xl border border-accent/30 bg-accent/5 p-3">
+            <div className="mb-2 flex items-center justify-between text-xs font-semibold text-accent">
+              <span className="flex items-center gap-1.5"><Hourglass size={13} className="animate-pulse" /> Pending Limit Orders (Waiting for Pullback)</span>
+              <span className="text-[11px] text-ink-3">Auto-cancels if target is reached first or after 4h timeout</span>
+            </div>
+            <div className="space-y-1.5">
+              {acct.pendingEntries.map((e) => (
+                <div key={e.positionId} className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-card-2/80 px-3 py-2 text-xs border border-line">
+                  <div className="flex items-center gap-2">
+                    <button className="font-semibold hover:text-accent" onClick={() => go('chart', e.symbol)}>{coin(e.symbol)}</button>
+                    <SideBadge side={e.side} />
+                    <span className="text-ink-2 tabular">Limit: <b className="text-ink">{e.price ? price(e.price) : 'Key Level'}</b></span>
+                    {e.stop && <span className="text-critical/90 tabular">Stop: {price(e.stop)}</span>}
+                    {e.target && <span className="text-good/90 tabular">TP: {price(e.target)}</span>}
+                  </div>
+                  <div className="flex items-center gap-2 text-ink-3">
+                    <span>${e.notional.toFixed(0)}</span>
+                    <span className="tabular">{duration((acct.time || Date.now()) - e.placedAt)} ago</span>
+                    <Badge tone="accent">waiting pullback</Badge>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+        {!acct?.positions.length ? <Empty>No active open positions. The engine opens one when a limit order fills on pullback.</Empty> : (
           <Table head={['Coin', 'Side', 'Model', 'Entry', 'Price', 'Stop', 'Target', 'P&L', 'Session', 'Open', '']}>
             {acct.positions.map((p) => (
               <tr key={p.id} className="hover:bg-card-2/60">
@@ -90,7 +117,10 @@ export function Overview({ go }: { go: (page: string, symbol?: string) => void }
                 <td className={`${td} text-ink-2 tabular`} title={dateTime(p.openedAt)}>{duration((acct.time || Date.now()) - p.openedAt)}</td>
                 <td className={td}>
                   {p.pendingClose ? <Badge tone="warning">closing · {words(p.pendingClose)}</Badge> : (
-                    <button onClick={() => close(p.id)} className="inline-flex items-center gap-1 rounded-lg border border-line px-2 py-1 text-xs text-ink-2 hover:border-critical hover:text-critical"><X size={12} />Close</button>
+                    <span className="flex gap-1">
+                      <EditPosition p={p} onSaved={reload} />
+                      <button onClick={() => close(p.id)} className="inline-flex items-center gap-1 rounded-lg border border-line px-2 py-1 text-xs text-ink-2 hover:border-critical hover:text-critical"><X size={12} />Close</button>
+                    </span>
                   )}
                 </td>
               </tr>

@@ -1,6 +1,6 @@
 // Small building blocks shared by every page.
 import type { ReactNode } from 'react';
-import { ArrowDownRight, ArrowUpRight, Minus } from 'lucide-react';
+import { ArrowDownRight, ArrowUpRight, Minus, MoveHorizontal, Waves } from 'lucide-react';
 import { MODEL_LABEL, SESSION_LABEL, signedUsd, pct } from '../lib/format';
 
 export function Card({ title, icon, right, children, className = '' }: { title?: ReactNode; icon?: ReactNode; right?: ReactNode; children: ReactNode; className?: string }) {
@@ -69,6 +69,13 @@ export function Badge({ tone = 'muted', children, title }: { tone?: keyof typeof
 export function SessionBadge({ name }: { name: string | null | undefined }) {
   if (!name) return <Badge>no session</Badge>;
   return <Badge tone={name}>{SESSION_LABEL[name] ?? name}</Badge>;
+}
+
+/** No clear direction: consolidating (a tight box) or choppy (whipsaws). Nothing for a trending market: its side shows instead. */
+export function ConditionBadge({ kind, title }: { kind: string | null | undefined; title?: string }) {
+  if (kind === 'consolidating') return <Badge tone="muted" title={title}><MoveHorizontal size={12} aria-hidden />consolidating</Badge>;
+  if (kind === 'choppy') return <Badge tone="warning" title={title}><Waves size={12} aria-hidden />choppy</Badge>;
+  return null;
 }
 
 export function SideBadge({ side }: { side: string }) {

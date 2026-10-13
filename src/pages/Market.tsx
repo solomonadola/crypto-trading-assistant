@@ -1,20 +1,37 @@
 import { useMemo, useState } from 'react';
-import { Crosshair, Eye, Search, Target, X } from 'lucide-react';
-import { post, usePoll, usePrices, type Armed, type MarketRow, type ReadingBrief, type Scanner } from '../lib/api';
+import { AlertTriangle, Crosshair, Eye, Flame, Search, ShieldAlert, Target, X } from 'lucide-react';
+import { post, usePoll, usePrices, type Armed, type MarketRow, type ReadingBrief, type Scanner, type VolumeSurgeReport } from '../lib/api';
 import { coin, compact, dateTime, duration, hhmm, pct, price, words } from '../lib/format';
 import { AddCoin } from '../components/AddCoin';
-import { Badge, Card, Empty, MovingFastBadge, PdBadge, SideBadge, SpeedBadge, StateBadge, Table, TrendChip, td } from '../components/ui';
+import { Badge, Card, ConditionBadge, Empty, MovingFastBadge, PdBadge, SideBadge, SpeedBadge, StateBadge, Table, TrendChip, td } from '../components/ui';
 
 const READ_TFS = ['5m', '15m', '1h'] as const;
 const ONLY = {
   all: { label: 'all coins', test: () => true },
+  runners: { label: '🚀 volume surge / runners (2x-3x)', test: (r: MarketRow) => !!r.runner },
   up15: { label: '15m uptrend', test: (r: MarketRow) => r.reading?.['15m']?.trend?.direction === 'up' },
   down15: { label: '15m downtrend', test: (r: MarketRow) => r.reading?.['15m']?.trend?.direction === 'down' },
   up1h: { label: '1h uptrend', test: (r: MarketRow) => r.reading?.['1h']?.trend?.direction === 'up' },
   down1h: { label: '1h downtrend', test: (r: MarketRow) => r.reading?.['1h']?.trend?.direction === 'down' },
   patterns: { label: 'with a chart pattern', test: (r: MarketRow) => READ_TFS.some((tf) => !!r.reading?.[tf]?.patterns.length) },
   wyckoff: { label: 'in a Wyckoff range', test: (r: MarketRow) => READ_TFS.some((tf) => !!r.reading?.[tf]?.wyckoff) },
+  warned: { label: 'with a warning', test: (r: MarketRow) => !!r.watch && r.watch.level !== 'ok' },
+  pumping: { label: 'pumping or dumping', test: (r: MarketRow) => !!r.watch?.phase || !!r.watch?.titles.some((t) => t.startsWith('Down ')) },
 } as const;
+
+const PHASE_SHORT: Record<string, string> = { markup: 'pumping', blowoff: 'blow-off', distribution: 'pump stalling', unwind: 'pump unwinding', faded: 'pump faded' };
+
+/** The coin's warnings at a glance: red when something looks wrong, amber for caution; the titles on hover. */
+function WatchBadge({ w }: { w: MarketRow['watch'] }) {
+  if (!w || w.level === 'ok') return null;
+  const danger = w.level === 'danger';
+  const Icon = danger ? ShieldAlert : AlertTriangle;
+  return (
+    <span className={`inline-flex items-center gap-1 text-[11px] font-semibold ${danger ? 'text-critical' : 'text-warning'}`} title={w.titles.join('\n')}>
+      <Icon size={13} aria-label={danger ? 'warning' : 'caution'} />{w.phase ? PHASE_SHORT[w.phase] ?? w.phase : null}
+    </span>
+  );
+}
 type OnlyKey = keyof typeof ONLY;
 
 /** 15m ↑: the timeframe's trend read as an arrow. */
@@ -71,6 +88,7 @@ function Quality({ q }: { q: number }) {
 
 export function Market({ go }: { go: (page: string, symbol?: string) => void }) {
   const { data: rows } = usePoll<MarketRow[]>('/api/market', 15_000);
+  const { data: surgeReport } = usePoll<VolumeSurgeReport>('/api/volume-surge', 30_000);
   const { data: scanner } = usePoll<Scanner>('/api/scanner', 60_000);
   const { data: armed } = usePoll<Armed[]>('/api/armed', 15_000);
   const { data: watchlist, reload: reloadWatchlist } = usePoll<string[]>('/api/watchlist', 60_000);
@@ -114,6 +132,52 @@ export function Market({ go }: { go: (page: string, symbol?: string) => void }) 
                 <p className="mt-2 text-xs text-ink-3 tabular">
                   area {price(a.areaLow)} – {price(a.areaHigh)} · armed {hhmm(a.armedAt)} · expires in {duration(a.expiresAt - now)}
                 </p>
+              </button>
+            ))}
+          </div>
+        )}
+      </Card>
+
+      <Card
+        title={`Volume Surge & Multi-Day Runners (${surgeReport?.runners?.length ?? 0})`}
+        icon={<Flame size={16} className="text-accent" />}
+        right={<span className="text-xs text-ink-3">3x–10x volume expansion · 2x–3x runner setup detector</span>}
+      >
+        {!surgeReport?.runners?.length ? (
+          <Empty>No active coin currently exhibits explosive volume ignition (3x+ volume expansion) or multi-day runner momentum. The radar monitors continuously.</Empty>
+        ) : (
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+            {surgeReport.runners.map((run) => (
+              <button
+                key={run.symbol}
+                onClick={() => go('chart', run.symbol)}
+                className="rounded-xl border border-line bg-card-2 p-3 text-left transition hover:border-accent hover:bg-card-2/80"
+              >
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="text-base font-semibold">{coin(run.symbol)}</span>
+                    <span className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[10px] font-bold tracking-wide uppercase ${
+                      run.stage === 'early_ramp' ? 'bg-cyan-500/20 text-cyan-400' : run.stage === 'ignition' ? 'bg-good/20 text-good' : run.stage === 'continuation_runner' ? 'bg-accent/20 text-accent' : 'bg-critical/20 text-critical'
+                    }`}>
+                      {run.stage === 'early_ramp' ? '⚡ Early Ramp' : run.stage === 'ignition' ? '🚀 Ignition' : run.stage === 'continuation_runner' ? '🏃 Runner' : '⚠️ Blowoff'}
+                    </span>
+                  </div>
+                  <span className={`text-xs font-semibold tabular ${run.change24hPct >= 0 ? 'text-good' : 'text-critical'}`}>
+                    {run.change24hPct >= 0 ? '+' : ''}{run.change24hPct}% (24h)
+                  </span>
+                </div>
+
+                <div className="mt-2 flex items-center justify-between text-xs">
+                  <span className="text-ink-2 font-medium">
+                    <span className="font-bold text-accent">{run.rvol}x</span> RVol (${compact(run.volume24hUsd)})
+                  </span>
+                  <span className="text-ink-3 tabular">3-Day: +{run.change3dPct}%</span>
+                </div>
+
+                <div className="mt-2 rounded-lg bg-black/25 p-2 text-[11px] border border-line/40">
+                  <p className="font-semibold text-accent">{run.potentialMultiplier}</p>
+                  <p className="text-ink-3 mt-0.5 line-clamp-2">{run.actionPlan}</p>
+                </div>
               </button>
             ))}
           </div>
@@ -165,6 +229,14 @@ export function Market({ go }: { go: (page: string, symbol?: string) => void }) 
                 <td className={td}>
                   <span className="flex items-center gap-1.5">
                     <span className="font-semibold">{coin(r.symbol)}</span>
+                    <WatchBadge w={r.watch} />
+                    {r.runner && (
+                      <span className={`inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] font-bold ${
+                        r.runner.stage === 'early_ramp' ? 'bg-cyan-500/20 text-cyan-400' : r.runner.stage === 'ignition' ? 'bg-good/20 text-good' : r.runner.stage === 'continuation_runner' ? 'bg-accent/20 text-accent' : 'bg-critical/20 text-critical'
+                      }`} title={`${r.runner.stageLabel}: ${r.runner.rvol}x volume (${r.runner.potentialMultiplier})\n${r.runner.actionPlan}`}>
+                        {r.runner.rvol}x {r.runner.stage === 'early_ramp' ? '⚡' : r.runner.stage === 'ignition' ? '🚀' : r.runner.stage === 'continuation_runner' ? '🏃' : '⚠️'}
+                      </span>
+                    )}
                     <SpeedBadge speed={r.setup?.speed} />
                     <MovingFastBadge on={r.setup?.movingFast} />
                     {r.watched && !r.scanned && <Badge tone="muted" title="Added by you: analysed, not traded">yours</Badge>}
@@ -174,8 +246,9 @@ export function Market({ go }: { go: (page: string, symbol?: string) => void }) 
                   {r.setup?.targetPct != null ? `+${r.setup.targetPct.toFixed(2)}%` : '–'}
                   {r.setup?.meetsRules && <Badge tone="good">signal</Badge>}
                 </td>
-                <td className={`${td} tabular font-semibold ${r.setup?.rr == null ? 'text-ink-3' : r.setup.rr >= 2 ? 'text-good' : r.setup.rr >= 1 ? 'text-ink' : 'text-warning'}`}>
-                  {r.setup?.rr != null ? `${r.setup.rr.toFixed(2)}R` : '–'}
+                <td className={`${td} tabular font-semibold ${r.setup?.rr != null && r.setup.rr >= 2 ? 'text-good' : 'text-ink-3'}`}
+                  title={r.setup?.rr != null && r.setup.rr < 2 ? `${r.setup.rr.toFixed(2)}R: under the 2R minimum, not a trade` : undefined}>
+                  {r.setup?.rr == null ? '–' : r.setup.rr >= 2 ? `${r.setup.rr.toFixed(2)}R` : <span className="text-xs font-normal">under 2R</span>}
                 </td>
                 <td className={td}>
                   {r.setup && r.setup.bias !== 'none' ? (
@@ -184,10 +257,10 @@ export function Market({ go }: { go: (page: string, symbol?: string) => void }) 
                       <PdBadge position={r.setup.pdPosition} />
                       {r.setup.stage && (r.setup.skipped ? <Badge tone="warning">skipped</Badge> : <Badge tone={STAGE[r.setup.stage]?.tone ?? 'muted'}>{STAGE[r.setup.stage]?.label ?? r.setup.stage}</Badge>)}
                     </span>
-                  ) : <span className="text-xs text-ink-3">no trend</span>}
+                  ) : r.setup ? <ConditionBadge kind={r.setup.condition} title="No clear direction: no long or short until one side is clear" /> : <span className="text-xs text-ink-3">–</span>}
                 </td>
-                <td className={td}>{r.setup ? <Quality q={r.setup.quality} /> : <span className="text-ink-3">–</span>}</td>
-                <td className={`${td} tabular text-ink-2`}>{r.setup ? `${r.setup.checksMet}/${r.setup.checksDecided}` : '–'}</td>
+                <td className={td}>{r.setup && r.setup.bias !== 'none' ? <Quality q={r.setup.quality} /> : <span className="text-ink-3" title="No clear direction: no setup to rate">–</span>}</td>
+                <td className={`${td} tabular text-ink-2`}>{r.setup && r.setup.bias !== 'none' ? `${r.setup.checksMet}/${r.setup.checksDecided}` : '–'}</td>
                 <td className={`${td} tabular`}>{price(live?.prices[r.symbol] ?? r.price)}</td>
                 <td className={`${td} tabular ${r.changePct == null ? 'text-ink-3' : r.changePct >= 0 ? 'text-good' : 'text-critical'}`}>{r.changePct == null ? '–' : `${r.changePct >= 0 ? '▲' : '▼'} ${pct(r.changePct, 1, true)}`}</td>
                 <td className={`${td} tabular text-ink-2`}>{pct(r.atrPct1h, 2)}</td>

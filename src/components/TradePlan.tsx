@@ -3,7 +3,7 @@
 import { AlertTriangle, CheckCircle2, Compass } from 'lucide-react';
 import type { TradeIdea } from '../../shared/types';
 import { liquidityName, price as fmt, pct } from '../lib/format';
-import { Badge, Card, MovingFastBadge, PdBadge, SideBadge, SpeedBadge, TrendChip } from './ui';
+import { Badge, Card, ConditionBadge, MovingFastBadge, PdBadge, SideBadge, SpeedBadge, TrendChip } from './ui';
 
 const STATUS: Record<string, { tone: string; label: string }> = {
   in_trade: { tone: 'good', label: 'confirmed · in trade' },
@@ -15,7 +15,7 @@ const STATUS: Record<string, { tone: string; label: string }> = {
 };
 
 export function PlanStatus({ idea }: { idea: TradeIdea }) {
-  if (!idea.plan) return <Badge>no trend · wait</Badge>;
+  if (!idea.plan) return <Badge>{idea.condition.kind === 'choppy' ? 'choppy · stay out' : 'no clear direction · wait'}</Badge>;
   const c = idea.plan.confirmation;
   if (idea.plan.status === 'confirmed' && c && !c.taken) return <Badge tone="warning" title={c.reason ?? undefined}>confirmed · skipped</Badge>;
   const s = STATUS[idea.plan.status];
@@ -64,13 +64,13 @@ export function TradePlanCard({ idea, compact = false }: { idea: TradeIdea; comp
     >
       <div className="space-y-3 text-sm">
         <div className="flex flex-wrap items-center gap-2">
-          {idea.bias === 'none' ? <Badge>no bias</Badge> : <SideBadge side={idea.bias} />}
+          {idea.bias === 'none' ? <ConditionBadge kind={idea.condition.kind} /> : <SideBadge side={idea.bias} />}
           {(['4h', '1h', '15m'] as const).map((tf) => <TrendChip key={tf} tf={tf} trend={idea.trend[tf]} />)}
           <PdBadge position={idea.dealingRange?.position} />
           <SpeedBadge speed={idea.speed} />
           <MovingFastBadge on={idea.movingFast} />
           {compact && <PlanStatus idea={idea} />}
-          {compact && idea.checklist && (() => {
+          {compact && idea.bias !== 'none' && idea.checklist && (() => {
             const met = idea.checklist.filter((c) => c.ok === true).length;
             const decided = idea.checklist.filter((c) => c.ok !== null).length;
             return <Badge tone={met === decided ? 'good' : met >= decided - 2 ? 'warning' : 'muted'} title={`checklist for a ${idea.checklistFor}`}>{met}/{decided} checks</Badge>;
@@ -104,7 +104,11 @@ export function TradePlanCard({ idea, compact = false }: { idea: TradeIdea; comp
         ) : plan ? (
           <p className="text-xs text-warning">{plan.note}</p>
         ) : (
-          <p className="text-xs text-ink-3">No plan while neither side has a trend. Key levels below still show where price may react.</p>
+          <p className="text-xs text-ink-3">
+            No long or short while the direction is unclear{idea.condition.kind === 'consolidating' && idea.condition.rangeHigh !== null && idea.condition.rangeLow !== null
+              ? `: a 1h close above ${fmt(idea.condition.rangeHigh)} or below ${fmt(idea.condition.rangeLow)} would show the side`
+              : ': choppy markets stop out both sides; wait for a trend'}. Key levels below still show where price may react.
+          </p>
         )}
 
         {!compact && idea.liquidity.length > 0 && (
