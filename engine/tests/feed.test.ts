@@ -56,7 +56,8 @@ describe('candle store', () => {
     expect(store.lastOpenTime('BTCUSDT', '1h')).toBeNull();
     expect(store.range('BTCUSDT', '15m', T0 + 900_000, T0 + 2 * 900_000).map((c) => c.openTime)).toEqual([T0 + 900_000, T0 + 1_800_000]);
     const latest = store.latest('BTCUSDT', '15m', 2);
-    expect(latest.map((c) => c.close)).toEqual([cs[2].close, 999]);
+    expect(store.bounds('BTCUSDT', '15m')).toEqual({ min: T0, max: T0 + 3 * 900_000 });
+    expect(store.bounds('BTCUSDT', '1h')).toEqual({ min: null, max: null });
     // At T0 + 45m only the candles opened at 0, 15m and 30m had closed.
     expect(store.latest('BTCUSDT', '15m', 10, T0 + 2_700_000).map((c) => c.openTime)).toEqual([T0, T0 + 900_000, T0 + 1_800_000]);
   });

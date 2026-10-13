@@ -64,38 +64,42 @@ export async function ensureBacktestData(opts: BacktestDataOptions): Promise<Bac
 
   for (const symbol of symbols) {
     for (const tf of tfs) {
-      const storedRange = store.range(symbol, tf, fetchFrom, fetchTo);
       const tfMs = TIMEFRAME_MS[tf];
+      const { min, max } = store.bounds(symbol, tf);
+      const rangesToFetch: Array<{ from: number; to: number }> = [];
 
-      let start = fetchFrom;
-      if (storedRange.length > 0) {
-        const lastStored = storedRange[storedRange.length - 1];
-        if (lastStored.openTime >= fetchTo - tfMs) {
-          // Fully cached
-          continue;
+      if (min === null || max === null) {
+        rangesToFetch.push({ from: fetchFrom, to: fetchTo });
+      } else {
+        if (min > fetchFrom + tfMs) {
+          rangesToFetch.push({ from: fetchFrom, to: min - 1 });
         }
-        // Partial cache: resume from lastStored + 1 bar
-        start = lastStored.openTime + tfMs;
+        if (max < fetchTo - tfMs) {
+          rangesToFetch.push({ from: max + tfMs, to: fetchTo });
+        }
       }
 
-      if (start >= fetchTo) continue;
+      if (rangesToFetch.length === 0) continue;
 
-      log(`Downloading ${symbol} [${tf}] from ${new Date(start).toISOString().slice(0, 10)} to ${new Date(fetchTo).toISOString().slice(0, 10)}...`);
       const chunkDays = tf === '1m' ? 7 : 30;
       const chunkMs = chunkDays * 86_400_000;
-      let curr = start;
-      while (curr < fetchTo) {
-        const chunkEnd = Math.min(curr + chunkMs - 1, fetchTo);
-        try {
-          const candles = await binance.klinesRange(symbol, tf, curr, chunkEnd);
-          if (candles.length > 0) {
-            store.save(candles);
-            log(`Saved ${candles.length} candles for ${symbol} [${tf}] (${new Date(curr).toISOString().slice(0, 10)} to ${new Date(chunkEnd).toISOString().slice(0, 10)}).`);
+
+      for (const range of rangesToFetch) {
+        log(`Downloading ${symbol} [${tf}] from ${new Date(range.from).toISOString().slice(0, 10)} to ${new Date(range.to).toISOString().slice(0, 10)}...`);
+        let curr = range.from;
+        while (curr <= range.to) {
+          const chunkEnd = Math.min(curr + chunkMs - 1, range.to);
+          try {
+            const candles = await binance.klinesRange(symbol, tf, curr, chunkEnd);
+            if (candles.length > 0) {
+              store.save(candles);
+              log(`Saved ${candles.length} candles for ${symbol} [${tf}] (${new Date(curr).toISOString().slice(0, 10)} to ${new Date(chunkEnd).toISOString().slice(0, 10)}).`);
+            }
+          } catch (err) {
+            log(`Error fetching ${symbol} [${tf}] chunk: ${String(err)}`);
           }
-        } catch (err) {
-          log(`Error fetching ${symbol} [${tf}] chunk: ${String(err)}`);
+          curr = chunkEnd + tfMs;
         }
-        curr = chunkEnd + tfMs;
       }
     }
   }
