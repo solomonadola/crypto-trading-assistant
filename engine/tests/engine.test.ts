@@ -430,6 +430,57 @@ describe('limit pullback orders', () => {
     const out = e.onCandles([minute(futureTime, 105, 106, 104, 105)]);
     expect(out.some((x) => x.type === 'order_cancelled' && x.payload.reason === 'timeout_missed_pullback')).toBe(true);
   });
+
+  it('cancels a pending limit order manually', () => {
+    const e = engine();
+    e.onCandles([minute(at - 60_000, 104, 105.5, 103.8, 105)]);
+    const placed = e.onCommand({ type: 'open', symbol: 'BTCUSDT', side: 'long', price: 100, time: at, stop: 98, target: 110, orderType: 'limit' });
+    const orderId = placed[0].positionId!;
+    expect(e.account().pendingEntries).toHaveLength(1);
+
+    const cancelEvents = e.onCommand({ type: 'cancel', positionId: orderId });
+    expect(cancelEvents).toHaveLength(1);
+    expect(cancelEvents[0].type).toBe('order_cancelled');
+    expect(cancelEvents[0].payload.reason).toBe('manual_cancel');
+    expect(e.account().pendingEntries).toHaveLength(0);
+  });
+
+  it('cancels a pending limit order via close command as well', () => {
+    const e = engine();
+    e.onCandles([minute(at - 60_000, 104, 105.5, 103.8, 105)]);
+    const placed = e.onCommand({ type: 'open', symbol: 'BTCUSDT', side: 'long', price: 100, time: at, stop: 98, target: 110, orderType: 'limit' });
+    const orderId = placed[0].positionId!;
+
+    const closeEvents = e.onCommand({ type: 'close', positionId: orderId });
+    expect(closeEvents).toHaveLength(1);
+    expect(closeEvents[0].type).toBe('order_cancelled');
+    expect(closeEvents[0].payload.reason).toBe('manual_cancel');
+    expect(e.account().pendingEntries).toHaveLength(0);
+  });
+
+  it('edits a pending limit order levels and fills at the new levels', () => {
+    const e = engine();
+    e.onCandles([minute(at - 60_000, 104, 105.5, 103.8, 105)]);
+    const placed = e.onCommand({ type: 'open', symbol: 'BTCUSDT', side: 'long', price: 100, time: at, stop: 98, target: 110, orderType: 'limit' });
+    const orderId = placed[0].positionId!;
+
+    // Modify limit price to 101, stop to 99, target to 112
+    const modEvents = e.onCommand({ type: 'modify_pending', positionId: orderId, entry: 101, stop: 99, target: 112, price: 105 });
+    expect(modEvents.map((x) => x.type)).toEqual(['limit_moved', 'stop_moved', 'target_moved']);
+
+    const pending = e.account().pendingEntries[0];
+    expect(pending.price).toBe(101);
+    expect(pending.stop).toBe(99);
+    expect(pending.target).toBe(112);
+
+    // Candle pulls back to 100.5 (below 101, so it fills)
+    const fillEvents = e.onCandles([minute(at, 102, 103, 100.5, 102)]);
+    expect(fillEvents.some((x) => x.type === 'order_filled')).toBe(true);
+    const pos = e.positions()[0];
+    expect(pos.entryPrice).toBe(101);
+    expect(pos.stop).toBe(99);
+    expect(pos.target).toBe(112);
+  });
 });
 
 describe('limits the price is already through', () => {

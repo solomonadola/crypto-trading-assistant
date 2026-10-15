@@ -32,6 +32,11 @@ export function Overview({ go }: { go: (page: string, symbol?: string) => void }
     try { await post(`/api/positions/${encodeURIComponent(id)}/close`); reload(); } catch (e) { alert(e instanceof Error ? e.message : String(e)); }
   };
 
+  const cancelOrder = async (id: string) => {
+    if (!confirm('Cancel this pending limit order?')) return;
+    try { await post(`/api/positions/${encodeURIComponent(id)}/cancel`); reload(); } catch (e) { alert(e instanceof Error ? e.message : String(e)); }
+  };
+
   return (
     <div className="space-y-5">
       {acct?.circuitBreaker?.active && (
@@ -110,6 +115,26 @@ export function Overview({ go }: { go: (page: string, symbol?: string) => void }
                     <span>${e.notional.toFixed(0)}</span>
                     <span className="tabular">{duration((acct.time || Date.now()) - e.placedAt)} ago</span>
                     <Badge tone="accent">waiting pullback</Badge>
+                    <span className="flex gap-1">
+                      <EditPosition
+                        p={{
+                          id: e.positionId,
+                          symbol: e.symbol,
+                          side: e.side,
+                          entryPrice: e.price ?? 0,
+                          stop: e.stop ?? 0,
+                          target: e.target ?? null,
+                          isPending: true,
+                        }}
+                        onSaved={reload}
+                      />
+                      <button
+                        onClick={() => cancelOrder(e.positionId)}
+                        className="inline-flex items-center gap-1 rounded-lg border border-line px-2 py-1 text-xs text-ink-2 hover:border-critical hover:text-critical"
+                      >
+                        <X size={12} />Cancel
+                      </button>
+                    </span>
                   </div>
                 </div>
               ))}

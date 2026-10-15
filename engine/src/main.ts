@@ -607,15 +607,43 @@ app.post('/api/positions/:id/close', async (req, res) => {
   const symbol = engine.positions().find((p) => p.id === String(req.params.id))?.symbol;
   control(() => ({ type: 'close', positionId: String(req.params.id), price: symbol ? marks[symbol] : undefined, time: Date.now() }))(req, res);
 });
-// Edit an open position's stop and/or take-profit, checked against the mark price (or the live price when Binance is unreachable).
+// Cancel a pending limit order.
+app.post('/api/positions/:id/cancel', async (req, res) => {
+  const id = String(req.params.id);
+  control(() => ({ type: 'cancel', positionId: id }))(req, res);
+});
+// Edit an open position or pending limit order's stop and/or take-profit (and entry limit price for pending orders).
 app.post('/api/positions/:id/modify', async (req, res) => {
   const id = String(req.params.id);
-  const symbol = engine.positions().find((p) => p.id === id)?.symbol;
+  const openPos = engine.positions().find((p) => p.id === id);
+  const pendingEntry = !openPos ? engine.account().pendingEntries.find((e) => e.positionId === id) : undefined;
+  const symbol = openPos?.symbol ?? pendingEntry?.symbol;
   const marks = await markPrices();
   const b = req.body ?? {};
-  const num = (x: unknown) => (x === undefined ? undefined : Number(x));
+  const num = (x: unknown) => (x === undefined || x === '' || x === null ? undefined : Number(x));
   const target = b.target === undefined ? undefined : b.target === null || b.target === '' ? null : Number(b.target);
-  control(() => ({ type: 'modify', positionId: id, stop: num(b.stop), target, price: (symbol && (marks[symbol] ?? livePrices[symbol])) || 0, time: Date.now() }))(req, res);
+  const currentPrice = (symbol && (marks[symbol] ?? livePrices[symbol])) || 0;
+
+  if (pendingEntry) {
+    control(() => ({
+      type: 'modify_pending',
+      positionId: id,
+      entry: num(b.entry),
+      stop: num(b.stop),
+      target,
+      price: currentPrice,
+    }))(req, res);
+    return;
+  }
+
+  control(() => ({
+    type: 'modify',
+    positionId: id,
+    stop: num(b.stop),
+    target,
+    price: currentPrice,
+    time: Date.now(),
+  }))(req, res);
 });
 app.post('/api/control/kill', async (req, res) => {
   const prices = await markPrices();

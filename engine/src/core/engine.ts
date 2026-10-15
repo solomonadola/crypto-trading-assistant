@@ -96,7 +96,14 @@ export type EngineCommand =
    * take-profit they reach closes at once, the way an exchange's stop order would, instead of
    * waiting for the 1m candle to close.
    */
-  | { type: 'live_prices'; prices: Record<string, number>; time: number };
+  | { type: 'live_prices'; prices: Record<string, number>; time: number }
+  /** Cancel a pending entry (limit order not yet filled). */
+  | { type: 'cancel'; positionId: string }
+  /**
+   * Edit a pending entry's stop, take-profit, and/or limit price. `price` is the current market
+   * price: the stop must be on the losing side and the take-profit on the winning side.
+   */
+  | { type: 'modify_pending'; positionId: string; stop?: number; target?: number | null; entry?: number; price: number };
 
 export class CommandError extends Error {}
 
@@ -365,7 +372,16 @@ export class Engine {
     switch (cmd.type) {
       case 'close': {
         const pos = this.portfolio.get(cmd.positionId);
-        if (!pos) throw new CommandError(`No open position ${cmd.positionId}`);
+        if (!pos) {
+          const pend = this.portfolio.getPending(cmd.positionId);
+          if (pend) {
+            return [this.emit('order_cancelled', pend.positionId, pend.symbol, {
+              reason: 'manual_cancel',
+              placedAt: pend.placedAt,
+            })];
+          }
+          throw new CommandError(`No open position ${cmd.positionId}`);
+        }
         if (cmd.price !== undefined && cmd.price > 0) return [this.closeNow(pos, 'manual', cmd.price, cmd.time ?? this.clock)];
         if (pos.pendingClose) return [];
         return [this.closeOrder(pos, 'manual')];
@@ -389,6 +405,10 @@ export class Engine {
         return this.modify(cmd);
       case 'live_prices':
         return this.liveExits(cmd.prices, cmd.time);
+      case 'cancel':
+        return this.cancelPending(cmd);
+      case 'modify_pending':
+        return this.modifyPending(cmd);
       case 'reset_balance': {
         if (this.portfolio.positions().length || this.portfolio.pendingEntries().length) {
           throw new CommandError('Close all positions before resetting the balance');
@@ -427,6 +447,63 @@ export class Engine {
     const out: TradeEvent[] = [];
     if (stop !== p.stop) out.push(this.emit('stop_moved', p.id, p.symbol, { stop, reason: 'edited by hand' }, time));
     if (target !== p.target) out.push(this.emit('target_moved', p.id, p.symbol, { target, reason: 'edited by hand' }, time));
+    return out;
+  }
+
+  /** A pending limit order cancelled by hand. */
+  private cancelPending(cmd: Extract<EngineCommand, { type: 'cancel' }>): TradeEvent[] {
+    const pend = this.portfolio.getPending(cmd.positionId);
+    if (!pend) {
+      if (this.portfolio.get(cmd.positionId)) {
+        throw new CommandError(`Position ${cmd.positionId} has already filled and is open; close it instead of cancelling`);
+      }
+      throw new CommandError(`No pending order ${cmd.positionId}`);
+    }
+    return [this.emit('order_cancelled', pend.positionId, pend.symbol, {
+      reason: 'manual_cancel',
+      placedAt: pend.placedAt,
+    })];
+  }
+
+  /** A pending limit order's limit entry price, stop and/or take-profit edited by hand. */
+  private modifyPending(cmd: Extract<EngineCommand, { type: 'modify_pending' }>): TradeEvent[] {
+    const e = this.portfolio.getPending(cmd.positionId);
+    if (!e) throw new CommandError(`No pending order ${cmd.positionId}`);
+    const s = sign(e.side);
+    const entry = cmd.entry !== undefined && Number.isFinite(cmd.entry) && cmd.entry > 0 ? cmd.entry : e.refPrice;
+    const stop = cmd.stop !== undefined && Number.isFinite(cmd.stop) && cmd.stop > 0 ? cmd.stop : e.stop;
+    const target = cmd.target === undefined ? e.target : cmd.target === null || cmd.target === 0 ? null : cmd.target;
+
+    if (!(entry > 0) || !Number.isFinite(entry)) throw new CommandError('Limit price must be a positive number');
+    if (!(stop > 0) || !Number.isFinite(stop)) throw new CommandError('Stop must be a positive number');
+    if (s * (entry - stop) <= 0) {
+      throw new CommandError(`The stop must be ${e.side === 'long' ? 'below' : 'above'} the limit entry price (${entry})`);
+    }
+    if (target !== null) {
+      if (!Number.isFinite(target) || target <= 0) throw new CommandError('Target must be a positive number');
+      if (s * (target - entry) <= 0) {
+        throw new CommandError(`The take-profit must be ${e.side === 'long' ? 'above' : 'below'} the limit entry price (${entry})`);
+      }
+      const speed = buildContext(this.market, e.symbol, this.clock, this.cfg, this.funding.get(e.symbol) ?? null)?.speed ?? 'normal';
+      const rr = netRewardRisk(entry, stop, target, roundTripPct(costsFor(this.cfg, speed)));
+      if (rr < this.cfg.exits.min_rr) {
+        throw new CommandError(`Reward:risk is ${rr.toFixed(2)}R after costs; at least ${this.cfg.exits.min_rr}R is needed`);
+      }
+    }
+    if (cmd.price > 0 && s * (cmd.price - stop) <= 0) {
+      throw new CommandError(`The price ${cmd.price} is already ${e.side === 'long' ? 'below' : 'above'} the stop ${stop}`);
+    }
+
+    const out: TradeEvent[] = [];
+    if (entry !== e.refPrice) {
+      out.push(this.emit('limit_moved', e.positionId, e.symbol, { price: entry, reason: 'edited by hand' }));
+    }
+    if (stop !== e.stop) {
+      out.push(this.emit('stop_moved', e.positionId, e.symbol, { stop, reason: 'edited by hand' }));
+    }
+    if (target !== e.target) {
+      out.push(this.emit('target_moved', e.positionId, e.symbol, { target, reason: 'edited by hand' }));
+    }
     return out;
   }
 

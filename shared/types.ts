@@ -48,6 +48,7 @@ export type TradeEventType =
   | 'order_cancelled'
   | 'stop_moved'
   | 'target_moved'
+  | 'limit_moved'
   | 'partial_closed'
   | 'funding_charged'
   | 'position_closed'

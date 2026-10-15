@@ -171,12 +171,15 @@ The engine will:
 # See open trades
 curl http://localhost:3009/api/trades | jq
 
-# Modify stop/target on a trade
+# Modify stop/target on a trade (or limit price/stop/target on a pending order)
 curl -X POST http://localhost:3009/api/positions/<trade-id>/modify \
   -H 'Content-Type: application/json' \
   -d '{ "stop": 61000, "target": 74000 }'
 
-# Close a trade at market
+# Cancel a pending limit order
+curl -X POST http://localhost:3009/api/positions/<order-id>/cancel
+
+# Close an open trade at market
 curl -X POST http://localhost:3009/api/positions/<trade-id>/close \
   -H 'Content-Type: application/json' \
   -d '{}'
@@ -346,8 +349,9 @@ Reports are written to `data/backtest/` with metrics: win rate, profit factor, m
 | GET | `/api/results` | Trade results and statistics (`?from=&to=`) |
 | GET | `/api/forward-test` | Forward test results |
 | POST | `/api/positions/open` | Open a manual trade (body: `{ symbol, side, stop, target, note? }`) |
-| POST | `/api/positions/:id/close` | Close a position (`{ price? }` for market close at a specific price) |
-| POST | `/api/positions/:id/modify` | Edit stop/target (`{ stop?, target? }`) |
+| POST | `/api/positions/:id/close` | Close an open position (`{ price? }` for market close) or cancel a pending order |
+| POST | `/api/positions/:id/cancel` | Cancel a pending limit order |
+| POST | `/api/positions/:id/modify` | Edit stop/target on an open position or limit entry price/stop/target on a pending order (`{ entry?, stop?, target? }`) |
 
 ### Setups & Signals
 

@@ -73,7 +73,7 @@ function Dialog({ symbol, defaults, onClose }: { symbol: string; defaults: TakeD
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [filled, setFilled] = useState<Filled | null>(null);
-  const [pendingOrder, setPendingOrder] = useState<{ entryPrice: number; stop: number; target: number | null } | null>(null);
+  const [pendingOrder, setPendingOrder] = useState<{ entryPrice: number; stop: number; target: number | null; positionId?: string } | null>(null);
 
   // Auto-fill planned key level if entry is blank
   useEffect(() => {
@@ -378,7 +378,7 @@ function Dialog({ symbol, defaults, onClose }: { symbol: string; defaults: TakeD
     setBusy(true);
     setError(null);
     try {
-      const r = await post<{ fill?: Filled & { notional: number }; pending?: boolean; entryPrice?: number }>('/api/positions/open', {
+      const r = await post<{ fill?: Filled & { notional: number }; pending?: boolean; entryPrice?: number; positionId?: string }>('/api/positions/open', {
         symbol,
         side,
         entry: effectiveEntry !== null ? effectiveEntry : undefined,
@@ -390,7 +390,7 @@ function Dialog({ symbol, defaults, onClose }: { symbol: string; defaults: TakeD
         entryTimeoutMin: defaults.entryTimeoutMin,
       });
       if (r.pending) {
-        setPendingOrder({ entryPrice: r.entryPrice ?? effectiveEntry!, stop: s, target: t });
+        setPendingOrder({ entryPrice: r.entryPrice ?? effectiveEntry!, stop: s, target: t, positionId: r.positionId });
       } else if (r.fill) {
         setFilled(r.fill);
       }
@@ -427,7 +427,28 @@ function Dialog({ symbol, defaults, onClose }: { symbol: string; defaults: TakeD
                 🛡️ <b>Disciplined Pullback Execution:</b> Market price was not chased. If price takes off without pulling back to the key level, the order expires safely without FOMO ("if we miss it that is it").
               </div>
             </div>
-            <button onClick={onClose} className="w-full rounded-xl bg-accent px-4 py-2 text-sm font-semibold text-white hover:brightness-110">Done</button>
+            <div className="flex gap-2">
+              <button onClick={onClose} className="flex-1 rounded-xl bg-accent px-4 py-2 text-sm font-semibold text-white hover:brightness-110">Done</button>
+              {pendingOrder.positionId && (
+                <button
+                  onClick={async () => {
+                    if (!confirm('Cancel this pending limit order?')) return;
+                    setBusy(true);
+                    try {
+                      await post(`/api/positions/${encodeURIComponent(pendingOrder.positionId!)}/cancel`);
+                      onClose();
+                    } catch (e) {
+                      setError(e instanceof Error ? e.message : String(e));
+                    } finally {
+                      setBusy(false);
+                    }
+                  }}
+                  className="rounded-xl border border-line px-3 py-2 text-xs text-ink-2 hover:border-critical hover:text-critical"
+                >
+                  Cancel Order
+                </button>
+              )}
+            </div>
           </div>
         ) : filled ? (
           <div className="space-y-3 text-sm">

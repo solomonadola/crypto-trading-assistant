@@ -188,14 +188,28 @@ export class Portfolio {
       }
       case 'stop_moved': {
         const pos = id ? this.open.get(id) : undefined;
-        if (!pos) return;
+        if (!pos) {
+          const pend = id ? this.pending.get(id) : undefined;
+          if (pend) pend.stop = Number(p.stop);
+          return;
+        }
         pos.stop = Number(p.stop);
         if (typeof p.ladderStep === 'number') pos.ladderStep = p.ladderStep;
         return;
       }
       case 'target_moved': {
         const pos = id ? this.open.get(id) : undefined;
-        if (pos) pos.target = p.target === null ? null : Number(p.target);
+        if (!pos) {
+          const pend = id ? this.pending.get(id) : undefined;
+          if (pend) pend.target = p.target === null ? null : Number(p.target);
+          return;
+        }
+        pos.target = p.target === null ? null : Number(p.target);
+        return;
+      }
+      case 'limit_moved': {
+        const pend = id ? this.pending.get(id) : undefined;
+        if (pend) pend.refPrice = Number(p.price);
         return;
       }
       case 'partial_closed': {
@@ -282,6 +296,20 @@ export class Portfolio {
 
   pendingEntries(): PendingEntry[] {
     return [...this.pending.values()].map((p) => ({ ...p }));
+  }
+
+  getPending(id: string): PendingEntry | undefined {
+    const p = this.pending.get(id);
+    return p && { ...p };
+  }
+
+  /** Mutate a pending entry's stop, target or refPrice in place (after an edit-pending command). */
+  modifyPending(id: string, patch: { stop?: number; target?: number | null; refPrice?: number }): void {
+    const p = this.pending.get(id);
+    if (!p) return;
+    if (patch.stop !== undefined) p.stop = patch.stop;
+    if (patch.target !== undefined) p.target = patch.target;
+    if (patch.refPrice !== undefined) p.refPrice = patch.refPrice;
   }
 
   closedTrades(): ClosedTrade[] {
