@@ -17,12 +17,14 @@ import { replayCandles } from './feed/replayFeed';
 import { CommandError, Engine, type EngineCommand } from './core/engine';
 import { Results } from './storage/results';
 import { SignalLog } from './storage/signals';
+import { TradeJournalStore } from './storage/journal';
+import type { JournalEntry } from '../../shared/types';
 import { FirestoreBackup, type BackupState } from './storage/firestoreBackup';
 import { backupToFile } from './storage/fileBackup';
 import { HISTORY_TABLES, insertRows, lastKey, rowsAfter } from './storage/history';
 import { authSettings, requireSignIn } from './api/auth';
 import { unrealized } from './risk';
-import { summarize } from './stats';
+import { forwardTestStats, summarize } from './stats';
 import { noticesFor } from './notices';
 import { scan, scanVolumeSurgeRunners, type ScanResult } from './scanner';
 import { resolveSymbol } from './symbols';
@@ -37,6 +39,9 @@ import { TIMEFRAME_MS, type Candle, type Timeframe, type WarningNotice, type Dir
 import { PatternMemory } from './analysis/patternMemory';
 import { diagnoseVolume } from './analysis/volumeDiagnosis';
 import { analyzeVolumeSurge } from './analysis/volumeSurge';
+import { autopilotCandles, settledPrices } from './autopilot';
+import { decideScalp } from './strategy/scalpAutopilot';
+import { costsFor, roundTripPct } from './speed';
 
 dotenv.config({ path: ['.env.local', '.env'], quiet: true });
 
@@ -56,11 +61,12 @@ const config = loadConfig();
 const hash = configHash(config);
 const dbPath = process.env.ENGINE_DB_PATH || config.storage.path;
 const db = openDb(dbPath);
-let quantAutopilot = getKv(db, QUANT_AUTOPILOT_KEY) !== 'false';
+let quantAutopilot = config.scalp_autopilot.enabled && getKv(db, QUANT_AUTOPILOT_KEY) !== 'false';
 const store = new CandleStore(db);
 const events = new EventLog(db);
 const signals = new SignalLog(db);
 const results = new Results(db);
+const journalStore = new TradeJournalStore(db);
 const client = new BinancePublic({
   restBase: config.feed.rest_base,
   timeoutMs: config.feed.request_timeout_ms,
@@ -253,7 +259,14 @@ async function pollPrices(): Promise<void> {
 /** Closes positions whose stop or take-profit the live price has reached, without waiting for the 1m candle to close. */
 function liveExits(): void {
   if (!started || backup.standby || !engine.positions().length) return;
-  const produced = commandTx({ type: 'live_prices', prices: livePrices, time: Date.now() });
+  // Not before the engine has processed the candles up to now: those settle any stop hit meanwhile at the stop.
+  const prices = settledPrices(livePrices, {
+    engineClock: engine.now(),
+    lastMinuteClose: (s) => { const open = store.lastOpenTime(s, '1m'); return open === null ? null : open + TIMEFRAME_MS['1m']; },
+    now: Date.now(),
+  });
+  if (!Object.keys(prices).length) return;
+  const produced = commandTx({ type: 'live_prices', prices, time: Date.now() });
   if (!produced.length) return;
   for (const e of produced) console.log(`[live] ${e.type} ${e.symbol ?? ''} ${JSON.stringify(e.payload)}`);
   ideaCache.clear();
@@ -467,6 +480,31 @@ app.get('/api/trades', (req, res) => {
   const limit = Math.min(Number(req.query.limit) || 200, 2000);
   res.json(engine.closedTrades().slice(-limit).reverse());
 });
+app.get('/api/journal', (_req, res) => {
+  res.json(journalStore.getAll());
+});
+app.get('/api/journal/:id', (req, res) => {
+  const entry = journalStore.get(req.params.id);
+  if (!entry) {
+    res.status(404).json({ error: 'Journal entry not found' });
+    return;
+  }
+  res.json(entry);
+});
+app.post('/api/journal/:id', (req, res) => {
+  const tradeId = req.params.id;
+  const { rating, tags, notes, ata } = req.body || {};
+  const entry: JournalEntry = {
+    tradeId,
+    rating: Number(rating) || 0,
+    tags: Array.isArray(tags) ? tags : [],
+    notes: String(notes || ''),
+    ata: ata && typeof ata === 'object' ? ata : undefined,
+    updatedAt: Date.now(),
+  };
+  journalStore.save(entry);
+  res.json({ ok: true, entry });
+});
 app.get('/api/events', (req, res) => {
   const positionId = req.query.position ? String(req.query.position) : null;
   res.json(positionId ? events.forPosition(positionId) : events.after(Math.max(0, events.lastId() - (Number(req.query.limit) || 200))).reverse());
@@ -526,7 +564,12 @@ app.post('/api/positions/open', async (req, res) => {
     const customEntry = (b.entry !== null && b.entry !== undefined && b.entry !== '') ? Number(b.entry) : null;
     const entryPrice = (customEntry && Number.isFinite(customEntry) && customEntry > 0) ? customEntry : mark;
     const orderType = (b.orderType === 'market') ? 'market' : 'limit';
-    const produced = command({ type: 'open', symbol, side, price: entryPrice, time: Date.now(), stop, target, orderType, note: b.note ? String(b.note) : undefined });
+    // Scalps taken from the Scalp page carry their timeframe's max hold and entry timeout.
+    const minutes = (x: unknown) => { const n = Number(x); return Number.isFinite(n) && n > 0 ? Math.round(n) : undefined; };
+    const produced = command({
+      type: 'open', symbol, side, price: entryPrice, time: Date.now(), stop, target, orderType, note: b.note ? String(b.note) : undefined,
+      maxHoldMin: minutes(b.maxHoldMin), entryTimeoutMin: minutes(b.entryTimeoutMin),
+    });
     for (const e of produced) console.log(`[manual] ${e.type} ${e.symbol ?? ''} ${JSON.stringify(e.payload)}`);
     void pushToCloud();
     // Its candles are needed from now on for the stop and target.
@@ -564,23 +607,53 @@ app.post('/api/positions/:id/close', async (req, res) => {
   const symbol = engine.positions().find((p) => p.id === String(req.params.id))?.symbol;
   control(() => ({ type: 'close', positionId: String(req.params.id), price: symbol ? marks[symbol] : undefined, time: Date.now() }))(req, res);
 });
-// Edit an open position's stop and/or take-profit, checked against the mark price (or the live price when Binance is unreachable).
+// Cancel a pending limit order.
+app.post('/api/positions/:id/cancel', async (req, res) => {
+  const id = String(req.params.id);
+  control(() => ({ type: 'cancel', positionId: id }))(req, res);
+});
+// Edit an open position or pending limit order's stop and/or take-profit (and entry limit price for pending orders).
 app.post('/api/positions/:id/modify', async (req, res) => {
   const id = String(req.params.id);
-  const symbol = engine.positions().find((p) => p.id === id)?.symbol;
+  const openPos = engine.positions().find((p) => p.id === id);
+  const pendingEntry = !openPos ? engine.account().pendingEntries.find((e) => e.positionId === id) : undefined;
+  const symbol = openPos?.symbol ?? pendingEntry?.symbol;
   const marks = await markPrices();
   const b = req.body ?? {};
-  const num = (x: unknown) => (x === undefined ? undefined : Number(x));
+  const num = (x: unknown) => (x === undefined || x === '' || x === null ? undefined : Number(x));
   const target = b.target === undefined ? undefined : b.target === null || b.target === '' ? null : Number(b.target);
-  control(() => ({ type: 'modify', positionId: id, stop: num(b.stop), target, price: (symbol && (marks[symbol] ?? livePrices[symbol])) || 0, time: Date.now() }))(req, res);
+  const currentPrice = (symbol && (marks[symbol] ?? livePrices[symbol])) || 0;
+
+  if (pendingEntry) {
+    control(() => ({
+      type: 'modify_pending',
+      positionId: id,
+      entry: num(b.entry),
+      stop: num(b.stop),
+      target,
+      price: currentPrice,
+    }))(req, res);
+    return;
+  }
+
+  control(() => ({
+    type: 'modify',
+    positionId: id,
+    stop: num(b.stop),
+    target,
+    price: currentPrice,
+    time: Date.now(),
+  }))(req, res);
 });
 app.post('/api/control/kill', async (req, res) => {
   const prices = await markPrices();
   control(() => ({ type: 'kill', reason: 'manual kill', prices, time: Date.now() }))(req, res);
 });
 app.post('/api/control/pause', control(() => ({ type: 'pause', reason: 'paused from the dashboard' })));
-app.post('/api/control/resume', control(() => ({ type: 'resume' })));
-app.post('/api/control/reset', control((req) => ({ type: 'reset_balance', balance: Number(req.body?.balance) || undefined })));
+app.post('/api/control/reset', control((req) => {
+  const b = Number(req.body?.balance);
+  return { type: 'reset_balance', balance: b > 0 ? b : undefined };
+}));
 
 app.get('/api/sessions', (req, res) => {
   const to = Number(req.query.to) || engine.now() || Date.now();
@@ -813,11 +886,12 @@ function scalpsFor(symbol: string, tf: '1m' | '5m' | '15m' = '5m'): ScalpSetup[]
   const from = candles[0]?.openTime ?? lastOpen;
   const sessionOpens = engine.sessions.between(from, lastOpen + 300_000)
     .filter((sn) => sn.name === 'london' || sn.name === 'newyork').map((sn) => sn.openTime);
+  const costPct = roundTripPct(costsFor(config, engine.speed(symbol)));
   const setups = findScalps(candles, {
     symbol,
     bias1h: chartReading(symbol, '1h')?.trend?.direction ?? 'range',
     sessionOpens,
-    costPct: SCALP_COST_PCT,
+    costPct,
   }).filter((x) => x.time >= lastOpen - SCALP_HOURS * 3_600_000);
   scalpCache.set(cacheKey, { asOf: lastOpen, setups });
   return setups;
@@ -826,91 +900,88 @@ const autoPlacedScalps = new Set<string>();
 
 function runQuantAutopilot(batch: Candle[]): void {
   if (!quantAutopilot || !started || backup.standby || engine.account().halted) return;
-  // Scalp autopilot focuses on robust 5m and 15m timeframes (1m is left for manual sniping to avoid erratic noise)
-  const candidates = batch.filter((c) => c.tf === '5m' || c.tf === '15m');
-  if (!candidates.length) return;
-
+  const auto = config.scalp_autopilot;
   const currentHeld = new Set([
     ...engine.positions().map((p) => p.symbol),
     ...engine.account().pendingEntries.map((p) => p.symbol),
   ]);
+  // Just-closed candles of the scanner's coins only: never a replay after a restart or a feed gap.
+  const candidates = autopilotCandles(batch, { config: auto, universe: new Set(universe), held: currentHeld, now: Date.now() });
 
   for (const c of candidates) {
     if (currentHeld.has(c.symbol)) continue;
     const tf = c.tf as '5m' | '15m';
-    const setups = scalpsFor(c.symbol, tf);
-    // Find open setup triggered on this exact closed candle, MUST be aligned with the 1h trend!
-    const fresh = setups.find((s) => s.status === 'open' && s.time === c.openTime && s.withTrend);
-    if (!fresh) continue;
 
-    const stopPct = (Math.abs(fresh.entry - fresh.stop) / fresh.entry) * 100;
-    // Reject wide-stop setups on autopilot (max 2.2% stop distance to avoid high-volatility spikes)
-    if (stopPct > 2.2) {
-      console.log(`[quant-autopilot] Skip ${fresh.symbol}: stop too wide (${stopPct.toFixed(2)}% > 2.2%)`);
+    const count = tf === '15m' ? (SCALP_HOURS * 4) + 60 : (SCALP_HOURS * 12) + 72;
+    const candles = store.latest(c.symbol, tf, count);
+    const candles1h = store.latest(c.symbol, '1h', 200);
+    const btc1h = store.latest('BTCUSDT', '1h', 2);
+    const from = candles[0]?.openTime ?? c.openTime;
+    const sessionOpens = engine.sessions.between(from, c.openTime + 300_000)
+      .filter((sn) => sn.name === 'london' || sn.name === 'newyork').map((sn) => sn.openTime);
+    const speed = engine.speed(c.symbol);
+    const costPct = roundTripPct(costsFor(config, speed));
+
+    const decision = decideScalp({
+      symbol: c.symbol,
+      tf,
+      candles,
+      candles1h,
+      btc1h,
+      sessionOpens,
+      costPct,
+      now: c.closeTime,
+      config: auto,
+    });
+
+    if (!decision.order) {
+      if (decision.skipped && decision.skipped !== 'no_fresh_setup') {
+        console.log(`[quant-autopilot] Skip ${c.symbol}: ${decision.skipped}`);
+      }
       continue;
     }
 
-    // Guard against active market traps (e.g. failed breakouts / bull traps, blowoffs, dumping BTC, ADR exhaustion)
-    const watch = watchFor(fresh.symbol);
-    if (watch) {
-      const opposingTrap = watch.warnings.find((w) =>
-        (w.level === 'danger' && (w.side === fresh.side || w.side === 'both')) ||
-        (w.code === 'failed_high' && fresh.side === 'long') ||
-        (w.code === 'failed_low' && fresh.side === 'short') ||
-        (w.code === 'pump_blowoff' && fresh.side === 'long') ||
-        (w.code === 'pump_unwinding' && fresh.side === 'long') ||
-        (w.code === 'dumping' && fresh.side === 'long')
-      );
-      if (opposingTrap) {
-        console.log(`[quant-autopilot] Skip ${fresh.symbol}: active watch warning ${opposingTrap.code} (${opposingTrap.title})`);
-        continue;
-      }
-      if (watch.adr && watch.adr.usedPct >= 85) {
-        console.log(`[quant-autopilot] Skip ${fresh.symbol}: ADR exhausted (${watch.adr.usedPct.toFixed(1)}% >= 85%)`);
-        continue;
-      }
-    }
-
-    const key = `${fresh.symbol}|${fresh.time}|${fresh.kind}|${fresh.side}`;
+    const o = decision.order;
+    const key = `${o.symbol}|${c.openTime}|${o.kind}|${o.side}`;
     if (autoPlacedScalps.has(key)) continue;
 
-    // Use Key Level limit price if available, waiting for pullback rather than chasing candle close
-    const limitPrice = (fresh.keyLevel && Number.isFinite(fresh.keyLevel))
-      ? (fresh.side === 'long' ? Math.min(fresh.keyLevel, fresh.entry) : Math.max(fresh.keyLevel, fresh.entry))
-      : fresh.entry;
-
-    console.log(`[quant-autopilot] Auto-executing ${fresh.symbol} ${fresh.side} [${fresh.tf ?? tf}] ${fresh.kind} limit pullback @ ${limitPrice}`);
+    console.log(`[quant-autopilot] Auto-executing ${o.symbol} ${o.side} [${o.tf}] ${o.kind} limit pullback @ ${o.limitPrice}`);
     try {
       const produced = command({
         type: 'open',
-        symbol: fresh.symbol,
-        side: fresh.side,
-        price: limitPrice,
-        time: c.closeTime + 1,
-        stop: fresh.stop,
-        target: fresh.target,
+        symbol: o.symbol,
+        side: o.side,
+        price: o.limitPrice,
+        // At the close: the next 1m candle, which opens then, can fill it.
+        time: c.closeTime,
+        stop: o.stop,
+        target: o.target,
         orderType: 'limit',
-        note: `Quant Autopilot [${fresh.tf ?? tf}]: ${SCALP_LABEL[fresh.kind]}`,
+        note: o.note,
+        // The engine checks it as the autopilot's (session, stop width, costs, funding, BTC, daily range) and records it as "scalp".
+        setup: 'scalp',
+        maxHoldMin: o.maxHoldMin,
+        entryTimeoutMin: o.entryTimeoutMin,
       });
       autoPlacedScalps.add(key);
       if (autoPlacedScalps.size > 500) {
         const first = autoPlacedScalps.values().next().value;
         if (first) autoPlacedScalps.delete(first);
       }
-      currentHeld.add(fresh.symbol);
+      currentHeld.add(o.symbol);
       for (const e of produced) console.log(`[quant-autopilot] ${e.type} ${e.symbol ?? ''} ${JSON.stringify(e.payload)}`);
       broadcast('warning', {
-        symbol: fresh.symbol,
+        symbol: o.symbol,
         code: 'autopilot_entry',
         level: 'caution',
-        side: fresh.side,
-        title: `Autopilot: Limit Pullback Placed [${fresh.tf ?? tf}]`,
-        detail: `${SCALP_LABEL[fresh.kind]} limit placed at ${limitPrice}. Waiting for pullback (stop ${fresh.stop}, target ${fresh.target}).`,
+        side: o.side,
+        title: `Autopilot: Limit Pullback Placed [${o.tf}]`,
+        detail: `${SCALP_LABEL[o.kind]} limit placed at ${o.limitPrice}. Waiting for pullback (stop ${o.stop}, target ${o.target}).`,
         time: Date.now(),
         phase: null,
       } satisfies WarningNotice);
     } catch (err) {
-      console.log(`[quant-autopilot] Order not opened for ${fresh.symbol}: ${message(err)}`);
+      console.log(`[quant-autopilot] Order not opened for ${o.symbol}: ${message(err)}`);
     }
   }
 }
@@ -933,7 +1004,10 @@ app.get('/api/scalp', (req, res) => {
   const reqTf = String(req.query.tf || 'all');
   const tfs: ('1m' | '5m' | '15m')[] = reqTf === '1m' ? ['1m'] : reqTf === '5m' ? ['5m'] : reqTf === '15m' ? ['15m'] : ['1m', '5m', '15m'];
   const setups = listed().flatMap((sym) => tfs.flatMap((tf) => scalpsFor(sym, tf))).sort((a, b) => b.time - a.time);
-  res.json({ hours: SCALP_HOURS, costPct: SCALP_COST_PCT, setups, stats: scalpStats(setups), autopilot: quantAutopilot });
+  res.json({
+    hours: SCALP_HOURS, costPct: SCALP_COST_PCT, setups, stats: scalpStats(setups), autopilot: quantAutopilot,
+    maxHoldMin: config.scalp_autopilot.max_hold_min, entryTimeoutMin: config.scalp_autopilot.entry_timeout_min,
+  });
 });
 app.get('/api/scalp/:symbol', (req, res) => {
   const sym = req.params.symbol.toUpperCase();
@@ -1030,6 +1104,24 @@ app.get('/api/market', (_req, res) => {
           checksMet: decided.filter((c) => c.ok).length, checksDecided: decided.length, quality: idea.quality,
           speed: idea.speed, movingFast: idea.movingFast, pdPosition: idea.dealingRange?.position ?? null,
         };
+      })(),
+      htfPoi: (() => {
+        const pts = engine.htfPoints(symbol);
+        const curPrice = last?.close;
+        if (!pts || curPrice == null || curPrice <= 0) return null;
+        const all = [
+          ...pts.long.map((p) => ({ ...p, dir: 'long' as const })),
+          ...pts.short.map((p) => ({ ...p, dir: 'short' as const })),
+        ];
+        if (!all.length) return null;
+        const withDist = all.map((p) => {
+          const inPoi = curPrice >= p.low && curPrice <= p.high;
+          const distPrice = inPoi ? 0 : curPrice > p.high ? curPrice - p.high : p.low - curPrice;
+          const distPct = (distPrice / curPrice) * 100;
+          return { kind: p.kind, dir: p.dir, low: p.low, high: p.high, inPoi, distPct };
+        });
+        withDist.sort((a, b) => a.distPct - b.distPct);
+        return withDist[0];
       })(),
     };
   }));
@@ -1191,6 +1283,10 @@ app.get('/api/results', (req, res) => {
     followed: summarize(followed),
     skipped: summarize(followed.filter((x) => !x.taken)),
   });
+});
+// Forward-testing benchmark vs live paper monitor (ROADMAP.md Step 4).
+app.get('/api/forward-test', (_req, res) => {
+  res.json(forwardTestStats(engine.closedTrades(), engine.account().drawdownPct));
 });
 app.get('/api/signals/summary', (req, res) => {
   const hours = Number(req.query.hours) || 24;

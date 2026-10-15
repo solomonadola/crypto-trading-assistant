@@ -288,6 +288,31 @@ describe('simulated trading, end to end', () => {
     expect(sigs[1]).toMatchObject({ reason: 'target', payload: { armedId: 'a1', outcome: 'target', exit: 104 } });
   });
 
+  it('a shadow the price never comes back to before the limit times out never happened', () => {
+    const e = engine();
+    (e as unknown as { shadows: unknown[] }).shadows.push({
+      armedId: 'a3', working: false, signalTime: T, symbol: 'SOLUSDT', direction: 'long', signalStatus: 'taken', signalReason: null,
+      plan: { entry: 100, stop: 98, stopDistancePct: 2, target: 104, targetSource: 't', rewardRisk: 2 }, sessionClose: T + 86_400_000,
+      filled: false, fillBy: T + 2 * 60_000,
+    });
+    e.onCandles([minute(0, 101, 102, 100.5, 101.5)]);           // above the entry: waiting
+    e.onCandles([minute(1, 101.5, 103, 101, 102.5)]);           // still above at the timeout
+    expect(e.takeSignals().map((s) => [s.status, s.reason])).toEqual([['expired', 'not_filled']]);
+    expect(e.takeShadowResults()).toEqual([]);
+  });
+
+  it('a shadow whose target prints before its entry does is not counted as a win', () => {
+    const e = engine();
+    (e as unknown as { shadows: unknown[] }).shadows.push({
+      armedId: 'a4', working: false, signalTime: T, symbol: 'SOLUSDT', direction: 'long', signalStatus: 'taken', signalReason: null,
+      plan: { entry: 100, stop: 98, stopDistancePct: 2, target: 104, targetSource: 't', rewardRisk: 2 }, sessionClose: T + 86_400_000,
+      filled: false, fillBy: T + 30 * 60_000,
+    });
+    e.onCandles([minute(0, 101, 104.5, 100.5, 104)]);
+    expect(e.takeSignals().map((s) => [s.status, s.reason])).toEqual([['expired', 'target_reached_before_fill']]);
+    expect(e.takeShadowResults()).toEqual([]);
+  });
+
   it('a candle that reaches 1R and the stop counts as stopped, not working', () => {
     const e = engine();
     (e as unknown as { shadows: unknown[] }).shadows.push({

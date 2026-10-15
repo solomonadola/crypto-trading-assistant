@@ -34,6 +34,7 @@ export class CandleStore {
   private readonly selectLast;
   private readonly selectRange;
   private readonly selectLatest;
+  private readonly selectBounds;
 
   constructor(private readonly db: DB) {
     this.upsert = db.prepare(`INSERT INTO candles (symbol, tf, open_time, open, high, low, close, volume, quote_volume, trades)
@@ -41,6 +42,7 @@ export class CandleStore {
       ON CONFLICT(symbol, tf, open_time) DO UPDATE SET open = excluded.open, high = excluded.high, low = excluded.low,
         close = excluded.close, volume = excluded.volume, quote_volume = excluded.quote_volume, trades = excluded.trades`);
     this.selectLast = db.prepare('SELECT MAX(open_time) AS t FROM candles WHERE symbol = ? AND tf = ?');
+    this.selectBounds = db.prepare('SELECT MIN(open_time) AS min, MAX(open_time) AS max FROM candles WHERE symbol = ? AND tf = ?');
     this.selectRange = db.prepare(
       'SELECT * FROM candles WHERE symbol = ? AND tf = ? AND open_time >= ? AND open_time <= ? ORDER BY open_time');
     this.selectLatest = db.prepare(
@@ -62,6 +64,12 @@ export class CandleStore {
   /** Open time of the newest stored candle, or null. */
   lastOpenTime(symbol: string, tf: Timeframe): number | null {
     return (this.selectLast.get(symbol, tf) as { t: number | null }).t;
+  }
+
+  /** Earliest and latest open time stored for this symbol and timeframe. */
+  bounds(symbol: string, tf: Timeframe): { min: number | null; max: number | null } {
+    const row = this.selectBounds.get(symbol, tf) as { min: number | null; max: number | null } | undefined;
+    return { min: row?.min ?? null, max: row?.max ?? null };
   }
 
   /** Candles with open time in [from, to], oldest first. */

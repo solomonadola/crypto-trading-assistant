@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { SessionCalendar, localToUtc } from '../src/sessions';
 import { loadConfig, type EngineConfig } from '../src/config';
 
-// The calendar tests use whole sessions, no weekend rule and no killzones; each case switches on what it tests.
-const base = { ...loadConfig('engine/config/config.yaml').sessions, weekdays_only: false, exit_at_session_end: true, killzones: [] };
+// The calendar tests use whole sessions, no weekend rule, no entry delay and no killzones; each case switches on what it tests.
+const base = { ...loadConfig('engine/config/config.yaml').sessions, entry_delay_min: 0, weekdays_only: false, exit_at_session_end: true, killzones: [] };
 const cal = (over: Partial<EngineConfig['sessions']> = {}) => new SessionCalendar({ ...base, ...over });
 const u = (iso: string) => Date.parse(iso);
 const iso = (t: number | undefined) => (t === undefined ? undefined : new Date(t).toISOString().slice(0, 16) + 'Z');

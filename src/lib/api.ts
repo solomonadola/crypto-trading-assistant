@@ -1,13 +1,14 @@
 // Talking to the engine: typed GETs, control POSTs, and a polling hook.
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { AccountSummary, Candle, ClosedTradeView, FeedStatus, PatternFeatureStat, PatternMatch, PatternMemoryReport, PatternVerdict, RunnerStage, ShadowResult, SignalRecord, TradeIdea, VolumeSurgeReport, VolumeSurgeRunner } from '../../shared/types';
+import type { AccountSummary, AtaReflection, Candle, ClosedTradeView, FeedStatus, JournalEntry, PatternFeatureStat, PatternMatch, PatternMemoryReport, PatternVerdict, RunnerStage, ShadowResult, SignalRecord, TradeIdea, VolumeSurgeReport, VolumeSurgeRunner } from '../../shared/types';
 import { idToken } from './auth';
 
-export type { AccountSummary, Candle, ClosedTradeView, PatternFeatureStat, PatternMatch, PatternMemoryReport, PatternVerdict, RunnerStage, ShadowResult, SignalRecord, TradeIdea, VolumeSurgeReport, VolumeSurgeRunner };
+export type { AccountSummary, AtaReflection, Candle, ClosedTradeView, JournalEntry, PatternFeatureStat, PatternMatch, PatternMemoryReport, PatternVerdict, RunnerStage, ShadowResult, SignalRecord, TradeIdea, VolumeSurgeReport, VolumeSurgeRunner };
 export type { ChartPattern, ChartReading, TrendRead, WyckoffRange } from '../../engine/src/analysis/patterns';
 export type { ScalpSetup, ScalpStats } from '../../engine/src/analysis/scalp';
 export type { StructureBreak, SwingPoint, SwingStructure } from '../../engine/src/analysis/swingStructure';
 export type { CoinWatch, MarketWarning, PumpRead } from '../../engine/src/analysis/pumpWatch';
+export type { ForwardTestBenchmark, ForwardTestLive, ForwardTestReport } from '../../engine/src/stats';
 
 /** One timeframe's chart reading, in brief, for the market table. */
 export interface ReadingBrief {
@@ -76,6 +77,14 @@ export interface MarketRow {
     potentialMultiplier: string;
     change3dPct: number;
     actionPlan: string;
+  } | null;
+  htfPoi?: {
+    kind: 'zone' | 'fvg' | 'order_block';
+    dir: 'long' | 'short';
+    low: number;
+    high: number;
+    inPoi: boolean;
+    distPct: number;
   } | null;
 }
 

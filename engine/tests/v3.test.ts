@@ -6,7 +6,7 @@ import { decideEntry, type RiskInput } from '../src/risk';
 import { Portfolio, type EntryFill } from '../src/portfolio';
 import { manage } from '../src/exits';
 import { speedOf } from '../src/speed';
-import { summarize } from '../src/stats';
+import { forwardTestStats, summarize } from '../src/stats';
 import { noticesFor } from '../src/notices';
 import { series, type Context } from '../src/strategy/context';
 import type { Pivot } from '../src/analysis/indicators';
@@ -124,6 +124,57 @@ describe('results per model and speed group', () => {
     expect(r.byModel.map((x) => [x.key, x.trades, x.avgR])).toEqual([['session_sweep', 2, 1], ['zone_sweep', 2, 0.5]]);
     expect(r.bySpeed.map((x) => [x.key, x.trades, x.wins])).toEqual([['normal', 3, 2], ['wild', 1, 0]]);
     expect(summarize([]).all).toEqual({ key: 'all', trades: 0, wins: 0, winRate: 0, avgR: 0, totalR: 0 });
+  });
+
+  it('computes forward-testing benchmark and live paper metrics correctly', () => {
+    // 0 trades: awaiting signals
+    const empty = forwardTestStats([], 0);
+    expect(empty.benchmark.model).toBe('htf_poi');
+    expect(empty.benchmark.winRatePct).toBe(53.3);
+    expect(empty.live.status).toBe('awaiting_signals');
+    expect(empty.live.tradesCount).toBe(0);
+    expect(empty.live.progressPct).toBe(0);
+
+    // Accumulating sample (< 50 trades)
+    const accumulating = forwardTestStats([
+      { setup: 'htf_poi', pnl: 40, riskUsd: 10, openedAt: 0, closedAt: 7_200_000 },
+      { setup: 'htf_poi', pnl: -10, riskUsd: 10, openedAt: 0, closedAt: 3_600_000 },
+    ], 1.2, 50);
+    expect(accumulating.live.tradesCount).toBe(2);
+    expect(accumulating.live.progressPct).toBe(4);
+    expect(accumulating.live.winsCount).toBe(1);
+    expect(accumulating.live.lossesCount).toBe(1);
+    expect(accumulating.live.winRatePct).toBe(50);
+    expect(accumulating.live.totalR).toBe(3);
+    expect(accumulating.live.avgR).toBe(1.5);
+    expect(accumulating.live.profitFactor).toBe(4);
+    expect(accumulating.live.maxDrawdownPct).toBe(1.2);
+    expect(accumulating.live.avgHoldMin).toBe(90);
+    expect(accumulating.live.status).toBe('accumulating_sample');
+
+    // 50 trades with positive expectancy: edge confirmed
+    const confirmed = forwardTestStats(Array.from({ length: 50 }, (_, i) => ({
+      setup: 'htf_poi',
+      pnl: i < 30 ? 25 : -10,
+      riskUsd: 10,
+      openedAt: 0,
+      closedAt: 14_400_000,
+    })), 2.5, 50);
+    expect(confirmed.live.tradesCount).toBe(50);
+    expect(confirmed.live.progressPct).toBe(100);
+    expect(confirmed.live.status).toBe('edge_confirmed');
+    expect(confirmed.live.winRatePct).toBe(60);
+
+    // 50 trades with negative/sub-par expectancy: divergence warning
+    const diverged = forwardTestStats(Array.from({ length: 50 }, (_, i) => ({
+      setup: 'htf_poi',
+      pnl: i < 15 ? 20 : -10,
+      riskUsd: 10,
+      openedAt: 0,
+      closedAt: 14_400_000,
+    })), 8.0, 50);
+    expect(diverged.live.status).toBe('divergence_warning');
+    expect(diverged.live.avgR).toBeLessThan(0.2);
   });
 });
 

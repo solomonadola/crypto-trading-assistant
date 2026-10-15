@@ -18,6 +18,9 @@ interface ScalpResponse {
   setups: ScalpSetup[];
   stats: ScalpStats[];
   autopilot?: boolean;
+  /** Per timeframe, minutes: the max hold and the limit-entry timeout a scalp is taken with. */
+  maxHoldMin?: Record<string, number>;
+  entryTimeoutMin?: Record<string, number>;
 }
 
 const STATUS: Record<ScalpSetup['status'], { tone: string; label: string }> = {
@@ -420,6 +423,8 @@ export function Scalp({ go }: { go: (page: string, symbol?: string, tf?: string)
                           stop: s.stop,
                           target: s.target,
                           note: `Quant Scalp (${s.tf ?? '5m'}): ${SCALP_LABEL[s.kind]} (${hhmm(candleCloseTime)} UTC)`,
+                          maxHoldMin: data.maxHoldMin?.[s.tf ?? '5m'],
+                          entryTimeoutMin: data.entryTimeoutMin?.[s.tf ?? '5m'],
                         }}
                       />
                     )}

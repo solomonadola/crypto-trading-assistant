@@ -11,7 +11,11 @@ import { post, usePoll, usePrices, type CoinWatch, type PatternMatch, type Trade
 import { coin, pct, price as fmtPrice } from '../lib/format';
 import { chime } from './Notifier';
 
-export interface TakeDefaults { side: 'long' | 'short'; stop: number | null; target: number | null; note: string; entry?: number | null }
+export interface TakeDefaults {
+  side: 'long' | 'short'; stop: number | null; target: number | null; note: string; entry?: number | null;
+  /** Scalps: closed at the market after this many minutes, and the limit cancelled if not filled within entryTimeoutMin. */
+  maxHoldMin?: number; entryTimeoutMin?: number;
+}
 
 interface Filled { price: number; qty: number; notional: number; stop: number; target: number | null }
 
@@ -69,7 +73,7 @@ function Dialog({ symbol, defaults, onClose }: { symbol: string; defaults: TakeD
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [filled, setFilled] = useState<Filled | null>(null);
-  const [pendingOrder, setPendingOrder] = useState<{ entryPrice: number; stop: number; target: number | null } | null>(null);
+  const [pendingOrder, setPendingOrder] = useState<{ entryPrice: number; stop: number; target: number | null; positionId?: string } | null>(null);
 
   // Auto-fill planned key level if entry is blank
   useEffect(() => {
@@ -104,7 +108,8 @@ function Dialog({ symbol, defaults, onClose }: { symbol: string; defaults: TakeD
   const stopOk = effectiveEntry !== null && s > 0 && dir * (effectiveEntry - s) > 0;
   const targetSide = t !== null && effectiveEntry !== null && t > 0 && dir * (t - effectiveEntry) > 0;
   const stopPct = stopOk && effectiveEntry !== null ? (Math.abs(effectiveEntry - s) / effectiveEntry) * 100 : null;
-  const rr = stopOk && targetSide && effectiveEntry !== null ? (Math.abs(t! - effectiveEntry) - 0.002 * effectiveEntry) / Math.abs(effectiveEntry - s) : null;
+  const costFraction = idea?.speed === 'wild' ? 0.004 : 0.002;
+  const rr = stopOk && targetSide && effectiveEntry !== null ? (Math.abs(t! - effectiveEntry) - costFraction * effectiveEntry) / Math.abs(effectiveEntry - s) : null;
   const targetOk = rr !== null && rr >= MIN_RR;
 
   // ---------------- Patience Enforcer (Wait for Level / Wait for Confirmation) ----------------
@@ -373,7 +378,7 @@ function Dialog({ symbol, defaults, onClose }: { symbol: string; defaults: TakeD
     setBusy(true);
     setError(null);
     try {
-      const r = await post<{ fill?: Filled & { notional: number }; pending?: boolean; entryPrice?: number }>('/api/positions/open', {
+      const r = await post<{ fill?: Filled & { notional: number }; pending?: boolean; entryPrice?: number; positionId?: string }>('/api/positions/open', {
         symbol,
         side,
         entry: effectiveEntry !== null ? effectiveEntry : undefined,
@@ -381,9 +386,11 @@ function Dialog({ symbol, defaults, onClose }: { symbol: string; defaults: TakeD
         target: t,
         orderType: 'limit',
         note: note.trim() || undefined,
+        maxHoldMin: defaults.maxHoldMin,
+        entryTimeoutMin: defaults.entryTimeoutMin,
       });
       if (r.pending) {
-        setPendingOrder({ entryPrice: r.entryPrice ?? effectiveEntry!, stop: s, target: t });
+        setPendingOrder({ entryPrice: r.entryPrice ?? effectiveEntry!, stop: s, target: t, positionId: r.positionId });
       } else if (r.fill) {
         setFilled(r.fill);
       }
@@ -420,7 +427,28 @@ function Dialog({ symbol, defaults, onClose }: { symbol: string; defaults: TakeD
                 🛡️ <b>Disciplined Pullback Execution:</b> Market price was not chased. If price takes off without pulling back to the key level, the order expires safely without FOMO ("if we miss it that is it").
               </div>
             </div>
-            <button onClick={onClose} className="w-full rounded-xl bg-accent px-4 py-2 text-sm font-semibold text-white hover:brightness-110">Done</button>
+            <div className="flex gap-2">
+              <button onClick={onClose} className="flex-1 rounded-xl bg-accent px-4 py-2 text-sm font-semibold text-white hover:brightness-110">Done</button>
+              {pendingOrder.positionId && (
+                <button
+                  onClick={async () => {
+                    if (!confirm('Cancel this pending limit order?')) return;
+                    setBusy(true);
+                    try {
+                      await post(`/api/positions/${encodeURIComponent(pendingOrder.positionId!)}/cancel`);
+                      onClose();
+                    } catch (e) {
+                      setError(e instanceof Error ? e.message : String(e));
+                    } finally {
+                      setBusy(false);
+                    }
+                  }}
+                  className="rounded-xl border border-line px-3 py-2 text-xs text-ink-2 hover:border-critical hover:text-critical"
+                >
+                  Cancel Order
+                </button>
+              )}
+            </div>
           </div>
         ) : filled ? (
           <div className="space-y-3 text-sm">

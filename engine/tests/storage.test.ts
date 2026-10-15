@@ -5,6 +5,7 @@ import path from 'node:path';
 import { getKv, openDb, setKv } from '../src/storage/db';
 import { EventLog } from '../src/storage/eventLog';
 import { SignalLog } from '../src/storage/signals';
+import { TradeJournalStore } from '../src/storage/journal';
 import { formingCandle } from '../src/feed/candleStore';
 import type { SignalRecord, TradeEvent } from '../../shared/types';
 
@@ -25,7 +26,7 @@ describe('database', () => {
     setKv(db, 'last_minute', '123');
     db.close();
     const again = openDb(file);
-    expect(again.pragma('user_version', { simple: true })).toBe(2);
+    expect(again.pragma('user_version', { simple: true })).toBe(3);
     expect(getKv(again, 'last_minute')).toBe('123');
     expect(getKv(again, 'missing')).toBeNull();
     again.close();
@@ -92,3 +93,53 @@ describe('forming candle', () => {
     expect(formingCandle('15m', [], H)).toBeNull();
   });
 });
+
+describe('trade journal store', () => {
+  it('saves and retrieves journal entries with ATA reflections and ratings', () => {
+    const db = openDb(':memory:');
+    const store = new TradeJournalStore(db);
+
+    expect(store.getAll()).toEqual([]);
+    expect(store.get('t1')).toBeNull();
+
+    store.save({
+      tradeId: 't1',
+      rating: 5,
+      tags: ['Followed Rules', 'Patient Entry'],
+      notes: 'Clean 4H demand tap with 5m CHoCH confirmation.',
+      ata: {
+        pdAlignment: 'discount',
+        majorLiquidityTaken: true,
+        hrlrOrLrlr: 'lrlr',
+        htfTrendAligned: true,
+        keyPoi: 'ob',
+        shiftReason: 'Asian low swept followed by aggressive displacement.',
+        invalidation: '4H candle close below 64200.',
+      },
+      updatedAt: 123456,
+    });
+
+    const retrieved = store.get('t1');
+    expect(retrieved).not.toBeNull();
+    expect(retrieved?.rating).toBe(5);
+    expect(retrieved?.tags).toEqual(['Followed Rules', 'Patient Entry']);
+    expect(retrieved?.notes).toBe('Clean 4H demand tap with 5m CHoCH confirmation.');
+    expect(retrieved?.ata?.pdAlignment).toBe('discount');
+    expect(retrieved?.ata?.majorLiquidityTaken).toBe(true);
+
+    // Overwriting updates existing entry
+    store.save({
+      tradeId: 't1',
+      rating: 4,
+      tags: ['Followed Rules', 'Early Exit'],
+      notes: 'Took profit slightly early before TP2.',
+      updatedAt: 123999,
+    });
+
+    const updated = store.get('t1');
+    expect(updated?.rating).toBe(4);
+    expect(updated?.tags).toEqual(['Followed Rules', 'Early Exit']);
+    expect(store.getAll()).toHaveLength(1);
+  });
+});
+

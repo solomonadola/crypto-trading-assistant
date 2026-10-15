@@ -144,6 +144,7 @@ export const configSchema = z.object({
 
   /** Model 4: 4h point of interest + 5m/15m CHoCH. */
   htf_poi: z.object({
+    directions: z.array(z.enum(['long', 'short'])).default(['long', 'short']),
     confirm_timeframes: z.array(z.enum(['5m', '15m'])).min(1),
     armed_expiry_hours: positive,
     max_hold_hours: positive,
@@ -245,6 +246,19 @@ export const configSchema = z.object({
     }).strict(),
   }).strict(),
 
+  scalp_autopilot: z.object({
+    enabled: z.boolean().default(false),
+    timeframes: z.array(z.enum(['1m', '5m', '15m'])).min(1),
+    kinds: z.array(z.enum(['sweep_reclaim', 'vwap_bounce', 'ema_pullback', 'orb', 'fvg_retest', 'volume_climax'])).default([]),
+    max_stop_pct: positive,
+    /** A candle closed longer ago than this is not acted on (a replay or a feed catching up). */
+    max_signal_age_sec: posInt,
+    /** New scalp autopilot entries per UTC day, apart from risk.max_trades_per_day; null: no limit. */
+    max_trades_per_day: posInt.nullable(),
+    max_hold_min: z.object({ '1m': posInt, '5m': posInt, '15m': posInt }).strict(),
+    entry_timeout_min: z.object({ '1m': posInt, '5m': posInt, '15m': posInt }).strict(),
+  }).strict(),
+
   risk: z.object({
     /** New entries per UTC day across all coins and models, manual ones included; null: no limit. */
     max_trades_per_day: posInt.nullable(),
@@ -253,6 +267,12 @@ export const configSchema = z.object({
     max_drawdown_kill_pct: pct,
     cooldown_after_loss_min: z.number().int().min(0),
     losing_streak_size_cut: z.object({ after_losses: posInt, size_mult: z.number().gt(0).max(1), reset_after_wins: posInt }).strict(),
+    btc_circuit_breaker: z.object({
+      enabled: z.boolean().default(true),
+      drop_5m_pct: z.number().max(0).default(-1.5),
+      cooldown_min: posInt.default(30),
+      cancel_pending_limits: z.boolean().default(true),
+    }).strict().optional(),
   }).strict(),
 
   sim: z.object({
@@ -261,6 +281,8 @@ export const configSchema = z.object({
     charge_funding: z.boolean(),
     maintenance_margin_pct: z.number().min(0).max(10),
     entry_timeout_min: posInt,
+    /** The models' limit entries are cancelled when not filled within this. */
+    limit_entry_timeout_min: posInt,
   }).strict(),
 }).strict()
   .superRefine((c, ctx) => {

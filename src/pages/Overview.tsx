@@ -1,10 +1,11 @@
-import { Activity, Briefcase, Hourglass, LineChart, Radio, X } from 'lucide-react';
+import { Activity, Briefcase, Hourglass, LineChart, Radio, ShieldAlert, X } from 'lucide-react';
 import { post, usePoll, usePrices, type AccountSummary, type ClosedTradeView, type EquityPoint, type SignalRecord } from '../lib/api';
 import { coin, dateTime, duration, hhmm, pct, price, signedUsd, usd, words } from '../lib/format';
 import { Badge, Card, Empty, Kpi, ModelBadge, Pnl, SessionBadge, SideBadge, Table, td } from '../components/ui';
 import { SessionTimeline } from '../components/SessionTimeline';
 import { EditPosition } from '../components/EditPosition';
 import { EquityChart } from '../components/charts';
+import { DealingRangeRadar } from '../components/DealingRangeRadar';
 
 export function StatusBadge({ status }: { status: string }) {
   const tone = status === 'taken' || status === 'working' ? 'good' : status === 'filtered' ? 'warning' : status === 'armed' ? 'london' : 'muted';
@@ -31,8 +32,28 @@ export function Overview({ go }: { go: (page: string, symbol?: string) => void }
     try { await post(`/api/positions/${encodeURIComponent(id)}/close`); reload(); } catch (e) { alert(e instanceof Error ? e.message : String(e)); }
   };
 
+  const cancelOrder = async (id: string) => {
+    if (!confirm('Cancel this pending limit order?')) return;
+    try { await post(`/api/positions/${encodeURIComponent(id)}/cancel`); reload(); } catch (e) { alert(e instanceof Error ? e.message : String(e)); }
+  };
+
   return (
     <div className="space-y-5">
+      {acct?.circuitBreaker?.active && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-warning/40 bg-warning/10 p-3.5 text-sm text-warning">
+          <div className="flex items-center gap-2.5">
+            <ShieldAlert size={20} className="animate-pulse shrink-0 text-warning" />
+            <div>
+              <div className="font-semibold text-ink">BTC Flash-Crash Circuit Breaker Active</div>
+              <div className="text-xs text-ink-2">
+                {acct.circuitBreaker.reason || 'BTC experiencing rapid downward cascade'} · Altcoin long entries halted · Resting limits cancelled
+              </div>
+            </div>
+          </div>
+          <Badge tone="warning">Cooling down until {hhmm(acct.circuitBreaker.until)} UTC</Badge>
+        </div>
+      )}
+
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-6">
         <div className="col-span-2">
           <Kpi label="Equity" value={usd(equityNow)} sub={acct ? <>{pct(ret, 2, true)} since start · balance {usd(acct.balance)}</> : null}
@@ -67,6 +88,8 @@ export function Overview({ go }: { go: (page: string, symbol?: string) => void }
         </Card>
       </div>
 
+      <DealingRangeRadar go={go} />
+
       <Card title="Equity" icon={<LineChart size={16} />} right={<span className="text-xs text-ink-3">last 7 days · 5-minute points</span>}>
         <EquityChart points={equity ?? []} startingBalance={acct?.startingBalance ?? 1000} />
       </Card>
@@ -92,6 +115,26 @@ export function Overview({ go }: { go: (page: string, symbol?: string) => void }
                     <span>${e.notional.toFixed(0)}</span>
                     <span className="tabular">{duration((acct.time || Date.now()) - e.placedAt)} ago</span>
                     <Badge tone="accent">waiting pullback</Badge>
+                    <span className="flex gap-1">
+                      <EditPosition
+                        p={{
+                          id: e.positionId,
+                          symbol: e.symbol,
+                          side: e.side,
+                          entryPrice: e.price ?? 0,
+                          stop: e.stop ?? 0,
+                          target: e.target ?? null,
+                          isPending: true,
+                        }}
+                        onSaved={reload}
+                      />
+                      <button
+                        onClick={() => cancelOrder(e.positionId)}
+                        className="inline-flex items-center gap-1 rounded-lg border border-line px-2 py-1 text-xs text-ink-2 hover:border-critical hover:text-critical"
+                      >
+                        <X size={12} />Cancel
+                      </button>
+                    </span>
                   </div>
                 </div>
               ))}

@@ -48,6 +48,7 @@ export type TradeEventType =
   | 'order_cancelled'
   | 'stop_moved'
   | 'target_moved'
+  | 'limit_moved'
   | 'partial_closed'
   | 'funding_charged'
   | 'position_closed'
@@ -89,7 +90,7 @@ export interface SignalRecord {
   time: number;
   symbol: string;
   /** The model behind it; `manual` for trades taken by hand from the dashboard. */
-  setup: 'pullback' | 'breakout' | 'session_sweep' | 'zone_sweep' | 'htf_poi' | 'manual';
+  setup: 'pullback' | 'breakout' | 'session_sweep' | 'zone_sweep' | 'htf_poi' | 'manual' | 'scalp';
   direction: Direction;
   status: SignalStatus;
   reason: string | null;
@@ -160,6 +161,7 @@ export interface AccountSummary {
   halted: { reason: string; at: number } | null;
   positions: PositionView[];
   pendingEntries: { positionId: string; symbol: string; side: Direction; notional: number; placedAt: number; price?: number; orderType?: 'market' | 'limit'; stop?: number; target?: number | null }[];
+  circuitBreaker?: { active: boolean; until: number; reason: string | null; btcChange5mPct: number | null };
 }
 
 export interface ClosedTradeView {
@@ -181,6 +183,25 @@ export interface ClosedTradeView {
   speed?: 'calm' | 'normal' | 'wild';
   /** Why a manual trade was taken, as typed or from the setup it came from. */
   note?: string;
+}
+
+export interface AtaReflection {
+  pdAlignment?: 'discount' | 'premium' | 'equilibrium' | 'na';
+  majorLiquidityTaken?: boolean;
+  hrlrOrLrlr?: 'lrlr' | 'hrlr' | 'unknown';
+  htfTrendAligned?: boolean;
+  keyPoi?: 'ob' | 'fvg' | 'breaker' | 'none';
+  shiftReason?: string;
+  invalidation?: string;
+}
+
+export interface JournalEntry {
+  tradeId: string;
+  rating: number;
+  tags: string[];
+  notes: string;
+  ata?: AtaReflection;
+  updatedAt: number;
 }
 
 /** A price level where several sources agree. */

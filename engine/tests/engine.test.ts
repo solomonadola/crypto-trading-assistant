@@ -374,15 +374,39 @@ describe('limit pullback orders', () => {
     expect(e.positions()[0].entryPrice).toBe(100);
   });
 
-  it('cancels without filling if price breaches stop before touching key level (invalidation)', () => {
+  it('a candle that runs through the limit and on through the stop fills it and stops it out: the loss is real', () => {
     const e = engine();
     e.onCandles([minute(at - 60_000, 104, 105.5, 103.8, 105)]);
     e.onCommand({ type: 'open', symbol: 'BTCUSDT', side: 'long', price: 100, time: at, stop: 98, target: 110, orderType: 'limit' });
 
-    // Flash crash through stop 98 on candle
+    // Flash crash from 105 through the limit 100 and the stop 98 in one candle.
     const out = e.onCandles([minute(at, 105, 105, 96, 97)]);
-    expect(out.map((x) => `${x.type} ${x.payload.reason}`)).toEqual(['order_cancelled cancelled_invalidation_hit']);
+    expect(out.map((x) => `${x.type} ${x.payload.reason ?? ''}`)).toEqual(['order_filled ', 'position_closed stop']);
     expect(e.positions()).toHaveLength(0);
+    const [trade] = e.closedTrades();
+    expect(trade).toMatchObject({ entryPrice: 100, reason: 'stop' });
+    expect(trade.exitPrice).toBeLessThan(98);   // the stop, slipped
+    expect(trade.pnl).toBeLessThan(0);
+  });
+
+  it('a candle that opens beyond the stop never fills the limit', () => {
+    const e = engine();
+    e.onCandles([minute(at - 60_000, 104, 105.5, 103.8, 105)]);
+    e.onCommand({ type: 'open', symbol: 'BTCUSDT', side: 'long', price: 100, time: at, stop: 98, target: 110, orderType: 'limit' });
+    const out = e.onCandles([minute(at, 97, 97.5, 96, 97)]);
+    expect(out.map((x) => `${x.type} ${x.payload.reason}`)).toEqual(['order_cancelled filled_beyond_stop']);
+  });
+
+  it('does not count the target in the candle that fills the limit: which came first is unknown', () => {
+    const e = engine((c) => { c.exits.mode = 'fixed'; });
+    e.onCandles([minute(at - 60_000, 104, 105.5, 103.8, 105)]);
+    e.onCommand({ type: 'open', symbol: 'BTCUSDT', side: 'long', price: 100, time: at, stop: 98, target: 106, orderType: 'limit' });
+    // Down to 99.5 and up to 107 in the same minute: filled, but not yet a win.
+    const first = e.onCandles([minute(at, 104, 107, 99.5, 104)]);
+    expect(first.map((x) => x.type)).toEqual(['order_filled']);
+    // The next candle that reaches it takes it.
+    const next = e.onCandles([minute(at + 60_000, 104, 106.5, 103, 106)]);
+    expect(next.map((x) => `${x.type} ${x.payload.reason}`)).toEqual(['position_closed target']);
   });
 
   it('cancels if target is reached before pulling back to key level (target runaway)', () => {
@@ -396,7 +420,7 @@ describe('limit pullback orders', () => {
     expect(e.positions()).toHaveLength(0);
   });
 
-  it('expires after 4 hours if price never pulls back to key level', () => {
+  it('expires after 4 hours if price never pulls back to key level (a limit taken by hand)', () => {
     const e = engine();
     e.onCandles([minute(at - 60_000, 104, 105.5, 103.8, 105)]);
     e.onCommand({ type: 'open', symbol: 'BTCUSDT', side: 'long', price: 100, time: at, stop: 98, target: 110, orderType: 'limit' });
@@ -406,4 +430,294 @@ describe('limit pullback orders', () => {
     const out = e.onCandles([minute(futureTime, 105, 106, 104, 105)]);
     expect(out.some((x) => x.type === 'order_cancelled' && x.payload.reason === 'timeout_missed_pullback')).toBe(true);
   });
+
+  it('cancels a pending limit order manually', () => {
+    const e = engine();
+    e.onCandles([minute(at - 60_000, 104, 105.5, 103.8, 105)]);
+    const placed = e.onCommand({ type: 'open', symbol: 'BTCUSDT', side: 'long', price: 100, time: at, stop: 98, target: 110, orderType: 'limit' });
+    const orderId = placed[0].positionId!;
+    expect(e.account().pendingEntries).toHaveLength(1);
+
+    const cancelEvents = e.onCommand({ type: 'cancel', positionId: orderId });
+    expect(cancelEvents).toHaveLength(1);
+    expect(cancelEvents[0].type).toBe('order_cancelled');
+    expect(cancelEvents[0].payload.reason).toBe('manual_cancel');
+    expect(e.account().pendingEntries).toHaveLength(0);
+  });
+
+  it('cancels a pending limit order via close command as well', () => {
+    const e = engine();
+    e.onCandles([minute(at - 60_000, 104, 105.5, 103.8, 105)]);
+    const placed = e.onCommand({ type: 'open', symbol: 'BTCUSDT', side: 'long', price: 100, time: at, stop: 98, target: 110, orderType: 'limit' });
+    const orderId = placed[0].positionId!;
+
+    const closeEvents = e.onCommand({ type: 'close', positionId: orderId });
+    expect(closeEvents).toHaveLength(1);
+    expect(closeEvents[0].type).toBe('order_cancelled');
+    expect(closeEvents[0].payload.reason).toBe('manual_cancel');
+    expect(e.account().pendingEntries).toHaveLength(0);
+  });
+
+  it('edits a pending limit order levels and fills at the new levels', () => {
+    const e = engine();
+    e.onCandles([minute(at - 60_000, 104, 105.5, 103.8, 105)]);
+    const placed = e.onCommand({ type: 'open', symbol: 'BTCUSDT', side: 'long', price: 100, time: at, stop: 98, target: 110, orderType: 'limit' });
+    const orderId = placed[0].positionId!;
+
+    // Modify limit price to 101, stop to 99, target to 112
+    const modEvents = e.onCommand({ type: 'modify_pending', positionId: orderId, entry: 101, stop: 99, target: 112, price: 105 });
+    expect(modEvents.map((x) => x.type)).toEqual(['limit_moved', 'stop_moved', 'target_moved']);
+
+    const pending = e.account().pendingEntries[0];
+    expect(pending.price).toBe(101);
+    expect(pending.stop).toBe(99);
+    expect(pending.target).toBe(112);
+
+    // Candle pulls back to 100.5 (below 101, so it fills)
+    const fillEvents = e.onCandles([minute(at, 102, 103, 100.5, 102)]);
+    expect(fillEvents.some((x) => x.type === 'order_filled')).toBe(true);
+    const pos = e.positions()[0];
+    expect(pos.entryPrice).toBe(101);
+    expect(pos.stop).toBe(99);
+    expect(pos.target).toBe(112);
+  });
 });
+
+describe('limits the price is already through', () => {
+  const at = u('2026-07-15T10:30Z');
+  const ready = (close: number) => {
+    const e = engine();
+    e.onCandles([{ symbol: 'BTCUSDT', tf: '1m', openTime: at - 60_000, closeTime: at, open: close, high: close, low: close, close, volume: 1, quoteVolume: 100, trades: 1 }]);
+    return e;
+  };
+  const limit = (e: Engine) => e.onCommand({ type: 'open', symbol: 'BTCUSDT', side: 'long', price: 100, time: at, stop: 98, target: 110, orderType: 'limit' });
+
+  it('refuses a limit when the latest price is already past its stop, placing nothing', () => {
+    const e = ready(97.5);
+    expect(() => limit(e)).toThrow(/already below the stop 98/);
+    expect(e.account().pendingEntries).toHaveLength(0);
+    expect(e.positions()).toHaveLength(0);
+  });
+
+  it('fills a limit the price is already through at the latest price, not at the limit', () => {
+    const e = ready(99);
+    expect(limit(e).map((x) => x.type)).toEqual(['order_placed', 'order_filled']);
+    expect(e.positions()[0].entryPrice).toBe(99);
+  });
+});
+
+describe('scalp autopilot orders', () => {
+  const at = u('2026-07-15T10:30Z');
+  /** 1m candles closing every minute in (from, to], all at `price` with a 0.2-wide range. */
+  const flat = (from: number, to: number, price: number): Candle[] => {
+    const out: Candle[] = [];
+    for (let close = from + 60_000; close <= to; close += 60_000) {
+      out.push({ symbol: 'BTCUSDT', tf: '1m', openTime: close - 60_000, closeTime: close, open: price, high: price + 0.1, low: price - 0.1, close: price, volume: 1, quoteVolume: 100, trades: 1 });
+    }
+    return out;
+  };
+  const ready = (price = 100, time = at, over: (c: EngineConfig) => void = () => {}) => {
+    const e = engine(over);
+    e.onCandles(flat(time - 120_000, time, price));
+    return e;
+  };
+  const scalp = (e: Engine, over: Partial<Extract<Parameters<Engine['onCommand']>[0], { type: 'open' }>> = {}) => e.onCommand({
+    type: 'open', symbol: 'BTCUSDT', side: 'long', price: 100, time: e.now(), stop: 98, target: 110, orderType: 'limit',
+    note: 'Quant Autopilot [5m]: EMA20 pullback', setup: 'scalp', maxHoldMin: 120, entryTimeoutMin: 35, ...over,
+  });
+  const reasons = (events: TradeEvent[], type: string) => events.filter((x) => x.type === type).map((x) => `${x.payload.reason} ${iso(x.time)}`);
+
+  it('is recorded as the scalp setup, with its max hold', () => {
+    const e = ready();
+    scalp(e);
+    expect(e.positions()[0]).toMatchObject({ setup: 'scalp', maxHoldMin: 120 });
+    expect(e.positions()[0].id).toBe(`scalp-BTCUSDT-${at}`);
+  });
+
+  it('closes at the market once held for its max hold, whatever its note says', () => {
+    const e = ready();
+    scalp(e, { note: 'edited by hand' });
+    const out = e.onCandles(flat(at, at + 125 * 60_000, 100));
+    expect(reasons(out, 'order_placed')).toEqual(['max_hold 2026-07-15T12:30Z']);
+    expect(e.positions()).toHaveLength(0);
+  });
+
+  it('cancels a limit the price never comes back to after its entry timeout', () => {
+    const e = ready(102);
+    expect(scalp(e).map((x) => x.type)).toEqual(['order_placed']);
+    const out = e.onCandles(flat(at, at + 40 * 60_000, 102));
+    expect(reasons(out, 'order_cancelled')).toEqual(['timeout_missed_pullback 2026-07-15T11:06Z']);
+  });
+
+  it('refuses a stop wider than scalp_autopilot.max_stop_pct', () => {
+    expect(() => scalp(ready(), { stop: 97 })).toThrow(/stop_too_wide/);
+  });
+
+  it('refuses a stop so tight the round-trip costs eat more than max_fee_drag_pct of the risk', () => {
+    expect(() => scalp(ready(), { stop: 99.5 })).toThrow(/fees_too_high/);
+    // The same trade by hand is the trader's call.
+    expect(scalp(ready(), { stop: 99.5, setup: 'manual', maxHoldMin: undefined }).map((x) => x.type)).toEqual(['order_placed', 'order_filled']);
+  });
+
+  it('takes no new scalps at the weekend when sessions are weekdays only', () => {
+    const saturday = u('2026-07-18T10:30Z');
+    const e = ready(100, saturday, (c) => { c.sessions.weekdays_only = true; });
+    expect(() => scalp(e)).toThrow(/session_weekend/);
+  });
+
+  it('still time-stops scalps logged before the max hold was a field, from their note', () => {
+    const e = engine();
+    const old = entry(e, 'old', '2026-07-15T10:30Z');
+    (old.payload as Record<string, unknown>).note = 'Quant Autopilot [5m]: Sweep & reclaim';
+    e.restore([old], at);
+    const out = e.onCandles(flat(at, at + 125 * 60_000, 100));
+    expect(reasons(out, 'order_placed')).toEqual(['max_hold 2026-07-15T12:30Z']);
+  });
+
+  it('leaves a trade by hand that merely mentions scalping to its usual exits', () => {
+    const e = engine();
+    const manual = entry(e, 'mine', '2026-07-15T10:30Z');
+    (manual.payload as Record<string, unknown>).note = 'scalp idea, holding for the session';
+    e.restore([manual], at);
+    expect(reasons(e.onCandles(flat(at, at + 5 * 3_600_000, 100)), 'order_placed')).toEqual([]);
+  });
+});
+
+describe('late 1m candles', () => {
+  const at = u('2026-07-15T10:30Z');
+  const candle = (symbol: string, close: number, low: number, price = 100): Candle =>
+    ({ symbol, tf: '1m', openTime: close - 60_000, closeTime: close, open: price, high: price + 0.5, low, close: price, volume: 1, quoteVolume: 100, trades: 1 });
+
+  it('settles a stop hit in a candle that arrived after the clock had moved on, at the stop and at its time', () => {
+    const e = engine();
+    e.restore([entry(e, 'p1', '2026-07-15T10:00Z', 'ETHUSDT')], at);
+    // BTC's minutes come in; ETH's fetch fails twice, so the engine's clock passes ETH's missing minutes.
+    e.onCandles([candle('BTCUSDT', at + 60_000, 99), candle('ETHUSDT', at + 60_000, 99.5)]);
+    e.onCandles([candle('BTCUSDT', at + 120_000, 99)]);
+    e.onCandles([candle('BTCUSDT', at + 180_000, 99)]);
+    // ETH's 10:32 minute dipped to 97 through the stop 98, then recovered by 10:33.
+    const out = e.onCandles([candle('ETHUSDT', at + 120_000, 97), candle('ETHUSDT', at + 180_000, 99.8), candle('BTCUSDT', at + 240_000, 99)]);
+    const closed = out.filter((x) => x.type === 'position_closed');
+    expect(closed.map((x) => [x.payload.reason, iso(x.time)])).toEqual([['stop', '2026-07-15T10:32Z']]);
+    expect(Number(closed[0].payload.price)).toBeLessThanOrEqual(98);
+    expect(e.positions()).toHaveLength(0);
+  });
+
+  it('settles each minute once, and never one before the position opened', () => {
+    const e = engine();
+    e.restore([entry(e, 'p1', '2026-07-15T10:30Z', 'ETHUSDT')], at);
+    e.onCandles([candle('BTCUSDT', at + 120_000, 99), candle('ETHUSDT', at + 120_000, 99.5)]);
+    // An ETH minute from before the entry that went through the stop: nothing to settle.
+    expect(e.onCandles([candle('ETHUSDT', at - 60_000, 90)]).filter((x) => x.type === 'position_closed')).toEqual([]);
+    // The minute already settled, handed on again: nothing either.
+    expect(e.onCandles([candle('ETHUSDT', at + 120_000, 90)]).filter((x) => x.type === 'position_closed')).toEqual([]);
+    expect(e.positions()).toHaveLength(1);
+  });
+});
+
+describe('daily caps: the scalp autopilot has its own', () => {
+  const at = u('2026-07-15T10:30Z');
+  const symbols = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'].map((x) => `${x}USDT`);
+  const flat = (symbol: string, close: number): Candle =>
+    ({ symbol, tf: '1m', openTime: close - 60_000, closeTime: close, open: 100, high: 100.1, low: 99.9, close: 100, volume: 1, quoteVolume: 1e9, trades: 1 });
+  const ready = (over: (c: EngineConfig) => void) => {
+    const e = engine((c) => { c.allocation.max_open_trades = null as unknown as number; c.allocation.max_open_risk_pct = null as unknown as number; c.allocation.max_total_exposure_pct = 100_000; over(c); });
+    e.onCandles(symbols.map((s) => flat(s, at)));
+    return e;
+  };
+  /** Opens and at once closes a trade on `symbol`, so only the daily count is left. */
+  const trade = (e: Engine, symbol: string, setup: 'scalp' | 'manual', n: number) => {
+    const opened = e.onCommand({ type: 'open', symbol, side: 'long', price: 100, time: at + n * 1000, stop: 98, target: 110, orderType: 'market', setup });
+    e.onCommand({ type: 'close', positionId: opened[0].positionId!, price: 100, time: at + n * 1000 + 500 });
+  };
+
+  it('scalps do not use up the daily cap of the other trades, and stop at their own', () => {
+    const e = ready((c) => { c.risk.max_trades_per_day = 2; c.scalp_autopilot.max_trades_per_day = 3; c.risk.cooldown_after_loss_min = 0; });
+    trade(e, 'AUSDT', 'scalp', 1);
+    trade(e, 'BUSDT', 'scalp', 2);
+    trade(e, 'CUSDT', 'scalp', 3);
+    expect(() => trade(e, 'DUSDT', 'scalp', 4)).toThrow(/max scalps per day/);
+    // Three scalps today, and still both of the other trades.
+    trade(e, 'EUSDT', 'manual', 5);
+    trade(e, 'FUSDT', 'manual', 6);
+    expect(() => trade(e, 'GUSDT', 'manual', 7)).toThrow(/max trades per day/);
+  });
+});
+
+describe("the models' limit entries", () => {
+  it('carry the configured fill timeout on the order', () => {
+    const config = loadConfig('engine/config/config.yaml');
+    expect(config.sim.limit_entry_timeout_min).toBe(30);
+  });
+});
+
+describe('BTC flash crash circuit breaker', () => {
+  it('triggers when BTC drops 1.5% in 5 minutes, cancelling alt long limits and blocking new longs', () => {
+    const e = engine((c) => {
+      c.risk.btc_circuit_breaker = {
+        enabled: true,
+        drop_5m_pct: -1.5,
+        cooldown_min: 30,
+        cancel_pending_limits: true,
+      };
+    });
+
+    const start = u('2026-07-15T12:00Z');
+    const initialBtc: Candle[] = [];
+    const initialEth: Candle[] = [];
+    for (let i = 0; i < 5; i++) {
+      const close = start + i * 60_000;
+      initialBtc.push({ symbol: 'BTCUSDT', tf: '1m', openTime: close - 60_000, closeTime: close, open: 100, high: 100, low: 100, close: 100, volume: 1, quoteVolume: 100, trades: 1 });
+      initialEth.push({ symbol: 'ETHUSDT', tf: '1m', openTime: close - 60_000, closeTime: close, open: 10, high: 10, low: 10, close: 10, volume: 1, quoteVolume: 10, trades: 1 });
+    }
+    e.onCandles([...initialBtc, ...initialEth]);
+
+    // Place a pending limit order on ETHUSDT (entry 9.5 below current price 10)
+    const placed = e.onCommand({
+      type: 'open',
+      symbol: 'ETHUSDT',
+      side: 'long',
+      price: 9.5,
+      time: start + 4 * 60_000,
+      stop: 9.0,
+      target: 11.0,
+      orderType: 'limit',
+      setup: 'manual',
+    });
+    expect(placed.map((x) => x.type)).toEqual(['order_placed']);
+    expect(e.account().pendingEntries).toHaveLength(1);
+
+    // Now BTC drops by 2.0% over the next 5 minutes (from 100 to 98)
+    const dropClose = start + 5 * 60_000;
+    const dropBtc: Candle = { symbol: 'BTCUSDT', tf: '1m', openTime: dropClose - 60_000, closeTime: dropClose, open: 100, high: 100, low: 97.9, close: 98, volume: 50, quoteVolume: 5000, trades: 10 };
+    const dropEth: Candle = { symbol: 'ETHUSDT', tf: '1m', openTime: dropClose - 60_000, closeTime: dropClose, open: 10, high: 10, low: 9.9, close: 10, volume: 1, quoteVolume: 10, trades: 1 };
+
+    const events = e.onCandles([dropBtc, dropEth]);
+    const cancellations = events.filter((x) => x.type === 'order_cancelled');
+    expect(cancellations).toHaveLength(1);
+    expect(cancellations[0].payload.reason).toBe('btc_circuit_breaker');
+    expect(e.account().pendingEntries).toHaveLength(0);
+    expect(e.isCircuitBreakerActive()).toBe(true);
+
+    // Trying to open a new alt long is rejected
+    expect(() => e.onCommand({
+      type: 'open',
+      symbol: 'ETHUSDT',
+      side: 'long',
+      price: 10,
+      time: dropClose,
+      stop: 9.5,
+      target: 11.5,
+      orderType: 'market',
+      setup: 'manual',
+    })).toThrow(/BTC circuit breaker active/);
+
+    // After 30 minutes, circuit breaker expires
+    const futureClose = dropClose + 31 * 60_000;
+    e.onCandles([
+      { symbol: 'BTCUSDT', tf: '1m', openTime: futureClose - 60_000, closeTime: futureClose, open: 98, high: 98, low: 98, close: 98, volume: 1, quoteVolume: 98, trades: 1 },
+    ]);
+    expect(e.isCircuitBreakerActive()).toBe(false);
+  });
+});
+
