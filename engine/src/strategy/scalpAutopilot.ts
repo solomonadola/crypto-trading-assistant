@@ -19,7 +19,7 @@ export interface ScalpDecisionInput {
   candles: Candle[];
   /** Closed 1h candles up to the same moment (for the 1h trend bias, pump/failed-break warnings, ADR). */
   candles1h: Candle[];
-  /** BTC 1h candles up to the same moment (for the "BTC dumping" guard). */
+  /** Closed BTC 1h candles up to the same moment, oldest first; the last two give the "BTC dumping" guard. */
   btc1h: Candle[];
   sessionOpens: number[];            // London/NY open times in range (from SessionCalendar)
   costPct: number;                   // round-trip cost for this coin's speed group
@@ -45,9 +45,21 @@ export interface ScalpDecisionResult {
   skipped?: string;
 }
 
+/**
+ * BTC's change over the last closed hour, in percent: the last two 1h closes, however many candles are
+ * passed. (The backtest passes a 50-candle window; comparing its ends measured some 50 hours, not one.)
+ */
+export function btcLastHourPct(btc1h: Candle[]): number | null {
+  if (btc1h.length < 2) return null;
+  const prev = btc1h[btc1h.length - 2].close;
+  const last = btc1h[btc1h.length - 1].close;
+  return prev > 0 ? ((last - prev) / prev) * 100 : null;
+}
+
 /** The order the autopilot would place for the candle that just closed, or null with the reason. */
 export function decideScalp(i: ScalpDecisionInput): ScalpDecisionResult {
-  if (i.config.enabled === false) return { order: null, skipped: 'autopilot_disabled' };
+  // Whether Hunter runs at all is the caller's switch (the dashboard live, the --scalp flag in a backtest),
+  // not config.enabled, which is only the default before a choice is saved.
   if (!i.config.timeframes.includes(i.tf)) return { order: null, skipped: 'timeframe_not_enabled' };
 
   const lastCandle = i.candles[i.candles.length - 1];
@@ -79,10 +91,8 @@ export function decideScalp(i: ScalpDecisionInput): ScalpDecisionResult {
     return { order: null, skipped: `stop_too_wide (${stopPct.toFixed(2)}% > ${i.config.max_stop_pct}%)` };
   }
 
-  // BTC dumping guard: BTC dropped > 1.0% in the last 1h candle
-  const btcChange1h = i.btc1h.length >= 2 && i.btc1h[0].close > 0
-    ? ((i.btc1h[i.btc1h.length - 1].close - i.btc1h[0].close) / i.btc1h[0].close) * 100
-    : null;
+  // BTC dumping guard: BTC dropped > 1.0% over the last closed hour
+  const btcChange1h = btcLastHourPct(i.btc1h);
   const btcDumping = btcChange1h !== null && btcChange1h < -1.0;
   if (btcDumping && i.symbol !== 'BTCUSDT' && fresh.side === 'long') {
     return { order: null, skipped: `btc_dumping (${btcChange1h?.toFixed(1)}% in last hour)` };
@@ -132,7 +142,7 @@ export function decideScalp(i: ScalpDecisionInput): ScalpDecisionResult {
     target: fresh.target,
     maxHoldMin: i.config.max_hold_min[i.tf],
     entryTimeoutMin: i.config.entry_timeout_min[i.tf],
-    note: `Quant Autopilot [${fresh.tf ?? i.tf}]: ${SCALP_LABEL[fresh.kind]}`,
+    note: `Hunter [${fresh.tf ?? i.tf}]: ${SCALP_LABEL[fresh.kind]}`,
   };
 
   return { order };

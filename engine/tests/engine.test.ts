@@ -389,6 +389,21 @@ describe('limit pullback orders', () => {
     expect(trade.pnl).toBeLessThan(0);
   });
 
+  it('a limit that rested until price came to it pays the maker fee; one a candle opened through pays taker', () => {
+    const filledFee = (open: number, low: number) => {
+      const e = engine();
+      e.onCandles([minute(at - 60_000, 104, 105.5, 103.8, 105)]);
+      e.onCommand({ type: 'open', symbol: 'BTCUSDT', side: 'long', price: 100, time: at, stop: 98, target: 110, orderType: 'limit' });
+      const fill = e.onCandles([minute(at, open, open + 0.5, low, open)]).find((x) => x.type === 'order_filled')!;
+      const { qty, price } = fill.payload as { qty: number; price: number };
+      return { price, ratePct: (Number(fill.payload.fee) / (qty * price)) * 100 };
+    };
+    // Opened at 103 above the limit and traded down to it: rested on the book, maker, at the limit's price.
+    expect(filledFee(103, 99.8)).toEqual({ price: 100, ratePct: expect.closeTo(0.02, 9) });
+    // Opened at 99.5, already through the limit: marketable at once, taker, at the open.
+    expect(filledFee(99.5, 99.2)).toEqual({ price: 99.5, ratePct: expect.closeTo(0.05, 9) });
+  });
+
   it('a candle that opens beyond the stop never fills the limit', () => {
     const e = engine();
     e.onCandles([minute(at - 60_000, 104, 105.5, 103.8, 105)]);

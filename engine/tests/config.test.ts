@@ -26,7 +26,7 @@ describe('engine config', () => {
     expect(c.speed.min_history_days).toBe(14);
     expect(c.breakout.enabled).toBe(false);
     expect(c.scalp_autopilot.enabled).toBe(false);
-    expect(c.scalp_autopilot.kinds).toEqual([]);
+    expect(c.scalp_autopilot.kinds).toEqual(['sweep_reclaim', 'vwap_bounce', 'ema_pullback', 'orb', 'fvg_retest', 'volume_climax']);
     expect(c.sessions.entry_delay_min).toBe(15);
     expect(c.models).toMatchObject({ pullback: false, zone_sweep: false, session_sweep: false, htf_poi: true });
     expect(c.htf_poi.directions).toEqual(['long']);

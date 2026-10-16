@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import { post, usePoll, usePrices, type ScalpSetup, type ScalpStats } from '../lib/api';
 import { SCALP_LABEL, type ScalpKind } from '../../engine/src/analysis/scalp';
+import type { HunterLogEntry } from '../../shared/types';
 import { coin, duration, hhmm, pct, price } from '../lib/format';
 import { Badge, Card, Empty, SideBadge, Table, td } from '../components/ui';
 import { TakePosition } from '../components/TakePosition';
@@ -18,8 +19,10 @@ interface ScalpResponse {
   setups: ScalpSetup[];
   stats: ScalpStats[];
   autopilot?: boolean;
-  /** False when config.yaml disables Hunter: the switch cannot turn it on. */
-  autopilotAllowed?: boolean;
+  /** The setup kinds Hunter may take (config scalp_autopilot.kinds); none means it never places an order. */
+  hunterKinds?: ScalpKind[];
+  /** What Hunter did lately, newest first. */
+  hunterLog?: HunterLogEntry[];
   /** Per timeframe, minutes: the max hold and the limit-entry timeout a scalp is taken with. */
   maxHoldMin?: Record<string, number>;
   entryTimeoutMin?: Record<string, number>;
@@ -73,9 +76,7 @@ export function Scalp({ go }: { go: (page: string, symbol?: string, tf?: string)
   // Autopilot state synced with backend engine
   // Off until the server says otherwise: the page must not show Hunter engaged before it knows.
   const [autopilot, setAutopilot] = useState<boolean>(false);
-  // Switching on is refused while config.yaml disables Hunter; switching off always works.
-  const cannotEngage = !autopilot && data?.autopilotAllowed === false;
-  const engageTitle = cannotEngage ? 'Disabled in config.yaml (scalp_autopilot.enabled: false)' : undefined;
+  const noKinds = data?.hunterKinds !== undefined && data.hunterKinds.length === 0;
   const [busyAutopilot, setBusyAutopilot] = useState(false);
 
   useEffect(() => {
@@ -156,8 +157,7 @@ export function Scalp({ go }: { go: (page: string, symbol?: string, tf?: string)
         <div className="flex flex-wrap items-center gap-2.5">
           <button
             onClick={toggleAutopilot}
-            disabled={busyAutopilot || cannotEngage}
-            title={engageTitle}
+            disabled={busyAutopilot}
             className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-xs font-bold shadow-md transition disabled:cursor-not-allowed disabled:opacity-50 ${
               autopilot
                 ? 'border border-sky-500/40 bg-sky-500/20 text-sky-200 hover:bg-sky-500/30'
@@ -189,6 +189,7 @@ export function Scalp({ go }: { go: (page: string, symbol?: string, tf?: string)
               <p className="text-ink-2">
                 Hunter checks every closed 5m and 15m candle of the scanner's coins. When a setup qualifies, it places a
                 limit order at the setup's key level, risking at most 1% (0.5% on wild coins) with a target of at least 2R after costs.
+                Simulated trades only. The 6-month baseline found no setup with an edge after costs, so judge it by its results on the Trades page.
               </p>
             </div>
           </div>
@@ -208,20 +209,26 @@ export function Scalp({ go }: { go: (page: string, symbol?: string, tf?: string)
               <p className="font-semibold text-ink">Hunter is OFF (Manual 1-Click Mode)</p>
               <p className="text-ink-2">
                 The scanner identifies real-time setups, but trades will not be placed automatically. Click "Take Limit" on any setup below to place pullback limit orders.
-                {data?.autopilotAllowed === false && ' Hunter is disabled in config.yaml: it lost money in the 6-month baseline backtest.'}
               </p>
             </div>
           </div>
           <button
             onClick={toggleAutopilot}
-            disabled={busyAutopilot || cannotEngage}
-            title={engageTitle}
+            disabled={busyAutopilot}
             className="rounded-lg border border-warning/40 bg-warning/20 px-3 py-1 font-semibold text-xs text-warning hover:bg-warning/30 disabled:cursor-not-allowed disabled:opacity-50"
           >
             Engage Hunter
           </button>
         </div>
       )}
+
+      {noKinds && (
+        <div role="alert" className="rounded-xl border border-critical/40 bg-critical/10 p-3.5 text-xs text-critical">
+          No setup types are enabled for Hunter (<code>scalp_autopilot.kinds: []</code> in config.yaml), so it never places an order. List the kinds it may take there and restart.
+        </div>
+      )}
+
+      <HunterActivity log={data?.hunterLog} on={autopilot} />
 
       {/* Quant Protections / Friction Budget Bar */}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
@@ -487,5 +494,40 @@ export function Scalp({ go }: { go: (page: string, symbol?: string, tf?: string)
         </p>
       </Card>
     </div>
+  );
+}
+
+const OUTCOME: Record<HunterLogEntry['outcome'], { tone: 'good' | 'warning' | 'critical'; label: string }> = {
+  placed: { tone: 'good', label: 'placed' },
+  skipped: { tone: 'warning', label: 'passed on' },
+  refused: { tone: 'critical', label: 'refused' },
+};
+
+/** What Hunter did lately: orders placed, and setups it found but did not place, with why. */
+function HunterActivity({ log, on }: { log?: HunterLogEntry[]; on: boolean }) {
+  return (
+    <Card title="Hunter activity" icon={<Bot size={16} />} right={<span className="text-xs text-ink-3">since the server started · newest first</span>}>
+      {!log?.length ? (
+        <Empty>
+          {on
+            ? 'Nothing yet. Hunter looks at each 5m and 15m close of the scanner\'s coins; setups it places or passes on show here.'
+            : 'Hunter is off. Engage it to have it place limit orders on qualifying setups.'}
+        </Empty>
+      ) : (
+        <ul className="divide-y divide-line/60 text-xs">
+          {log.slice(0, 20).map((e, i) => (
+            <li key={`${e.time}-${e.symbol}-${i}`} className="flex flex-wrap items-center gap-x-3 gap-y-1 py-2">
+              <span className="tabular text-ink-3">{hhmm(e.time)}</span>
+              <Badge tone={OUTCOME[e.outcome].tone}>{OUTCOME[e.outcome].label}</Badge>
+              <span className="font-semibold text-ink">{coin(e.symbol)}</span>
+              <span className="text-ink-3">{e.tf}</span>
+              {e.side && <SideBadge side={e.side} />}
+              {e.kind && <span className="text-ink-2">{SCALP_LABEL[e.kind as ScalpKind] ?? e.kind}</span>}
+              <span className="min-w-0 basis-full text-ink-3 sm:basis-auto">{e.detail}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Card>
   );
 }

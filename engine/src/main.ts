@@ -34,13 +34,13 @@ import { watchCoin, type CoinWatch } from './analysis/pumpWatch';
 import { timingWarnings, usualDayRange } from './analysis/timing';
 import { atr } from './analysis/indicators';
 import type { SymbolInfo } from './feed/binancePublic';
-import { TIMEFRAME_MS, type Candle, type Timeframe, type WarningNotice, type Direction, type VolumeSurgeRunner, type VolumeSurgeReport } from '../../shared/types';
+import { TIMEFRAME_MS, type Candle, type Timeframe, type WarningNotice, type HunterLogEntry, type Direction, type VolumeSurgeRunner, type VolumeSurgeReport } from '../../shared/types';
 import { PatternMemory } from './analysis/patternMemory';
 import { diagnoseVolume } from './analysis/volumeDiagnosis';
 import { analyzeVolumeSurge } from './analysis/volumeSurge';
-import { autopilotCandles, hunterSwitchRefusal, settledPrices } from './autopilot';
+import { autopilotCandles, hunterOnAtStart, settledPrices } from './autopilot';
 import { decideScalp } from './strategy/scalpAutopilot';
-import { costsFor, roundTripPct } from './speed';
+import { costsFor, limitRoundTripPct } from './speed';
 
 dotenv.config({ path: ['.env.local', '.env'], quiet: true });
 
@@ -60,7 +60,7 @@ const config = loadConfig();
 const hash = configHash(config);
 const dbPath = process.env.ENGINE_DB_PATH || config.storage.path;
 const db = openDb(dbPath);
-let quantAutopilot = config.scalp_autopilot.enabled && getKv(db, QUANT_AUTOPILOT_KEY) !== 'false';
+let quantAutopilot = hunterOnAtStart(getKv(db, QUANT_AUTOPILOT_KEY), config.scalp_autopilot.enabled);
 const store = new CandleStore(db);
 const events = new EventLog(db);
 const signals = new SignalLog(db);
@@ -873,7 +873,7 @@ function announceWarnings(): void {
 // Worked out again for a coin only when its next 5m candle closes.
 const SCALP_HOURS = 24;
 /** Round trip: fees and slippage on the entry and the exit. */
-const SCALP_COST_PCT = 2 * (config.sim.taker_fee_pct + config.sim.slippage_pct);
+const SCALP_COST_PCT = limitRoundTripPct(config.sim);
 const scalpCache = new Map<string, { asOf: number; setups: ScalpSetup[] }>();
 function scalpsFor(symbol: string, tf: '1m' | '5m' | '15m' = '5m'): ScalpSetup[] {
   const lastOpen = store.lastOpenTime(symbol, tf);
@@ -890,7 +890,8 @@ function scalpsFor(symbol: string, tf: '1m' | '5m' | '15m' = '5m'): ScalpSetup[]
   const from = candles[0]?.openTime ?? lastOpen;
   const sessionOpens = engine.sessions.between(from, lastOpen + 300_000)
     .filter((sn) => sn.name === 'london' || sn.name === 'newyork').map((sn) => sn.openTime);
-  const costPct = roundTripPct(costsFor(config, engine.speed(symbol)));
+  // Scalps are taken with resting limit orders (Take Limit, Hunter): maker fee in, taker with slippage out.
+  const costPct = limitRoundTripPct(costsFor(config, engine.speed(symbol)));
   const setups = findScalps(candles, {
     symbol,
     bias1h: chartReading(symbol, '1h')?.trend?.direction ?? 'range',
@@ -901,6 +902,15 @@ function scalpsFor(symbol: string, tf: '1m' | '5m' | '15m' = '5m'): ScalpSetup[]
   return setups;
 }
 const autoPlacedScalps = new Set<string>();
+/** What Hunter did lately, newest first (kept in memory: a restart clears it). Routine "no setup" closes are left out. */
+const hunterLog: HunterLogEntry[] = [];
+const HUNTER_LOG_MAX = 50;
+/** Skip reasons that mean only "nothing to look at on this candle", not a setup turned down. */
+const ROUTINE_SKIPS = new Set(['no_fresh_setup', 'not_enough_candles', 'timeframe_not_enabled']);
+function logHunter(entry: Omit<HunterLogEntry, 'time'>): void {
+  hunterLog.unshift({ time: Date.now(), ...entry });
+  if (hunterLog.length > HUNTER_LOG_MAX) hunterLog.length = HUNTER_LOG_MAX;
+}
 
 function runQuantAutopilot(batch: Candle[]): void {
   if (!quantAutopilot || !started || backup.standby || engine.account().halted) return;
@@ -924,7 +934,7 @@ function runQuantAutopilot(batch: Candle[]): void {
     const sessionOpens = engine.sessions.between(from, c.openTime + 300_000)
       .filter((sn) => sn.name === 'london' || sn.name === 'newyork').map((sn) => sn.openTime);
     const speed = engine.speed(c.symbol);
-    const costPct = roundTripPct(costsFor(config, speed));
+    const costPct = limitRoundTripPct(costsFor(config, speed));
 
     const decision = decideScalp({
       symbol: c.symbol,
@@ -939,8 +949,9 @@ function runQuantAutopilot(batch: Candle[]): void {
     });
 
     if (!decision.order) {
-      if (decision.skipped && decision.skipped !== 'no_fresh_setup') {
+      if (decision.skipped && !ROUTINE_SKIPS.has(decision.skipped)) {
         console.log(`[hunter] Skip ${c.symbol}: ${decision.skipped}`);
+        logHunter({ symbol: c.symbol, tf, outcome: 'skipped', detail: decision.skipped.replace(/_/g, ' ') });
       }
       continue;
     }
@@ -974,6 +985,14 @@ function runQuantAutopilot(batch: Candle[]): void {
       }
       currentHeld.add(o.symbol);
       for (const e of produced) console.log(`[hunter] ${e.type} ${e.symbol ?? ''} ${JSON.stringify(e.payload)}`);
+      const cancelled = produced.find((e) => e.type === 'order_cancelled');
+      logHunter({
+        symbol: o.symbol, tf: o.tf, kind: o.kind, side: o.side,
+        outcome: cancelled ? 'refused' : 'placed',
+        detail: cancelled
+          ? `cancelled at once: ${String(cancelled.payload.reason ?? 'unknown').replace(/_/g, ' ')}`
+          : `limit ${o.limitPrice} · stop ${o.stop} · target ${o.target}`,
+      });
       broadcast('warning', {
         symbol: o.symbol,
         code: 'autopilot_entry',
@@ -986,6 +1005,7 @@ function runQuantAutopilot(batch: Candle[]): void {
       } satisfies WarningNotice);
     } catch (err) {
       console.log(`[hunter] Order not opened for ${o.symbol}: ${message(err)}`);
+      logHunter({ symbol: o.symbol, tf: o.tf, kind: o.kind, side: o.side, outcome: 'refused', detail: message(err).replace(/_/g, ' ') });
     }
   }
 }
@@ -997,9 +1017,9 @@ app.get('/api/quant-scalp/autopilot', (_req, res) => {
 app.post('/api/control/quant-scalp-autopilot', (req, res) => {
   const b = req.body ?? {};
   const next = b.enabled !== undefined ? Boolean(b.enabled) : !quantAutopilot;
-  const refusal = hunterSwitchRefusal({ configEnabled: config.scalp_autopilot.enabled, standby: backup.standby, enable: next });
-  if (refusal) {
-    res.status(409).json({ ok: false, error: refusal, enabled: quantAutopilot });
+  // The copy holding the lock is the one that trades: a standby copy changes nothing.
+  if (backup.standby) {
+    res.status(409).json({ ok: false, error: STANDBY_MESSAGE, enabled: quantAutopilot });
     return;
   }
   quantAutopilot = next;
@@ -1014,7 +1034,7 @@ app.get('/api/scalp', (req, res) => {
   const tfs: ('1m' | '5m' | '15m')[] = reqTf === '1m' ? ['1m'] : reqTf === '5m' ? ['5m'] : reqTf === '15m' ? ['15m'] : ['1m', '5m', '15m'];
   const setups = listed().flatMap((sym) => tfs.flatMap((tf) => scalpsFor(sym, tf))).sort((a, b) => b.time - a.time);
   res.json({
-    hours: SCALP_HOURS, costPct: SCALP_COST_PCT, setups, stats: scalpStats(setups), autopilot: quantAutopilot, autopilotAllowed: config.scalp_autopilot.enabled,
+    hours: SCALP_HOURS, costPct: SCALP_COST_PCT, setups, stats: scalpStats(setups), autopilot: quantAutopilot, hunterKinds: config.scalp_autopilot.kinds, hunterLog,
     maxHoldMin: config.scalp_autopilot.max_hold_min, entryTimeoutMin: config.scalp_autopilot.entry_timeout_min,
   });
 });

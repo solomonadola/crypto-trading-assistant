@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { autopilotCandles, hunterSwitchRefusal, settledPrices } from '../src/autopilot';
+import { autopilotCandles, hunterOnAtStart, settledPrices } from '../src/autopilot';
 import { loadConfig } from '../src/config';
 import type { Candle, Timeframe } from '../../shared/types';
 
@@ -52,22 +52,14 @@ describe('settledPrices', () => {
   });
 });
 
-describe('hunterSwitchRefusal', () => {
-  it('will not switch Hunter on while the config disables it', () => {
-    expect(hunterSwitchRefusal({ configEnabled: false, standby: false, enable: true })).toMatch(/disabled in config/);
+describe('hunterOnAtStart', () => {
+  it('keeps the choice saved from the dashboard across restarts, whatever the config says', () => {
+    expect(hunterOnAtStart('true', false)).toBe(true);
+    expect(hunterOnAtStart('false', true)).toBe(false);
   });
 
-  it('always lets Hunter be switched off', () => {
-    expect(hunterSwitchRefusal({ configEnabled: false, standby: false, enable: false })).toBeNull();
-    expect(hunterSwitchRefusal({ configEnabled: true, standby: false, enable: false })).toBeNull();
-  });
-
-  it('switches it on when the config allows it', () => {
-    expect(hunterSwitchRefusal({ configEnabled: true, standby: false, enable: true })).toBeNull();
-  });
-
-  it('changes nothing on a standby copy', () => {
-    expect(hunterSwitchRefusal({ configEnabled: true, standby: true, enable: true })).toMatch(/standby/);
-    expect(hunterSwitchRefusal({ configEnabled: true, standby: true, enable: false })).toMatch(/standby/);
+  it('uses the config only before any choice has been saved', () => {
+    expect(hunterOnAtStart(null, false)).toBe(false);
+    expect(hunterOnAtStart(null, true)).toBe(true);
   });
 });

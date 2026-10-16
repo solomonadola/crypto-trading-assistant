@@ -53,7 +53,7 @@ export default function App() {
       <div className="grid h-screen place-items-center px-4">
         <div className="w-full max-w-sm rounded-2xl border border-line bg-card p-8 text-center shadow-2xl shadow-accent/10">
           <div className="mx-auto mb-4 grid h-14 w-14 place-items-center rounded-2xl bg-gradient-to-br from-accent via-london to-newyork"><Zap size={26} className="text-white" /></div>
-          <h1 className="text-xl font-semibold">Killzone</h1>
+          <h1 className="text-xl font-semibold">PerpPilot</h1>
           <p className="mt-1 text-sm text-ink-3">Sign in with an allowed Google account.</p>
           <button onClick={() => signIn().catch((e) => setError(e instanceof Error ? e.message : String(e)))}
             className="mt-6 inline-flex w-full items-center justify-center gap-2 rounded-xl bg-accent px-4 py-2.5 text-sm font-semibold text-white hover:brightness-110">
@@ -96,8 +96,8 @@ function Dashboard({ user }: { user: User | null }) {
             <Zap size={18} className="text-white" />
           </div>
           <div>
-            <p className="text-sm font-bold leading-tight">Killzone</p>
-            <p className="text-[11px] text-ink-3">simulation · futures</p>
+            <p className="text-sm font-bold leading-tight">PerpPilot</p>
+            <p className="text-[11px] text-ink-3">crypto futures assistant</p>
           </div>
         </div>
         <nav className="space-y-1">

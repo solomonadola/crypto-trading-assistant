@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Candle } from '../../shared/types';
-import { decideScalp } from '../src/strategy/scalpAutopilot';
+import { btcLastHourPct, decideScalp } from '../src/strategy/scalpAutopilot';
 import type { EngineConfig } from '../src/config';
 
 function mockConfig(): EngineConfig['scalp_autopilot'] {
@@ -48,7 +48,7 @@ function makeCandles(count: number, basePrice = 100, tfMinutes = 5): Candle[] {
 }
 
 describe('decideScalp', () => {
-  it('skips if autopilot is disabled in config', () => {
+  it('ignores config.enabled: whether Hunter runs is the caller\'s switch, not the config default', () => {
     const cfg = mockConfig();
     cfg.enabled = false;
     const res = decideScalp({
@@ -62,8 +62,8 @@ describe('decideScalp', () => {
       now: 1_700_000_000_000 + 50 * 300_000,
       config: cfg,
     });
-    expect(res.order).toBeNull();
-    expect(res.skipped).toBe('autopilot_disabled');
+    expect(res.skipped).not.toBe('autopilot_disabled');
+    expect(res.skipped).toBe('no_fresh_setup');
   });
 
   it('skips if timeframe is not enabled in config', () => {
@@ -100,14 +100,16 @@ describe('decideScalp', () => {
     expect(res.skipped).toBe('not_enough_candles');
   });
 
-  it('evaluates BTC dumping condition correctly', () => {
-    const btc1h: Candle[] = [
-      { symbol: 'BTCUSDT', tf: '1h', openTime: 0, closeTime: 3600_000, open: 60000, high: 60100, low: 59900, close: 60000, volume: 10, quoteVolume: 600000, trades: 50 },
-      { symbol: 'BTCUSDT', tf: '1h', openTime: 3600_000, closeTime: 7200_000, open: 60000, high: 60000, low: 58000, close: 59000, volume: 100, quoteVolume: 5900000, trades: 500 }, // -1.67%
-    ];
-
-    const btcChange1h = ((btc1h[1].close - btc1h[0].close) / btc1h[0].close) * 100;
-    expect(btcChange1h).toBeLessThan(-1.0);
+  it('measures BTC over the last closed hour, however long the window passed in', () => {
+    const hour = (i: number, close: number): Candle =>
+      ({ symbol: 'BTCUSDT', tf: '1h', openTime: i * 3600_000, closeTime: (i + 1) * 3600_000, open: close, high: close, low: close, close, volume: 1, quoteVolume: close, trades: 1 });
+    // 50 hours of a slow slide from 64000 to 60000 (-6%), then a flat last hour: not dumping now.
+    const window = Array.from({ length: 50 }, (_, i) => hour(i, 64000 - i * (4000 / 49)));
+    window.push(hour(50, window[49].close));
+    expect(btcLastHourPct(window)).toBeCloseTo(0, 6);
+    // The last hour itself falls 1.67%.
+    expect(btcLastHourPct([hour(0, 60000), hour(1, 59000)])).toBeCloseTo(-1.667, 2);
+    expect(btcLastHourPct([hour(0, 60000)])).toBeNull();
   });
 });
 

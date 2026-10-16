@@ -277,6 +277,7 @@ export const configSchema = z.object({
 
   sim: z.object({
     taker_fee_pct: z.number().min(0).max(1),
+    maker_fee_pct: z.number().min(0).max(1),
     slippage_pct: z.number().min(0).max(5),
     charge_funding: z.boolean(),
     maintenance_margin_pct: z.number().min(0).max(10),

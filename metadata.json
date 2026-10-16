@@ -1,5 +1,5 @@
 {
-  "name": "Killzone",
-  "description": "Simulated crypto futures engine: session-based trend pullback setups on Binance public data, no exchange account.",
+  "name": "PerpPilot",
+  "description": "Crypto futures trading assistant: session-based trend pullback setups on Binance public data, no exchange account.",
   "requestFramePermissions": []
 }

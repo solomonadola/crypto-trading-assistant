@@ -1,11 +1,11 @@
-# Killzone
+# PerpPilot
 
 A simulated crypto futures trading engine with three strategy modes:
 
 | Mode | How it works | Config |
 |---|---|---|
 | **Institutional (HTF pullback)** | Engine scans coins, arms setups on the 1H chart, waits for a 15M CHoCH confirmation, then opens a simulated trade with a stop, target, and profit ladder. Fully automatic. | `pullback`, `exits`, `allocation` in `config.yaml` |
-| **Hunter (scalp autopilot)** | Places limit orders at key levels on 5M/15M scalp setups. Automatic when enabled. | `scalp_autopilot` in `config.yaml` |
+| **Hunter (scalp autopilot)** | Places limit orders at key levels on 5M/15M scalp setups. Automatic while switched on from the Hunter page. | `scalp_autopilot` in `config.yaml` |
 | **Manual trades** | You open and manage trades from the dashboard or via API. Same risk rules apply. | `POST /api/positions/open` |
 
 It reads **Binance USDⓈ-M public market data** — no account, no API keys needed.
@@ -79,7 +79,7 @@ or get filtered.
 | `engine/src/filters.ts`, `scoring.ts` | Filters (chop, fakeout, stagnation, etc.) and confluence scoring. |
 | `engine/src/feed/` | Binance public client, live and replay candle feeds, candle store. |
 | `engine/src/storage/` | SQLite: append-only trade log, signals, trade journal. |
-| `engine/tests/` | 30 test files, 410 tests. |
+| `engine/tests/` | 30 test files, 408 tests. |
 | `src/` | React dashboard (Vite + Tailwind). |
 | `src/pages/` | Dashboard pages: Overview, Market, Trades, Signals, Scalp, Ideas, Chart, FilterLab. |
 | `data/engine/engine.db` | SQLite database (delete it to start fresh). |
@@ -89,7 +89,7 @@ or get filtered.
 ## Running Tests
 
 ```bash
-# Run all 410 tests (engine logic, storage, indicators, backtest, etc.)
+# Run all 408 tests (engine logic, storage, indicators, backtest, etc.)
 npm test
 
 # Type check (no emit)
@@ -254,7 +254,17 @@ curl http://localhost:3009/api/htf/BTCUSDT | jq
 
 ### 7. Test Hunter (the scalp autopilot)
 
-Hunter is disabled by default (see `config.yaml`). To test its logic:
+Turn Hunter on or off with **Engage Hunter** on the Hunter page. Your choice is
+saved and survives restarts; `scalp_autopilot.enabled` in `config.yaml` is only
+the default before you first use the switch. `scalp_autopilot.kinds` lists the
+setups it may take (an empty list means it never places an order).
+
+The **Hunter activity** card on that page lists what it did: orders placed, and
+setups it passed on or the engine refused, with the reason. Most scalps are
+refused as `fees too high` while `allocation.max_fee_drag_pct` is 15: tight 5m
+stops leave little room after costs.
+
+To test its logic:
 
 ```bash
 # Check Hunter's status
@@ -648,7 +658,7 @@ npm start        # NODE_ENV=production node server.ts
 ```bash
 npm install              # Install dependencies
 npm run dev              # Dev server (engine + dashboard)
-npm test                 # Run all 410 tests
+npm test                 # Run all 408 tests
 npm run lint             # Type check
 npm run build            # Production build
 npm start                # Start production server

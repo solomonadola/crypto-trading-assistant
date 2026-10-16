@@ -40,13 +40,12 @@ export function settledPrices(
 }
 
 /**
- * Why Hunter (the scalp autopilot) may not be switched as asked from the dashboard, or null when it may.
- * With `scalp_autopilot.enabled: false` in the config it stays off: the switch used to turn it on anyway
- * until the next restart. Switching it off is always allowed. A standby copy changes nothing: the copy
- * holding the lock is the one that trades.
+ * Whether Hunter (the scalp autopilot) is on at startup. The dashboard's switch is the authority: its last
+ * saved choice ('true' or 'false') wins, so a restart never turns Hunter on or off by itself. Only when
+ * nothing has been saved yet does config.yaml's `scalp_autopilot.enabled` decide.
  */
-export function hunterSwitchRefusal(o: { configEnabled: boolean; standby: boolean; enable: boolean }): string | null {
-  if (o.standby) return 'This copy is on standby; switch Hunter on the copy that holds the lock';
-  if (o.enable && !o.configEnabled) return 'Hunter is disabled in config.yaml (scalp_autopilot.enabled: false); enable it there and restart to switch it on';
-  return null;
+export function hunterOnAtStart(saved: string | null, configDefault: boolean): boolean {
+  if (saved === 'true') return true;
+  if (saved === 'false') return false;
+  return configDefault;
 }

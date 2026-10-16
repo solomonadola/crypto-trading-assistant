@@ -4,7 +4,7 @@ import { Engine } from '../../src/core/engine';
 import { loadConfig, configHash, type EngineConfig } from '../../src/config';
 import type { CandleStore } from '../../src/feed/candleStore';
 import { decideScalp } from '../../src/strategy/scalpAutopilot';
-import { roundTripPct, costsFor } from '../../src/speed';
+import { limitRoundTripPct, costsFor } from '../../src/speed';
 import { compareCandles, type Candle, type ClosedTradeView, type Direction, type Timeframe } from '../../../shared/types';
 import type { ScalpKind } from '../../src/analysis/scalp';
 import type { SymbolInfo } from '../../src/feed/binancePublic';
@@ -179,7 +179,8 @@ export async function runBacktest(opts: BacktestRunOptions): Promise<BacktestRes
             .filter((sn) => sn.name === 'london' || sn.name === 'newyork').map((sn) => sn.openTime);
 
           const speed = engine.speed(c.symbol);
-          const costPct = roundTripPct(costsFor(cfg, speed));
+          // Hunter enters with resting limit orders: maker fee in, taker with slippage out.
+          const costPct = limitRoundTripPct(costsFor(cfg, speed));
 
           const decision = decideScalp({
             symbol: c.symbol,

@@ -30,7 +30,7 @@ import { armZoneSweep, confirmZoneSweep, zoneSweepStillValid, type ZoneSweepConf
 import { armHtfPoi, chochOn, htfPointsOfInterest, htfPoiStillValid, type HtfPoi } from '../strategy/htfPoi';
 import { liquidityPlan } from '../strategy/smc';
 import { liquidityLevels, type LiquidityLevel } from '../analysis/liquidity';
-import { costsFor, netRewardRisk, roundTripPct, speedSettings, type SpeedGroup } from '../speed';
+import { costsFor, limitRoundTripPct, netRewardRisk, roundTripPct, speedSettings, type SpeedGroup } from '../speed';
 
 const DIRECTIONS: Direction[] = ['long', 'short'];
 /** Entry-window blocks that end an armed setup; a funding pause only delays it. */
@@ -537,9 +537,11 @@ export class Engine {
     const speed = buildContext(this.market, symbol, this.clock, this.cfg, this.funding.get(symbol) ?? null)?.speed ?? 'normal';
     // The same reward:risk floor as the engine's own trades, after fees and slippage: no 1:1 trades.
     if (target === null) throw new CommandError(`A take-profit is needed: trades must aim for at least ${this.cfg.exits.min_rr}R`);
-    const rr = netRewardRisk(price, stop, target, roundTripPct(costsFor(this.cfg, speed)));
-    if (rr < this.cfg.exits.min_rr) throw new CommandError(`Reward:risk is ${rr.toFixed(2)}R after costs; at least ${this.cfg.exits.min_rr}R is needed`);
     const orderType = cmd.orderType ?? 'market';
+    // A limit entry pays the maker fee and does not slip; a market entry pays taker and slips both ways.
+    const costs = costsFor(this.cfg, speed);
+    const rr = netRewardRisk(price, stop, target, orderType === 'limit' ? limitRoundTripPct(costs) : roundTripPct(costs));
+    if (rr < this.cfg.exits.min_rr) throw new CommandError(`Reward:risk is ${rr.toFixed(2)}R after costs; at least ${this.cfg.exits.min_rr}R is needed`);
     const setup = cmd.setup ?? 'manual';
     // A market order fills at `price` (the mark), checked above; a limit fills against the latest price.
     const currentPrice = orderType === 'limit' ? this.priceOf(symbol) : null;
@@ -592,7 +594,8 @@ export class Engine {
     if (block === 'weekend' || block === 'funding_window') failures.push(`session_${block}`);
     const stopPct = (Math.abs(entry - stop) / entry) * 100;
     if (stopPct > cfg.scalp_autopilot.max_stop_pct) failures.push('stop_too_wide');
-    if ((roundTripPct(costsFor(cfg, speed)) / stopPct) * 100 > cfg.allocation.max_fee_drag_pct) failures.push('fees_too_high');
+    // Scalps are entered with resting limit orders: maker fee in, taker with slippage out.
+    if ((limitRoundTripPct(costsFor(cfg, speed)) / stopPct) * 100 > cfg.allocation.max_fee_drag_pct) failures.push('fees_too_high');
     const last15 = this.market.recent(symbol, cfg.timeframes.trigger, 1)[0];
     const ctx = last15 ? buildContext(this.market, symbol, last15.closeTime, cfg, this.funding.get(symbol) ?? null) : null;
     if (ctx) {
@@ -770,10 +773,13 @@ export class Engine {
       : marketFill(e.side, 'open', c.open, costs);
 
     if (s * (price - e.stop) <= 0) return cancel('filled_beyond_stop');
+    // A limit rested on the book only if this candle opened on the far side of it and price then came to it;
+    // one the candle opened through was marketable at once: a taker fill.
+    const maker = e.orderType === 'limit' && s * (c.open - e.refPrice) > 0;
 
     // Size from the fill: the loss at the stop must still fit the cap.
     const equity = equityOf(this.portfolio, (x) => this.priceOf(x));
-    const lossPct = (Math.abs(price - e.stop) / price) * 100 + roundTripPct(costs);
+    const lossPct = (Math.abs(price - e.stop) / price) * 100 + (maker ? limitRoundTripPct(costs) : roundTripPct(costs));
     const riskPct = Math.min(cfg.allocation.max_loss_per_trade_pct, speedSettings(cfg, e.speed).risk_pct);
     const maxNotional = ((riskPct / 100) * equity / lossPct) * 100;
     const rules = this.rules.get(e.symbol);
@@ -785,7 +791,7 @@ export class Engine {
 
     const fill: EntryFill = {
       role: 'entry', side: e.side, qty, price, stop: e.stop, target: e.target,
-      fee: fee(qty * price, cfg.sim), session: this.sessions.ownerAt(e.placedAt),
+      fee: fee(qty * price, cfg.sim, maker), session: this.sessions.ownerAt(e.placedAt),
       leverage: cfg.leverage, liqPrice, chochLevel: e.chochLevel, signalId: e.signalId, speed: e.speed ?? 'normal', setup: e.setup,
       ...(e.note ? { note: e.note } : {}), ...(e.maxHoldMin ? { maxHoldMin: e.maxHoldMin } : {}),
     };
