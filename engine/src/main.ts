@@ -17,8 +17,7 @@ import { replayCandles } from './feed/replayFeed';
 import { CommandError, Engine, type EngineCommand } from './core/engine';
 import { Results } from './storage/results';
 import { SignalLog } from './storage/signals';
-import { TradeJournalStore } from './storage/journal';
-import type { JournalEntry } from '../../shared/types';
+import { journalEntryFrom, TradeJournalStore } from './storage/journal';
 import { FirestoreBackup, type BackupState } from './storage/firestoreBackup';
 import { backupToFile } from './storage/fileBackup';
 import { HISTORY_TABLES, insertRows, lastKey, rowsAfter } from './storage/history';
@@ -35,13 +34,15 @@ import { watchCoin, type CoinWatch } from './analysis/pumpWatch';
 import { timingWarnings, usualDayRange } from './analysis/timing';
 import { atr } from './analysis/indicators';
 import type { SymbolInfo } from './feed/binancePublic';
-import { TIMEFRAME_MS, type Candle, type Timeframe, type WarningNotice, type Direction, type VolumeSurgeRunner, type VolumeSurgeReport } from '../../shared/types';
+import { TIMEFRAME_MS, type Candle, type Timeframe, type WarningNotice, type HunterLogEntry, type Direction, type VolumeSurgeRunner, type VolumeSurgeReport } from '../../shared/types';
 import { PatternMemory } from './analysis/patternMemory';
 import { diagnoseVolume } from './analysis/volumeDiagnosis';
 import { analyzeVolumeSurge } from './analysis/volumeSurge';
-import { autopilotCandles, settledPrices } from './autopilot';
+import { autopilotCandles, hunterOnAtStart, settledPrices } from './autopilot';
 import { decideScalp } from './strategy/scalpAutopilot';
-import { costsFor, roundTripPct } from './speed';
+import { killzoneSweep, sweepMarket } from './strategy/killzoneSweep';
+import { windowAt } from './sessions';
+import { costsFor, limitRoundTripPct } from './speed';
 
 dotenv.config({ path: ['.env.local', '.env'], quiet: true });
 
@@ -61,7 +62,7 @@ const config = loadConfig();
 const hash = configHash(config);
 const dbPath = process.env.ENGINE_DB_PATH || config.storage.path;
 const db = openDb(dbPath);
-let quantAutopilot = config.scalp_autopilot.enabled && getKv(db, QUANT_AUTOPILOT_KEY) !== 'false';
+let quantAutopilot = hunterOnAtStart(getKv(db, QUANT_AUTOPILOT_KEY), config.scalp_autopilot.enabled);
 const store = new CandleStore(db);
 const events = new EventLog(db);
 const signals = new SignalLog(db);
@@ -492,16 +493,20 @@ app.get('/api/journal/:id', (req, res) => {
   res.json(entry);
 });
 app.post('/api/journal/:id', (req, res) => {
-  const tradeId = req.params.id;
-  const { rating, tags, notes, ata } = req.body || {};
-  const entry: JournalEntry = {
-    tradeId,
-    rating: Number(rating) || 0,
-    tags: Array.isArray(tags) ? tags : [],
-    notes: String(notes || ''),
-    ata: ata && typeof ata === 'object' ? ata : undefined,
-    updatedAt: Date.now(),
-  };
+  if (backup.standby) {
+    res.status(409).json({ ok: false, error: STANDBY_MESSAGE });
+    return;
+  }
+  const tradeId = String(req.params.id);
+  if (!engine.closedTrades().some((t) => t.id === tradeId)) {
+    res.status(404).json({ ok: false, error: `No closed trade ${tradeId}` });
+    return;
+  }
+  const entry = journalEntryFrom(tradeId, req.body, Date.now());
+  if (typeof entry === 'string') {
+    res.status(400).json({ ok: false, error: entry });
+    return;
+  }
   journalStore.save(entry);
   res.json({ ok: true, entry });
 });
@@ -650,6 +655,7 @@ app.post('/api/control/kill', async (req, res) => {
   control(() => ({ type: 'kill', reason: 'manual kill', prices, time: Date.now() }))(req, res);
 });
 app.post('/api/control/pause', control(() => ({ type: 'pause', reason: 'paused from the dashboard' })));
+app.post('/api/control/resume', control(() => ({ type: 'resume' })));
 app.post('/api/control/reset', control((req) => {
   const b = Number(req.body?.balance);
   return { type: 'reset_balance', balance: b > 0 ? b : undefined };
@@ -869,7 +875,7 @@ function announceWarnings(): void {
 // Worked out again for a coin only when its next 5m candle closes.
 const SCALP_HOURS = 24;
 /** Round trip: fees and slippage on the entry and the exit. */
-const SCALP_COST_PCT = 2 * (config.sim.taker_fee_pct + config.sim.slippage_pct);
+const SCALP_COST_PCT = limitRoundTripPct(config.sim);
 const scalpCache = new Map<string, { asOf: number; setups: ScalpSetup[] }>();
 function scalpsFor(symbol: string, tf: '1m' | '5m' | '15m' = '5m'): ScalpSetup[] {
   const lastOpen = store.lastOpenTime(symbol, tf);
@@ -886,7 +892,8 @@ function scalpsFor(symbol: string, tf: '1m' | '5m' | '15m' = '5m'): ScalpSetup[]
   const from = candles[0]?.openTime ?? lastOpen;
   const sessionOpens = engine.sessions.between(from, lastOpen + 300_000)
     .filter((sn) => sn.name === 'london' || sn.name === 'newyork').map((sn) => sn.openTime);
-  const costPct = roundTripPct(costsFor(config, engine.speed(symbol)));
+  // Scalps are taken with resting limit orders (Take Limit, Hunter): maker fee in, taker with slippage out.
+  const costPct = limitRoundTripPct(costsFor(config, engine.speed(symbol)));
   const setups = findScalps(candles, {
     symbol,
     bias1h: chartReading(symbol, '1h')?.trend?.direction ?? 'range',
@@ -897,6 +904,15 @@ function scalpsFor(symbol: string, tf: '1m' | '5m' | '15m' = '5m'): ScalpSetup[]
   return setups;
 }
 const autoPlacedScalps = new Set<string>();
+/** What Hunter did lately, newest first (kept in memory: a restart clears it). Routine "no setup" closes are left out. */
+const hunterLog: HunterLogEntry[] = [];
+const HUNTER_LOG_MAX = 50;
+/** Skip reasons that mean only "nothing to look at on this candle", not a setup turned down. */
+const ROUTINE_SKIPS = new Set(['no_fresh_setup', 'not_enough_candles', 'timeframe_not_enabled', 'no_setup', 'outside_killzone', 'no_context']);
+function logHunter(entry: Omit<HunterLogEntry, 'time'>): void {
+  hunterLog.unshift({ time: Date.now(), ...entry });
+  if (hunterLog.length > HUNTER_LOG_MAX) hunterLog.length = HUNTER_LOG_MAX;
+}
 
 function runQuantAutopilot(batch: Candle[]): void {
   if (!quantAutopilot || !started || backup.standby || engine.account().halted) return;
@@ -911,78 +927,130 @@ function runQuantAutopilot(batch: Candle[]): void {
   for (const c of candidates) {
     if (currentHeld.has(c.symbol)) continue;
     const tf = c.tf as '5m' | '15m';
+    // Hunter enters with resting limit orders: maker fee in, taker with slippage out.
+    const costPct = limitRoundTripPct(costsFor(config, engine.speed(c.symbol)));
 
+    // Hunter's main strategy: the killzone sweep, on 5m closes.
+    if (auto.killzone_sweep.enabled && tf === '5m') {
+      const kz = killzoneSweep({
+        symbol: c.symbol,
+        market: sweepMarket(engine.latestContext(c.symbol)),
+        m5: store.latest(c.symbol, '5m', 120),
+        killzone: windowAt(c.closeTime, auto.killzone_sweep.windows),
+        costPct,
+        minRr: config.exits.min_rr,
+        config: auto.killzone_sweep,
+      });
+      if (kz.order) {
+        if (placeHunterOrder({ ...kz.order, kind: 'killzone_sweep', label: `Killzone sweep (${kz.order.swept})` }, c)) currentHeld.add(c.symbol);
+        continue;
+      }
+      if (kz.skipped && !ROUTINE_SKIPS.has(kz.skipped)) {
+        logHunter({ symbol: c.symbol, tf, kind: 'Killzone sweep', outcome: 'skipped', detail: kz.skipped.replace(/_/g, ' ') });
+      }
+    }
+
+    // The classic scalp setups, only those listed in scalp_autopilot.kinds.
+    if (!auto.kinds.length) continue;
     const count = tf === '15m' ? (SCALP_HOURS * 4) + 60 : (SCALP_HOURS * 12) + 72;
     const candles = store.latest(c.symbol, tf, count);
-    const candles1h = store.latest(c.symbol, '1h', 200);
-    const btc1h = store.latest('BTCUSDT', '1h', 2);
     const from = candles[0]?.openTime ?? c.openTime;
     const sessionOpens = engine.sessions.between(from, c.openTime + 300_000)
       .filter((sn) => sn.name === 'london' || sn.name === 'newyork').map((sn) => sn.openTime);
-    const speed = engine.speed(c.symbol);
-    const costPct = roundTripPct(costsFor(config, speed));
-
     const decision = decideScalp({
       symbol: c.symbol,
       tf,
       candles,
-      candles1h,
-      btc1h,
+      candles1h: store.latest(c.symbol, '1h', 200),
+      btc1h: store.latest('BTCUSDT', '1h', 2),
       sessionOpens,
       costPct,
       now: c.closeTime,
       config: auto,
     });
-
     if (!decision.order) {
-      if (decision.skipped && decision.skipped !== 'no_fresh_setup') {
-        console.log(`[quant-autopilot] Skip ${c.symbol}: ${decision.skipped}`);
+      if (decision.skipped && !ROUTINE_SKIPS.has(decision.skipped)) {
+        console.log(`[hunter] Skip ${c.symbol}: ${decision.skipped}`);
+        logHunter({ symbol: c.symbol, tf, outcome: 'skipped', detail: decision.skipped.replace(/_/g, ' ') });
       }
       continue;
     }
+    if (placeHunterOrder({ ...decision.order, label: SCALP_LABEL[decision.order.kind] }, c)) currentHeld.add(c.symbol);
+  }
+}
 
-    const o = decision.order;
-    const key = `${o.symbol}|${c.openTime}|${o.kind}|${o.side}`;
-    if (autoPlacedScalps.has(key)) continue;
+/** One of Hunter's orders, whichever strategy found it. */
+interface HunterOrder {
+  symbol: string;
+  side: Direction;
+  tf: '5m' | '15m';
+  kind: string;
+  /** How the activity list and the notification name it. */
+  label: string;
+  limitPrice: number;
+  stop: number;
+  target: number;
+  note: string;
+  maxHoldMin: number;
+  entryTimeoutMin: number;
+  progressCheckMin?: number;
+  progressMinR?: number;
+}
 
-    console.log(`[quant-autopilot] Auto-executing ${o.symbol} ${o.side} [${o.tf}] ${o.kind} limit pullback @ ${o.limitPrice}`);
-    try {
-      const produced = command({
-        type: 'open',
-        symbol: o.symbol,
-        side: o.side,
-        price: o.limitPrice,
-        // At the close: the next 1m candle, which opens then, can fill it.
-        time: c.closeTime,
-        stop: o.stop,
-        target: o.target,
-        orderType: 'limit',
-        note: o.note,
-        // The engine checks it as the autopilot's (session, stop width, costs, funding, BTC, daily range) and records it as "scalp".
-        setup: 'scalp',
-        maxHoldMin: o.maxHoldMin,
-        entryTimeoutMin: o.entryTimeoutMin,
-      });
-      autoPlacedScalps.add(key);
-      if (autoPlacedScalps.size > 500) {
-        const first = autoPlacedScalps.values().next().value;
-        if (first) autoPlacedScalps.delete(first);
-      }
-      currentHeld.add(o.symbol);
-      for (const e of produced) console.log(`[quant-autopilot] ${e.type} ${e.symbol ?? ''} ${JSON.stringify(e.payload)}`);
-      broadcast('warning', {
-        symbol: o.symbol,
-        code: 'autopilot_entry',
-        level: 'caution',
-        side: o.side,
-        title: `Autopilot: Limit Pullback Placed [${o.tf}]`,
-        detail: `${SCALP_LABEL[o.kind]} limit placed at ${o.limitPrice}. Waiting for pullback (stop ${o.stop}, target ${o.target}).`,
-        time: Date.now(),
-        phase: null,
-      } satisfies WarningNotice);
-    } catch (err) {
-      console.log(`[quant-autopilot] Order not opened for ${o.symbol}: ${message(err)}`);
+/** Places one of Hunter's limit orders through the engine (its risk rules and scalp checks); true when one is resting. */
+function placeHunterOrder(o: HunterOrder, c: Candle): boolean {
+  const key = `${o.symbol}|${c.openTime}|${o.kind}|${o.side}`;
+  if (autoPlacedScalps.has(key)) return false;
+  console.log(`[hunter] Placing ${o.symbol} ${o.side} [${o.tf}] ${o.kind} limit @ ${o.limitPrice}`);
+  try {
+    const produced = command({
+      type: 'open',
+      symbol: o.symbol,
+      side: o.side,
+      price: o.limitPrice,
+      // At the close: the next 1m candle, which opens then, can fill it.
+      time: c.closeTime,
+      stop: o.stop,
+      target: o.target,
+      orderType: 'limit',
+      note: o.note,
+      // The engine checks it as the autopilot's (session, stop width, costs, funding, BTC, daily range) and records it as "scalp".
+      setup: 'scalp',
+      maxHoldMin: o.maxHoldMin,
+      entryTimeoutMin: o.entryTimeoutMin,
+      progressCheckMin: o.progressCheckMin,
+      progressMinR: o.progressMinR,
+    });
+    autoPlacedScalps.add(key);
+    if (autoPlacedScalps.size > 500) {
+      const first = autoPlacedScalps.values().next().value;
+      if (first) autoPlacedScalps.delete(first);
     }
+    for (const e of produced) console.log(`[hunter] ${e.type} ${e.symbol ?? ''} ${JSON.stringify(e.payload)}`);
+    const cancelled = produced.find((e) => e.type === 'order_cancelled');
+    logHunter({
+      symbol: o.symbol, tf: o.tf, kind: o.label, side: o.side,
+      outcome: cancelled ? 'refused' : 'placed',
+      detail: cancelled
+        ? `cancelled at once: ${String(cancelled.payload.reason ?? 'unknown').replace(/_/g, ' ')}`
+        : `limit ${o.limitPrice} · stop ${o.stop} · target ${o.target}`,
+    });
+    if (cancelled) return false;
+    broadcast('warning', {
+      symbol: o.symbol,
+      code: 'autopilot_entry',
+      level: 'caution',
+      side: o.side,
+      title: `Hunter: Limit Placed [${o.tf}]`,
+      detail: `${o.label}: limit at ${o.limitPrice} (stop ${o.stop}, target ${o.target}).`,
+      time: Date.now(),
+      phase: null,
+    } satisfies WarningNotice);
+    return true;
+  } catch (err) {
+    console.log(`[hunter] Order not opened for ${o.symbol}: ${message(err)}`);
+    logHunter({ symbol: o.symbol, tf: o.tf, kind: o.label, side: o.side, outcome: 'refused', detail: message(err).replace(/_/g, ' ') });
+    return false;
   }
 }
 
@@ -993,9 +1061,14 @@ app.get('/api/quant-scalp/autopilot', (_req, res) => {
 app.post('/api/control/quant-scalp-autopilot', (req, res) => {
   const b = req.body ?? {};
   const next = b.enabled !== undefined ? Boolean(b.enabled) : !quantAutopilot;
+  // The copy holding the lock is the one that trades: a standby copy changes nothing.
+  if (backup.standby) {
+    res.status(409).json({ ok: false, error: STANDBY_MESSAGE, enabled: quantAutopilot });
+    return;
+  }
   quantAutopilot = next;
   setKv(db, QUANT_AUTOPILOT_KEY, String(quantAutopilot));
-  console.log(`[quant-autopilot] Autopilot is now ${quantAutopilot ? 'ACTIVE' : 'OFF'}`);
+  console.log(`[hunter] Hunter is now ${quantAutopilot ? 'ACTIVE' : 'OFF'}`);
   broadcast('engine', { clock: engine.now(), quantAutopilot });
   res.json({ ok: true, enabled: quantAutopilot });
 });
@@ -1005,7 +1078,7 @@ app.get('/api/scalp', (req, res) => {
   const tfs: ('1m' | '5m' | '15m')[] = reqTf === '1m' ? ['1m'] : reqTf === '5m' ? ['5m'] : reqTf === '15m' ? ['15m'] : ['1m', '5m', '15m'];
   const setups = listed().flatMap((sym) => tfs.flatMap((tf) => scalpsFor(sym, tf))).sort((a, b) => b.time - a.time);
   res.json({
-    hours: SCALP_HOURS, costPct: SCALP_COST_PCT, setups, stats: scalpStats(setups), autopilot: quantAutopilot,
+    hours: SCALP_HOURS, costPct: SCALP_COST_PCT, setups, stats: scalpStats(setups), autopilot: quantAutopilot, hunterKinds: config.scalp_autopilot.kinds, hunterLog,
     maxHoldMin: config.scalp_autopilot.max_hold_min, entryTimeoutMin: config.scalp_autopilot.entry_timeout_min,
   });
 });

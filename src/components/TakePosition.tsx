@@ -1,7 +1,7 @@
 // "Take position": opens a simulated trade by hand at Binance's mark price,
 // sized and limited by the engine's usual risk rules, with an active pre-flight
 // check, Patience Copilot (wait for key level / wait for candle confirmation),
-// and Empirical Pattern Memory matrix to intercept negative-EV setups.
+// and pattern memory (estimates per market condition) to flag likely negative-EV setups.
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle, CheckCircle2, ChevronDown, ChevronUp, Clock,
@@ -246,7 +246,7 @@ function Dialog({ symbol, defaults, onClose }: { symbol: string; defaults: TakeD
     }
   }
 
-  // 3. Empirical Pattern Memory Matrix
+  // 3. Pattern memory
   if (pattern) {
     if (pattern.compositeVerdict === 'strong_edge') {
       checks.push({ id: 'pattern', label: `Pattern Edge: ${pattern.winRatePct}% Win Rate (+${pattern.expectancyR}R EV)`, status: 'good', detail: pattern.summary, pts: 20 });
@@ -511,13 +511,13 @@ function Dialog({ symbol, defaults, onClose }: { symbol: string; defaults: TakeD
               </div>
             </div>
 
-            {/* ---------------- 2. Empirical Pattern Memory Card ---------------- */}
+            {/* ---------------- 2. Pattern Memory Card ---------------- */}
             {pattern && (
               <div className="rounded-xl border border-line bg-card-2/60 p-2.5 text-xs">
                 <div className="flex items-center justify-between mb-1.5">
                   <div className="flex items-center gap-1.5">
                     <Sparkles className="text-accent" size={13} />
-                    <span className="text-[10px] font-bold uppercase tracking-wider text-ink-3">Machine Pattern Memory</span>
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-ink-3">Pattern Memory</span>
                   </div>
                   <span className={`font-semibold tabular ${
                     pattern.compositeVerdict === 'strong_edge' || pattern.compositeVerdict === 'positive_edge'
@@ -553,6 +553,9 @@ function Dialog({ symbol, defaults, onClose }: { symbol: string; defaults: TakeD
                   )}
                 </div>
                 <p className="mt-1.5 text-[11px] text-ink-3 leading-snug">{pattern.summary}</p>
+                <p className={`mt-1 text-[10px] ${pattern.assumedPct >= 50 ? 'text-warning' : 'text-ink-3'}`}>
+                  {100 - pattern.assumedPct}% from your closed trades · {pattern.assumedPct}% built-in assumptions
+                </p>
                 {pattern.volumeDiagnosis && (
                   <div className="mt-2 rounded-lg bg-black/30 p-2 text-[11px] text-ink-2 border border-line/40">
                     <span className="font-semibold text-accent flex items-center gap-1 mb-0.5">

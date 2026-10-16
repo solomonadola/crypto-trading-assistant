@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { autopilotCandles, settledPrices } from '../src/autopilot';
+import { autopilotCandles, hunterOnAtStart, settledPrices } from '../src/autopilot';
 import { loadConfig } from '../src/config';
 import type { Candle, Timeframe } from '../../shared/types';
 
@@ -49,5 +49,17 @@ describe('settledPrices', () => {
   it('waits for a stored candle the engine has not processed yet', () => {
     const engineClock = now - 64_000;
     expect(settledPrices(prices, { engineClock, lastMinuteClose: () => now - 4_000, now })).toEqual({});
+  });
+});
+
+describe('hunterOnAtStart', () => {
+  it('keeps the choice saved from the dashboard across restarts, whatever the config says', () => {
+    expect(hunterOnAtStart('true', false)).toBe(true);
+    expect(hunterOnAtStart('false', true)).toBe(false);
+  });
+
+  it('uses the config only before any choice has been saved', () => {
+    expect(hunterOnAtStart(null, false)).toBe(false);
+    expect(hunterOnAtStart(null, true)).toBe(true);
   });
 });

@@ -389,6 +389,105 @@ describe('limit pullback orders', () => {
     expect(trade.pnl).toBeLessThan(0);
   });
 
+  it('a limit that rested until price came to it pays the maker fee; one a candle opened through pays taker', () => {
+    const filledFee = (open: number, low: number) => {
+      const e = engine();
+      e.onCandles([minute(at - 60_000, 104, 105.5, 103.8, 105)]);
+      e.onCommand({ type: 'open', symbol: 'BTCUSDT', side: 'long', price: 100, time: at, stop: 98, target: 110, orderType: 'limit' });
+      const fill = e.onCandles([minute(at, open, open + 0.5, low, open)]).find((x) => x.type === 'order_filled')!;
+      const { qty, price } = fill.payload as { qty: number; price: number };
+      return { price, ratePct: (Number(fill.payload.fee) / (qty * price)) * 100 };
+    };
+    // Opened at 103 above the limit and traded down to it: rested on the book, maker, at the limit's price.
+    expect(filledFee(103, 99.8)).toEqual({ price: 100, ratePct: expect.closeTo(0.02, 9) });
+    // Opened at 99.5, already through the limit: marketable at once, taker, at the open.
+    expect(filledFee(99.5, 99.2)).toEqual({ price: 99.5, ratePct: expect.closeTo(0.05, 9) });
+  });
+
+  it('a scalp with a progress check is cut at the market when it has not been 0.5R our way by then', () => {
+    const run = (peak: number) => {
+      const e = engine();
+      e.onCandles([minute(at - 60_000, 104, 105.5, 103.8, 105)]);
+      e.onCommand({ type: 'open', symbol: 'BTCUSDT', side: 'long', price: 100, time: at, stop: 98, target: 110, orderType: 'limit', progressCheckMin: 30, progressMinR: 0.5 });
+      e.onCandles([minute(at, 103, 103, 99.8, 100.2)]);   // fills at 100; risk 2, so 0.5R is 101
+      expect(e.positions()).toHaveLength(1);
+      const reasons: unknown[] = [];
+      for (let k = 1; k <= 32; k++) {
+        const high = k === 5 ? peak : 100.5;
+        for (const ev of e.onCandles([minute(at + k * 60_000, 100.2, high, 99.9, 100.2)])) if (ev.type === 'order_placed' || ev.type === 'position_closed') reasons.push(ev.payload.reason);
+      }
+      return reasons;
+    };
+    // Never above 100.5 (0.25R): closed for no progress once 30 minutes have passed.
+    expect(run(100.5)).toContain('no_progress');
+    // Reached 101.2 (0.6R) at minute 5: it is working, so it is left alone.
+    expect(run(101.2)).not.toContain('no_progress');
+  });
+
+  it("a scalp's take-profit rests on the book: filled at the target, maker, only once price trades through it", () => {
+    const e = engine();
+    e.onCandles([minute(at - 60_000, 104, 105.5, 103.8, 105)]);
+    e.onCommand({ type: 'open', symbol: 'BTCUSDT', side: 'long', price: 100, time: at, stop: 98, target: 106, orderType: 'limit', setup: 'scalp' });
+    e.onCandles([minute(at, 103, 103, 99.8, 100.2)]);   // fills at 100
+    expect(e.positions()).toHaveLength(1);
+    // Touching 106 is not enough: the order may sit behind others at that price.
+    expect(e.onCandles([minute(at + 60_000, 100.2, 106, 100, 105.5)]).filter((x) => x.type === 'position_closed')).toHaveLength(0);
+    const [closed] = e.onCandles([minute(at + 120_000, 105.5, 106.4, 105, 106.2)]).filter((x) => x.type === 'position_closed');
+    const { price, qty, fee, reason } = closed.payload as { price: number; qty: number; fee: number; reason: string };
+    expect(reason).toBe('target');
+    expect(price).toBe(106);                                      // no slippage
+    expect((fee / (qty * price)) * 100).toBeCloseTo(0.02, 9);     // the maker fee
+  });
+
+  it('the R ladder: a manual trade at +1R has its stop moved to break-even, at +2R to +1R locked', () => {
+    const ladder = { setups: ['manual' as const], steps: [{ at_r: 1, lock_r: 0 }, { at_r: 2, lock_r: 1 }, { at_r: 3, lock_r: 2 }], trail_r: null };
+    const open = (setup?: 'scalp') => {
+      const e = engine((c) => { c.exits.r_ladder = ladder; });
+      e.onCandles([minute(at - 60_000, 104, 105.5, 103.8, 105)]);
+      e.onCommand({ type: 'open', symbol: 'BTCUSDT', side: 'long', price: 100, time: at, stop: 98, target: 110, orderType: 'limit', ...(setup ? { setup } : {}) });
+      e.onCandles([minute(at, 103, 103, 99.8, 100.2)]);   // fills at 100; risk 2: +1R is 102, +2R is 104
+      return e;
+    };
+    const step = (e: ReturnType<typeof open>, k: number, o: number, h: number, l: number, c: number) => e.onCandles([minute(at + k * 60_000, o, h, l, c)]);
+    const stopMoves = (evs: TradeEvent[]) => evs.filter((x) => x.type === 'stop_moved').map((x) => [Number(x.payload.stop), x.payload.reason]);
+
+    const e = open();
+    expect(stopMoves(step(e, 1, 100.2, 102.4, 100, 102.2))).toEqual([]);   // +1.2R reached in this candle...
+    // ...so the stop moves at its close, for the next candle (never for the candle that set it: its low may have come first).
+    expect(stopMoves(step(e, 2, 102.2, 104.5, 102, 104.2))).toEqual([[100 * 1.002, '+1R reached: break-even']]);
+    expect(stopMoves(step(e, 3, 104.2, 104.4, 103.5, 104))).toEqual([[102, '+2R reached: +1R locked']]);
+    // The reversal now stops out near +1R instead of the original -1R.
+    const [closed] = step(e, 4, 104, 104, 97, 97.5).filter((x) => x.type === 'position_closed');
+    expect(closed.payload.reason).toBe('stop');
+    expect(Number(closed.payload.price)).toBeGreaterThan(101.9);
+
+    // A spike to +1R that closed back under entry: the stop waits rather than sit above the price.
+    const spike = open();
+    step(spike, 1, 100.2, 102.5, 99.5, 99.8);
+    expect(stopMoves(step(spike, 2, 99.8, 100, 99.4, 99.6))).toEqual([]);
+
+    // Hunter's scalps are not on the ladder (setups: [manual]).
+    const scalp = open('scalp');
+    step(scalp, 1, 100.2, 102.5, 100, 102.2);
+    expect(stopMoves(step(scalp, 2, 102.2, 102.6, 102, 102.4))).toEqual([]);
+  });
+
+  it('the R ladder trails beyond its last step: the stop follows trail_r behind the best price', () => {
+    const e = engine((c) => { c.exits.r_ladder = { setups: ['manual'], steps: [{ at_r: 2, lock_r: 0 }], trail_r: 1.5 }; });
+    e.onCandles([minute(at - 60_000, 104, 105.5, 103.8, 105)]);
+    e.onCommand({ type: 'open', symbol: 'BTCUSDT', side: 'long', price: 100, time: at, stop: 98, target: 130, orderType: 'limit' });
+    e.onCandles([minute(at, 103, 103, 99.8, 100.2)]);   // fills at 100; risk 2
+    const step = (k: number, o: number, h: number, l: number, c: number) =>
+      e.onCandles([minute(at + k * 60_000, o, h, l, c)]).filter((x) => x.type === 'stop_moved').map((x) => Number(x.payload.stop));
+    step(1, 100.2, 104.4, 100, 104);                       // +2.2R, past the last step: the trail (+0.7R) beats break-even
+    const [first] = step(2, 104, 104.2, 103.5, 104);
+    expect(first).toBeCloseTo(101.4, 9);
+    step(3, 104, 110.2, 104, 110);                         // +5.1R reached
+    // Trailing 1.5R (3.0) behind the best (110.2): the stop goes to 107.2, i.e. +3.6R locked.
+    const [trail] = step(4, 110, 110.1, 109.5, 109.8);
+    expect(trail).toBeCloseTo(107.2, 9);
+  });
+
   it('a candle that opens beyond the stop never fills the limit', () => {
     const e = engine();
     e.onCandles([minute(at - 60_000, 104, 105.5, 103.8, 105)]);
@@ -718,6 +817,28 @@ describe('BTC flash crash circuit breaker', () => {
       { symbol: 'BTCUSDT', tf: '1m', openTime: futureClose - 60_000, closeTime: futureClose, open: 98, high: 98, low: 98, close: 98, volume: 1, quoteVolume: 98, trades: 1 },
     ]);
     expect(e.isCircuitBreakerActive()).toBe(false);
+  });
+
+  it('blocks only altcoin longs among scalps, like every other entry path', () => {
+    const e = engine((c) => {
+      c.risk.btc_circuit_breaker = { enabled: true, drop_5m_pct: -1.5, cooldown_min: 30, cancel_pending_limits: true };
+    });
+    const start = u('2026-07-15T12:00Z');
+    const bar = (symbol: string, close: number, price: number, low = price): Candle =>
+      ({ symbol, tf: '1m', openTime: close - 60_000, closeTime: close, open: price, high: price, low, close: price, volume: 1, quoteVolume: price, trades: 1 });
+    for (let i = 0; i < 5; i++) e.onCandles([bar('BTCUSDT', start + i * 60_000, 100), bar('ETHUSDT', start + i * 60_000, 10)]);
+    const dropClose = start + 5 * 60_000;
+    e.onCandles([bar('BTCUSDT', dropClose, 98, 97.9), bar('ETHUSDT', dropClose, 10)]);
+    expect(e.isCircuitBreakerActive()).toBe(true);
+
+    const scalp = (symbol: string, side: 'long' | 'short', price: number) => () => e.onCommand({
+      type: 'open', symbol, side, price, time: dropClose, orderType: 'market', setup: 'scalp',
+      stop: side === 'long' ? price * 0.99 : price * 1.01, target: side === 'long' ? price * 1.03 : price * 0.97,
+    });
+    // Other scalp checks may still refuse these; the circuit breaker must not be among the reasons.
+    expect(scalp('ETHUSDT', 'long', 10)).toThrow(/circuit[ _]breaker/i);
+    expect(scalp('ETHUSDT', 'short', 10)).not.toThrow(/circuit[ _]breaker/i);
+    expect(scalp('BTCUSDT', 'short', 98)).not.toThrow(/circuit[ _]breaker/i);
   });
 });
 

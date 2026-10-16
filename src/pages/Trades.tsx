@@ -8,7 +8,7 @@ import { TradeJournalModal } from '../components/TradeJournalModal';
 const STRATEGY_FILTERS = [
   { id: 'all', label: 'All Strategies' },
   { id: 'htf_poi', label: 'Institutional (4H POI)' },
-  { id: 'scalp', label: 'Quant Scalp' },
+  { id: 'scalp', label: 'Hunter' },
   { id: 'manual', label: 'Manual Trades' },
 ] as const;
 type StrategyFilterId = (typeof STRATEGY_FILTERS)[number]['id'];
@@ -264,7 +264,8 @@ function PatternBars({ stats }: { stats: PatternFeatureStat[] }) {
                 : 'bg-critical'
             }`} />
             <span className="truncate font-medium">{s.label}</span>
-            <span className="text-xs text-ink-3">×{s.tradesCount}</span>
+            <span className="text-xs text-ink-3" title={`${s.tradesCount} of your trades; ${s.assumedPct}% of this estimate is the built-in starting assumption`}>×{s.tradesCount}</span>
+            {s.assumedPct >= 50 && <span className="text-[10px] uppercase text-warning" title="Few real trades yet: this is mostly the built-in starting assumption">assumed</span>}
           </span>
           <div className="relative h-4 rounded bg-card-2">
             <div className="absolute inset-y-0 left-1/2 w-px bg-line" />
@@ -391,9 +392,9 @@ export function Trades({ go }: { go: (page: string, symbol?: string) => void }) 
         <Kpi label="Profit factor" value={stats.pf === null ? '–' : stats.pf.toFixed(2)} accent="var(--color-newyork)" sub="gross won ÷ gross lost" />
       </div>
 
-      {/* ---------------- Learned Machine Pattern Memory Card ---------------- */}
+      {/* ---------------- Pattern Memory Card ---------------- */}
       <Card
-        title="Learned Pattern Memory & Statistical Edge"
+        title="Pattern memory: how each condition has traded"
         icon={<Brain size={16} />}
         right={
           <div className="flex overflow-hidden rounded-lg border border-line">
@@ -410,9 +411,10 @@ export function Trades({ go }: { go: (page: string, symbol?: string) => void }) 
         }
       >
         <p className="mb-4 max-w-3xl text-sm text-ink-2">
-          Empirical Bayesian Matrix: continuously learns from historical trades and market structure characteristics.
-          Positive EV patterns (<span className="text-good font-semibold">green</span>) produce long-term mathematical edge;
-          negative EV patterns (<span className="text-critical font-semibold">red</span>) represent high-probability failure traps.
+          Each condition starts from a built-in assumption about how it trades and moves toward your own results as
+          closed trades come in. Rows marked <span className="font-semibold text-warning">assumed</span> are still mostly that
+          starting assumption, not evidence. Positive EV (<span className="text-good font-semibold">green</span>) or
+          negative EV (<span className="text-critical font-semibold">red</span>) only becomes meaningful with dozens of trades per row.
         </p>
         {!patternStats.length ? (
           <Empty>Loading pattern memory matrix…</Empty>

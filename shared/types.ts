@@ -340,6 +340,20 @@ export interface ConfirmationNotice {
 }
 
 /** A warning on a coin that just appeared (a pump's stage, a failed break, structure turning): see pumpWatch.ts. */
+/** One thing Hunter (the scalp autopilot) did, for the activity list on its page. */
+export interface HunterLogEntry {
+  /** Wall-clock time (ms). */
+  time: number;
+  symbol: string;
+  tf: '5m' | '15m';
+  /** placed: a limit order is resting; skipped: a setup was found but Hunter's own checks passed on it;
+   *  refused: the engine's risk rules or scalp checks turned the order down. */
+  outcome: 'placed' | 'skipped' | 'refused';
+  kind?: string;
+  side?: 'long' | 'short';
+  detail: string;
+}
+
 export interface WarningNotice {
   symbol: string;
   code: string;
@@ -372,6 +386,8 @@ export interface PatternFeatureStat {
   expectancyR: number;
   verdict: PatternVerdict;
   advice: string;
+  /** How much of the estimate (0 to 100) comes from the built-in starting assumptions rather than these trades. */
+  assumedPct: number;
 }
 
 export interface PatternProfile {
@@ -390,6 +406,8 @@ export interface PatternMatch {
   winRatePct: number;
   expectancyR: number;
   sampleSize: number;
+  /** How much of the estimate (0 to 100) comes from the built-in starting assumptions rather than real trades. */
+  assumedPct: number;
   warnings: string[];
   strengths: string[];
   summary: string;

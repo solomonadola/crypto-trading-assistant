@@ -38,3 +38,14 @@ export function settledPrices(
     return t !== null && t <= o.engineClock && o.now - t <= LIVE_PRICE_MAX_LAG_MS;
   }));
 }
+
+/**
+ * Whether Hunter (the scalp autopilot) is on at startup. The dashboard's switch is the authority: its last
+ * saved choice ('true' or 'false') wins, so a restart never turns Hunter on or off by itself. Only when
+ * nothing has been saved yet does config.yaml's `scalp_autopilot.enabled` decide.
+ */
+export function hunterOnAtStart(saved: string | null, configDefault: boolean): boolean {
+  if (saved === 'true') return true;
+  if (saved === 'false') return false;
+  return configDefault;
+}

@@ -4,6 +4,10 @@
 // needs only the project id, no secret key.
 //
 // With ALLOWED_EMAILS unset (local development), sign-in is off.
+//
+// Automations (n8n, scripts) cannot sign in with Google: with ENGINE_API_KEY set, a request carrying
+// that key in an X-API-Key header is let in instead.
+import { createHash, timingSafeEqual } from 'node:crypto';
 import type { NextFunction, Request, Response } from 'express';
 import { initializeApp, getApps, type App } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
@@ -11,11 +15,21 @@ import { getAuth } from 'firebase-admin/auth';
 export interface AuthSettings {
   projectId: string;
   allowed: string[];
+  /** The key automations send in X-API-Key; null when none is set (only a sign-in then lets a request in). */
+  apiKey: string | null;
 }
 
 export function authSettings(projectId: string): AuthSettings {
   const allowed = (process.env.ALLOWED_EMAILS ?? '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean);
-  return { projectId, allowed };
+  const apiKey = (process.env.ENGINE_API_KEY ?? '').trim();
+  return { projectId, allowed, apiKey: apiKey || null };
+}
+
+/** Compared through hashes of equal length, in constant time, so the response time says nothing about the key. */
+export function apiKeyMatches(sent: unknown, key: string | null): boolean {
+  if (!key || typeof sent !== 'string' || !sent) return false;
+  const digest = (x: string) => createHash('sha256').update(x).digest();
+  return timingSafeEqual(digest(sent), digest(key));
 }
 
 /** Paths that answer without sign-in: the uptime check and what the page needs to know how to sign in. */
@@ -27,6 +41,7 @@ export function requireSignIn(settings: AuthSettings) {
   const auth = getAuth(app);
   return async (req: Request, res: Response, next: NextFunction) => {
     if (OPEN.has(req.path)) return next();
+    if (apiKeyMatches(req.headers['x-api-key'], settings.apiKey)) return next();
     const header = req.headers.authorization ?? '';
     const token = header.startsWith('Bearer ') ? header.slice(7) : '';
     if (!token) return res.status(401).json({ error: 'Sign in required' });

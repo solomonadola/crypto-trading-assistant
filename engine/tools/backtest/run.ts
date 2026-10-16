@@ -4,7 +4,9 @@ import { Engine } from '../../src/core/engine';
 import { loadConfig, configHash, type EngineConfig } from '../../src/config';
 import type { CandleStore } from '../../src/feed/candleStore';
 import { decideScalp } from '../../src/strategy/scalpAutopilot';
-import { roundTripPct, costsFor } from '../../src/speed';
+import { killzoneSweep, sweepMarket } from '../../src/strategy/killzoneSweep';
+import { windowAt } from '../../src/sessions';
+import { limitRoundTripPct, costsFor } from '../../src/speed';
 import { compareCandles, type Candle, type ClosedTradeView, type Direction, type Timeframe } from '../../../shared/types';
 import type { ScalpKind } from '../../src/analysis/scalp';
 import type { SymbolInfo } from '../../src/feed/binancePublic';
@@ -26,7 +28,8 @@ export interface BacktestRunOptions {
 export interface PlacedOrderRecord {
   symbol: string;
   side: Direction;
-  kind: ScalpKind;
+  /** A classic scalp kind, or 'killzone_sweep'. */
+  kind: string;
   tf: string;
   time: number;
   limitPrice: number;
@@ -44,7 +47,7 @@ export interface BacktestResult {
   toMs: number;
   symbols: string[];
   trades: ClosedTradeView[];
-  positionMeta: Map<string, { kind: ScalpKind; tf: string; side: Direction }>;
+  positionMeta: Map<string, { kind: string; tf: string; side: Direction }>;
   ordersPlaced: PlacedOrderRecord[];
   rejections: Map<string, number>;
   equityCurve: EquityPoint[];
@@ -116,7 +119,7 @@ export async function runBacktest(opts: BacktestRunOptions): Promise<BacktestRes
   warmupBatch.sort(compareCandles);
   engine.seedHistory(warmupBatch);
 
-  const positionMeta = new Map<string, { kind: ScalpKind; tf: string; side: Direction }>();
+  const positionMeta = new Map<string, { kind: string; tf: string; side: Direction }>();
   const ordersPlaced: PlacedOrderRecord[] = [];
   const rejections = new Map<string, number>();
   const equityCurve: EquityPoint[] = [];
@@ -171,16 +174,54 @@ export async function runBacktest(opts: BacktestRunOptions): Promise<BacktestRes
                        engine.account().pendingEntries.some((p) => p.symbol === c.symbol);
           if (held) continue;
 
+          // Hunter enters with resting limit orders: maker fee in, taker with slippage out.
+          const costPct = limitRoundTripPct(costsFor(cfg, engine.speed(c.symbol)));
+          const place = (o: {
+            symbol: string; side: Direction; kind: string; tf: '5m' | '15m'; limitPrice: number; stop: number; target: number;
+            note: string; maxHoldMin: number; entryTimeoutMin: number; progressCheckMin?: number; progressMinR?: number;
+          }) => {
+            try {
+              const produced = engine.onCommand({
+                type: 'open', symbol: o.symbol, side: o.side, price: o.limitPrice, time: c.closeTime,
+                stop: o.stop, target: o.target, orderType: 'limit', setup: 'scalp', note: o.note,
+                maxHoldMin: o.maxHoldMin, entryTimeoutMin: o.entryTimeoutMin,
+                progressCheckMin: o.progressCheckMin, progressMinR: o.progressMinR,
+              });
+              const placed = produced.find((x) => x.type === 'order_placed');
+              if (placed?.positionId) positionMeta.set(placed.positionId, { kind: o.kind, tf: o.tf, side: o.side });
+              ordersPlaced.push({ symbol: o.symbol, side: o.side, kind: o.kind, tf: o.tf, time: c.closeTime, limitPrice: o.limitPrice });
+            } catch (err) {
+              const reason = err instanceof Error ? err.message : String(err);
+              rejections.set(reason, (rejections.get(reason) ?? 0) + 1);
+            }
+          };
+
+          // Hunter's main strategy: the killzone sweep, on 5m closes (same code as live).
+          if (cfg.scalp_autopilot.killzone_sweep.enabled && tf === '5m' && !opts.kinds) {
+            const kz = killzoneSweep({
+              symbol: c.symbol,
+              market: sweepMarket(engine.latestContext(c.symbol)),
+              m5: getWindow(c.symbol, '5m').slice(-120),
+              killzone: windowAt(c.closeTime, cfg.scalp_autopilot.killzone_sweep.windows),
+              costPct,
+              minRr: cfg.exits.min_rr,
+              config: cfg.scalp_autopilot.killzone_sweep,
+            });
+            if (kz.order) {
+              place({ ...kz.order, kind: 'killzone_sweep' });
+              continue;
+            }
+          }
+
+          // The classic scalp setups: those in scalp_autopilot.kinds, or the --kinds given.
+          const kinds = opts.kinds ?? cfg.scalp_autopilot.kinds;
+          if (!kinds.length) continue;
           const candlesTf = getWindow(c.symbol, tf);
           const candles1h = getWindow(c.symbol, '1h');
           const btc1h = getWindow('BTCUSDT', '1h');
           const fromTime = candlesTf[0]?.openTime ?? c.openTime;
           const sessionOpens = engine.sessions.between(fromTime, c.openTime + 300_000)
             .filter((sn) => sn.name === 'london' || sn.name === 'newyork').map((sn) => sn.openTime);
-
-          const speed = engine.speed(c.symbol);
-          const costPct = roundTripPct(costsFor(cfg, speed));
-
           const decision = decideScalp({
             symbol: c.symbol,
             tf,
@@ -190,45 +231,9 @@ export async function runBacktest(opts: BacktestRunOptions): Promise<BacktestRes
             sessionOpens,
             costPct,
             now: c.closeTime,
-            config: cfg.scalp_autopilot,
+            config: { ...cfg.scalp_autopilot, kinds },
           });
-
-          if (!decision.order) continue;
-          const ord = decision.order;
-
-          // Filter by allowed kinds if specified
-          if (opts.kinds && !opts.kinds.includes(ord.kind)) continue;
-
-          try {
-            engine.onCommand({
-              type: 'open',
-              symbol: ord.symbol,
-              side: ord.side,
-              price: ord.limitPrice,
-              time: c.closeTime,
-              stop: ord.stop,
-              target: ord.target,
-              orderType: 'limit',
-              setup: 'scalp',
-              note: ord.note,
-              maxHoldMin: ord.maxHoldMin,
-              entryTimeoutMin: ord.entryTimeoutMin,
-            });
-
-            const posId = `scalp-${ord.symbol}-${c.closeTime}`;
-            positionMeta.set(posId, { kind: ord.kind, tf: ord.tf, side: ord.side });
-            ordersPlaced.push({
-              symbol: ord.symbol,
-              side: ord.side,
-              kind: ord.kind,
-              tf: ord.tf,
-              time: c.closeTime,
-              limitPrice: ord.limitPrice,
-            });
-          } catch (err) {
-            const reason = err instanceof Error ? err.message : String(err);
-            rejections.set(reason, (rejections.get(reason) ?? 0) + 1);
-          }
+          if (decision.order) place(decision.order);
         }
       }
 

@@ -26,6 +26,12 @@ export function costsFor(cfg: EngineConfig, group: SpeedGroup | undefined): Engi
 /** Round-trip fees and slippage, percent of notional. */
 export const roundTripPct = (costs: EngineConfig['sim']) => 2 * (costs.taker_fee_pct + costs.slippage_pct);
 
+/**
+ * Round-trip costs of a trade entered with a resting limit order, percent of notional: the maker fee in
+ * (no slippage at the limit's price), then a taker exit with slippage (a stop, at worst).
+ */
+export const limitRoundTripPct = (costs: EngineConfig['sim']) => costs.maker_fee_pct + costs.taker_fee_pct + costs.slippage_pct;
+
 /** Reward:risk after the round-trip costs: (distance to the target less the costs) / distance to the stop. */
 export function netRewardRisk(entry: number, stop: number, target: number, costPct: number): number {
   const risk = Math.abs(entry - stop);

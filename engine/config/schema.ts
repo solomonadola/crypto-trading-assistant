@@ -230,6 +230,16 @@ export const configSchema = z.object({
     /** A setup whose target is closer than this (percent from entry) is not signalled. */
     min_target_pct: z.number().min(0),
     breakeven_fee_buffer_pct: z.number().min(0),
+    /**
+     * Once a trade's best price since entry reaches at_r (in R of its initial risk), its stop moves to lock_r
+     * (0: break-even plus breakeven_fee_buffer_pct). Checked at every 1m close, for the setups listed.
+     */
+    r_ladder: z.object({
+      setups: z.array(z.enum(['pullback', 'breakout', 'session_sweep', 'zone_sweep', 'htf_poi', 'manual', 'scalp'])),
+      steps: z.array(z.object({ at_r: positive, lock_r: z.number().min(0) }).strict()),
+      /** Beyond the last step, the stop trails this many R behind the best price; null: it stays at the last step. */
+      trail_r: positive.nullable(),
+    }).strict(),
     ladder: z.array(z.object({ trigger_pct: positive, lock_pct: z.number() }).strict()).min(1),
     beyond_last_step: z.object({ lock_fraction_of_peak: z.number().min(0).max(1), or_swing_15m: z.boolean() }).strict(),
     step_on: z.literal('close_15m'),
@@ -257,6 +267,29 @@ export const configSchema = z.object({
     max_trades_per_day: posInt.nullable(),
     max_hold_min: z.object({ '1m': posInt, '5m': posInt, '15m': posInt }).strict(),
     entry_timeout_min: z.object({ '1m': posInt, '5m': posInt, '15m': posInt }).strict(),
+    /** Hunter's killzone sweep scalp on 5m (strategy/killzoneSweep.ts). */
+    killzone_sweep: z.object({
+      enabled: z.boolean(),
+      /** Hunter's own trading windows (local wall-clock time); separate from sessions.killzones, which the engine's models use. */
+      windows: z.array(z.object({ name: z.string().min(1), tz: tzName, start: hhmm, end: hhmm }).strict()).min(1),
+      /** The sweep bar, or one of this many after it, must close back beyond the level. */
+      sweep_bars: posInt,
+      /** The CHoCH must come within this many 5m bars of the sweep's extreme. */
+      confirm_bars: posInt,
+      /** Bars before the sweep whose swing the CHoCH must close beyond. */
+      choch_lookback: posInt,
+      /** Stop beyond the sweep's extreme by this many ATR(5m). */
+      stop_buffer_atr: z.number().min(0).max(5),
+      /** off | bias: the 1h trend agrees and the 4h structure is not against | strict: and the 4h structure is with us. */
+      trend_filter: z.enum(['off', 'bias', 'strict']),
+      /** A liquidity target further than this (R after costs) is passed over for a fixed exits.min_rr target. */
+      max_rr: positive,
+      max_hold_min: posInt,
+      entry_timeout_min: posInt,
+      /** "Not working, get out": closed at the market if, this long after the fill, it never reached progress_min_r. */
+      progress_check_min: posInt,
+      progress_min_r: positive,
+    }).strict(),
   }).strict(),
 
   risk: z.object({
@@ -277,6 +310,7 @@ export const configSchema = z.object({
 
   sim: z.object({
     taker_fee_pct: z.number().min(0).max(1),
+    maker_fee_pct: z.number().min(0).max(1),
     slippage_pct: z.number().min(0).max(5),
     charge_funding: z.boolean(),
     maintenance_margin_pct: z.number().min(0).max(10),

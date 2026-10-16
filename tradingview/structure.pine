@@ -1,5 +1,5 @@
 //@version=6
-// Session Engine: the dashboard's analysis on a TradingView chart.
+// Killzone: the dashboard's analysis on a TradingView chart.
 // Market structure (HH/HL/LH/LL, BOS and CHoCH on closes, the protected level),
 // EMA 50/200, liquidity (previous day high/low, Asian session high/low), the
 // open windows (first 2 hours after the London and New York opens) and a
@@ -7,7 +7,7 @@
 // swingStructure.ts): a swing point is known `k` bars after it formed, and only
 // a close through the latest swing high (low) breaks structure: a BOS with the
 // trend (or starting one), a CHoCH against it.
-indicator("Session Engine: structure & levels", shorttitle = "SE structure", overlay = true, max_labels_count = 500, max_lines_count = 500)
+indicator("Killzone: structure & levels", shorttitle = "KZ structure", overlay = true, max_labels_count = 500, max_lines_count = 500)
 
 // ---------------------------------------------------------------- inputs
 k            = input.int(3, "Swing size (bars each side)", minval = 1, maxval = 20, tooltip = "The dashboard uses 5 on 1m/5m, 4 on 15m, 3 on 1h/4h")

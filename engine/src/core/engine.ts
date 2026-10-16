@@ -23,14 +23,14 @@ import { btc, exhaustion, funding, runFilters } from '../filters';
 import { scoreSignal } from '../scoring';
 import { decideEntry, equityOf, riskAtStop, unrealized, type SymbolRules } from '../risk';
 import { manage } from '../exits';
-import { fee, grossPnl, liquidationPrice, marketFill, roundQty, stopFill, targetFill } from '../sim/broker';
+import { fee, grossPnl, liquidationPrice, marketFill, restingTargetFill, roundQty, stopFill, targetFill } from '../sim/broker';
 import { tradeIdea } from '../analysis/levels';
 import { sessionSweep } from '../strategy/sessionSweep';
 import { armZoneSweep, confirmZoneSweep, zoneSweepStillValid, type ZoneSweepConfirmation } from '../strategy/zoneSweep';
 import { armHtfPoi, chochOn, htfPointsOfInterest, htfPoiStillValid, type HtfPoi } from '../strategy/htfPoi';
 import { liquidityPlan } from '../strategy/smc';
 import { liquidityLevels, type LiquidityLevel } from '../analysis/liquidity';
-import { costsFor, netRewardRisk, roundTripPct, speedSettings, type SpeedGroup } from '../speed';
+import { costsFor, limitRoundTripPct, netRewardRisk, roundTripPct, speedSettings, type SpeedGroup } from '../speed';
 
 const DIRECTIONS: Direction[] = ['long', 'short'];
 /** Entry-window blocks that end an armed setup; a funding pause only delays it. */
@@ -81,10 +81,13 @@ export type EngineCommand =
    * `time` (the wall clock), sized and limited by the same risk rules as the engine's own trades.
    * `setup: 'scalp'` is the scalp autopilot's: it must also pass scalpFailures. `maxHoldMin` closes the
    * position at the market after that long; `entryTimeoutMin` cancels a limit not filled by then.
+   * `progressCheckMin` / `progressMinR`: closed at the market if, that long after the fill, price has never
+   * been `progressMinR` R in the trade's favour (a scalp that is not working is cut, not waited out).
    */
   | {
     type: 'open'; symbol: string; side: Direction; price: number; time: number; stop: number; target: number | null;
     orderType?: 'market' | 'limit'; note?: string; setup?: 'manual' | 'scalp'; maxHoldMin?: number; entryTimeoutMin?: number;
+    progressCheckMin?: number; progressMinR?: number;
   }
   /**
    * Edit an open position's stop and/or take-profit (null removes the take-profit). `price` is the
@@ -225,6 +228,16 @@ export class Engine {
 
   universeSymbols(): string[] {
     return [...this.universe];
+  }
+
+  /**
+   * A coin's market context as of its last 15m close (liquidity levels, the 4h dealing range and the rest),
+   * for strategies that run between 15m closes, such as Hunter's killzone sweep on 5m. Null before there is
+   * enough history.
+   */
+  latestContext(symbol: string): Context | null {
+    const last15 = this.market.recent(symbol, this.cfg.timeframes.trigger, 1)[0];
+    return last15 ? buildContext(this.market, symbol, last15.closeTime, this.cfg, this.funding.get(symbol) ?? null) : null;
   }
 
   /** Model 4's 4h points of interest for a coin, as of its last 15m close: where it would arm, both ways. */
@@ -507,6 +520,64 @@ export class Engine {
     return out;
   }
 
+  /**
+   * A position with a progress check that, by then, has never been progressMinR in its favour: the best
+   * price of the 1m candles after the one it filled in (that one's extreme may have come before the fill),
+   * against the risk to its initial stop. Read from the candles,
+   * not kept as state, so a restart rebuilding from the trade log decides the same.
+   */
+  private noProgress(p: Position, t: number): boolean {
+    if (!p.progressCheckMin || !p.progressMinR || t - p.openedAt < p.progressCheckMin * 60_000) return false;
+    const best = this.bestR(p, t);
+    return best !== null && best < p.progressMinR;
+  }
+
+  /**
+   * How far the trade has been in its favour, in R of its initial risk: the best price of the 1m candles after
+   * the one it filled in (that one's extreme may have come before the fill), up to `t`. Null without candles.
+   * Read from the candles, not kept as state, so a restart rebuilding from the trade log decides the same.
+   */
+  private bestR(p: Position, t: number): number | null {
+    const risk = Math.abs(p.entryPrice - p.initialStop);
+    if (!(risk > 0)) return null;
+    const since = this.market.recent(p.symbol, this.cfg.timeframes.exits).filter((c) => c.openTime > p.openedAt && c.closeTime <= t);
+    if (!since.length) return null;
+    const best = p.side === 'long' ? Math.max(...since.map((c) => c.high)) : Math.min(...since.map((c) => c.low));
+    return (sign(p.side) * (best - p.entryPrice)) / risk;
+  }
+
+  /**
+   * The stop the R ladder (exits.r_ladder) asks for, if it is tighter than the current one; else null. Read
+   * from the candles closed before the one at `t`: a stop set at a candle's close applies from the next
+   * candle, never to the candle whose high (long) set it, since its low may have come first.
+   */
+  private ladderStop(p: Position, t: number): { stop: number; reason: string } | null {
+    const lad = this.cfg.exits.r_ladder;
+    if (!p.setup || !lad.setups.includes(p.setup) || !lad.steps.length) return null;
+    const asOf = t - TIMEFRAME_MS[this.cfg.timeframes.exits];
+    const best = this.bestR(p, asOf);
+    if (best === null) return null;
+    const step = [...lad.steps].filter((x) => best >= x.at_r).sort((a, b) => b.at_r - a.at_r)[0];
+    if (!step) return null;
+    const s = sign(p.side);
+    const risk = Math.abs(p.entryPrice - p.initialStop);
+    // Beyond the last step, trail: trail_r behind the best price, when that is tighter than the step's lock.
+    const last = Math.max(...lad.steps.map((x) => x.at_r));
+    const trailing = lad.trail_r !== null && best > last && best - lad.trail_r > step.lock_r;
+    const lockR = trailing ? best - lad.trail_r! : step.lock_r;
+    const stop = lockR > 0
+      ? p.entryPrice + s * lockR * risk
+      : p.entryPrice * (1 + (s * this.cfg.exits.breakeven_fee_buffer_pct) / 100);
+    if (s * (stop - p.stop) <= 1e-12) return null;       // already there or better
+    // A stop must sit on the losing side of the price when it is placed: after a spike that closed back past
+    // the level, wait.
+    const placedAt = this.market.recent(p.symbol, this.cfg.timeframes.exits).filter((c) => c.closeTime <= asOf).at(-1);
+    if (!placedAt || s * (placedAt.close - stop) <= 0) return null;
+    const reason = trailing ? `trailing ${lad.trail_r}R behind the best (+${best.toFixed(2)}R): +${lockR.toFixed(2)}R locked`
+      : step.lock_r > 0 ? `+${step.at_r}R reached: +${step.lock_r}R locked` : `+${step.at_r}R reached: break-even`;
+    return { stop, reason };
+  }
+
   /** Stops and take-profits reached by a live price: closed at once (a stop at that price plus slippage, a take-profit at the target). */
   private liveExits(prices: Record<string, number>, time: number): TradeEvent[] {
     const out: TradeEvent[] = [];
@@ -519,6 +590,9 @@ export class Engine {
       if (s * (price - p.stop) <= 0) {
         // A live price can skip past the stop (a gap): the fill is that price, never better than the stop.
         out.push(this.closePosition(p, marketFill(p.side, 'close', s > 0 ? Math.min(price, p.stop) : Math.max(price, p.stop), costs), 'stop', at));
+      } else if (p.target !== null && this.cfg.exits.mode === 'fixed' && p.setup === 'scalp' && s * (price - p.target) > 0) {
+        // A scalp's take-profit rests on the book: it fills at the target, maker, once price is through it.
+        out.push(this.closePosition(p, p.target, 'target', at, true));
       } else if (p.target !== null && this.cfg.exits.mode === 'fixed' && s * (price - p.target) >= 0) {
         out.push(this.closePosition(p, marketFill(p.side, 'close', p.target, costs), 'target', at));
       }
@@ -537,9 +611,11 @@ export class Engine {
     const speed = buildContext(this.market, symbol, this.clock, this.cfg, this.funding.get(symbol) ?? null)?.speed ?? 'normal';
     // The same reward:risk floor as the engine's own trades, after fees and slippage: no 1:1 trades.
     if (target === null) throw new CommandError(`A take-profit is needed: trades must aim for at least ${this.cfg.exits.min_rr}R`);
-    const rr = netRewardRisk(price, stop, target, roundTripPct(costsFor(this.cfg, speed)));
-    if (rr < this.cfg.exits.min_rr) throw new CommandError(`Reward:risk is ${rr.toFixed(2)}R after costs; at least ${this.cfg.exits.min_rr}R is needed`);
     const orderType = cmd.orderType ?? 'market';
+    // A limit entry pays the maker fee and does not slip; a market entry pays taker and slips both ways.
+    const costs = costsFor(this.cfg, speed);
+    const rr = netRewardRisk(price, stop, target, orderType === 'limit' ? limitRoundTripPct(costs) : roundTripPct(costs));
+    if (rr < this.cfg.exits.min_rr) throw new CommandError(`Reward:risk is ${rr.toFixed(2)}R after costs; at least ${this.cfg.exits.min_rr}R is needed`);
     const setup = cmd.setup ?? 'manual';
     // A market order fills at `price` (the mark), checked above; a limit fills against the latest price.
     const currentPrice = orderType === 'limit' ? this.priceOf(symbol) : null;
@@ -565,6 +641,7 @@ export class Engine {
       action: 'open', orderType, side, notional: risk.notional, stop, target,
       chochLevel: null, signalId: null, refPrice: price, speed, setup, ...(cmd.note ? { note: cmd.note.slice(0, 200) } : {}),
       ...(cmd.maxHoldMin ? { maxHoldMin: cmd.maxHoldMin } : {}), ...(cmd.entryTimeoutMin ? { entryTimeoutMin: cmd.entryTimeoutMin } : {}),
+      ...(cmd.progressCheckMin && cmd.progressMinR ? { progressCheckMin: cmd.progressCheckMin, progressMinR: cmd.progressMinR } : {}),
     };
     const placed = this.emit('order_placed', id, symbol, { ...order }, cmd.time);
     const pending = this.portfolio.pendingEntries().find((e) => e.positionId === id)!;
@@ -587,12 +664,13 @@ export class Engine {
   private scalpFailures(symbol: string, side: Direction, entry: number, stop: number, speed: SpeedGroup): string[] {
     const cfg = this.cfg;
     const failures: string[] = [];
-    if (this.isCircuitBreakerActive() && (symbol !== 'BTCUSDT' || side === 'long')) failures.push('filter_btc_circuit_breaker');
+    if (this.isCircuitBreakerActive() && symbol !== 'BTCUSDT' && side === 'long') failures.push('filter_btc_circuit_breaker');
     const block = this.sessions.entryBlock(this.clock);
     if (block === 'weekend' || block === 'funding_window') failures.push(`session_${block}`);
     const stopPct = (Math.abs(entry - stop) / entry) * 100;
     if (stopPct > cfg.scalp_autopilot.max_stop_pct) failures.push('stop_too_wide');
-    if ((roundTripPct(costsFor(cfg, speed)) / stopPct) * 100 > cfg.allocation.max_fee_drag_pct) failures.push('fees_too_high');
+    // Scalps are entered with resting limit orders: maker fee in, taker with slippage out.
+    if ((limitRoundTripPct(costsFor(cfg, speed)) / stopPct) * 100 > cfg.allocation.max_fee_drag_pct) failures.push('fees_too_high');
     const last15 = this.market.recent(symbol, cfg.timeframes.trigger, 1)[0];
     const ctx = last15 ? buildContext(this.market, symbol, last15.closeTime, cfg, this.funding.get(symbol) ?? null) : null;
     if (ctx) {
@@ -688,6 +766,11 @@ export class Engine {
     for (const p of this.portfolio.positions()) {
       const maxHoldMin = p.maxHoldMin ?? legacyScalp(p.note)?.holdMin;
       if (!p.pendingClose && maxHoldMin && t - p.openedAt >= maxHoldMin * 60_000) out.push(this.closeOrder(p, 'max_hold'));
+      else if (!p.pendingClose && this.noProgress(p, t)) out.push(this.closeOrder(p, 'no_progress'));
+      else if (!p.pendingClose) {
+        const moved = this.ladderStop(p, t);
+        if (moved) out.push(this.emit('stop_moved', p.id, p.symbol, moved));
+      }
     }
 
     // Entries with no price to fill at, or limits the price never came back to, are cancelled.
@@ -738,8 +821,10 @@ export class Engine {
         continue;
       }
       if (p.target !== null && !(this.cfg.exits.mode === 'partial_ladder' && p.partialDone)) {
-        const tp = targetFill(p.side, p.target, c, costs);
-        if (tp !== null) out.push(...this.takeTarget(p, tp, at));
+        // A scalp's take-profit rests on the book as a limit (maker, no slippage); others fill as a market order.
+        const resting = p.setup === 'scalp' && this.cfg.exits.mode === 'fixed';
+        const tp = resting ? restingTargetFill(p.side, p.target, c) : targetFill(p.side, p.target, c, costs);
+        if (tp !== null) out.push(...this.takeTarget(p, tp, at, resting));
       }
     }
     this.resolveShadows(c);
@@ -770,10 +855,13 @@ export class Engine {
       : marketFill(e.side, 'open', c.open, costs);
 
     if (s * (price - e.stop) <= 0) return cancel('filled_beyond_stop');
+    // A limit rested on the book only if this candle opened on the far side of it and price then came to it;
+    // one the candle opened through was marketable at once: a taker fill.
+    const maker = e.orderType === 'limit' && s * (c.open - e.refPrice) > 0;
 
     // Size from the fill: the loss at the stop must still fit the cap.
     const equity = equityOf(this.portfolio, (x) => this.priceOf(x));
-    const lossPct = (Math.abs(price - e.stop) / price) * 100 + roundTripPct(costs);
+    const lossPct = (Math.abs(price - e.stop) / price) * 100 + (maker ? limitRoundTripPct(costs) : roundTripPct(costs));
     const riskPct = Math.min(cfg.allocation.max_loss_per_trade_pct, speedSettings(cfg, e.speed).risk_pct);
     const maxNotional = ((riskPct / 100) * equity / lossPct) * 100;
     const rules = this.rules.get(e.symbol);
@@ -785,9 +873,10 @@ export class Engine {
 
     const fill: EntryFill = {
       role: 'entry', side: e.side, qty, price, stop: e.stop, target: e.target,
-      fee: fee(qty * price, cfg.sim), session: this.sessions.ownerAt(e.placedAt),
+      fee: fee(qty * price, cfg.sim, maker), session: this.sessions.ownerAt(e.placedAt),
       leverage: cfg.leverage, liqPrice, chochLevel: e.chochLevel, signalId: e.signalId, speed: e.speed ?? 'normal', setup: e.setup,
       ...(e.note ? { note: e.note } : {}), ...(e.maxHoldMin ? { maxHoldMin: e.maxHoldMin } : {}),
+      ...(e.progressCheckMin && e.progressMinR ? { progressCheckMin: e.progressCheckMin, progressMinR: e.progressMinR } : {}),
     };
     // Recorded at the candle's open: the moment the fill happened.
     const filled = this.emit('order_filled', e.positionId, e.symbol, { ...fill, notional: qty * price, margin: (qty * price) / cfg.leverage }, c.openTime);
@@ -799,9 +888,9 @@ export class Engine {
     return pos && stopPrice !== null ? [filled, this.closePosition(pos, stopPrice, 'stop', at)] : [filled];
   }
 
-  private takeTarget(p: Position, price: number, at = this.clock): TradeEvent[] {
+  private takeTarget(p: Position, price: number, at = this.clock, maker = false): TradeEvent[] {
     const cfg = this.cfg;
-    if (cfg.exits.mode === 'fixed') return [this.closePosition(p, price, 'target', at)];
+    if (cfg.exits.mode === 'fixed') return [this.closePosition(p, price, 'target', at, maker)];
     // partial_ladder: close part at the first objective, protect the rest at breakeven plus fees.
     const rules = this.rules.get(p.symbol);
     const qty = roundQty(p.qty * (cfg.exits.partial_close_pct / 100), rules?.stepSize ?? 0);
@@ -814,9 +903,10 @@ export class Engine {
     return out;
   }
 
-  private closePosition(p: Position, price: number, reason: CloseReason, time = this.clock): TradeEvent {
+  /** `maker`: filled by a limit order resting on the book (a scalp's take-profit), which pays the maker fee. */
+  private closePosition(p: Position, price: number, reason: CloseReason, time = this.clock, maker = false): TradeEvent {
     return this.emit('position_closed', p.id, p.symbol, {
-      qty: p.qty, price, pnl: grossPnl(p.side, p.entryPrice, price, p.qty), fee: fee(p.qty * price, this.cfg.sim), reason,
+      qty: p.qty, price, pnl: grossPnl(p.side, p.entryPrice, price, p.qty), fee: fee(p.qty * price, this.cfg.sim, maker), reason,
       holdMinutes: Math.round((time - p.openedAt) / 60_000),
     }, time);
   }

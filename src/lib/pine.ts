@@ -63,9 +63,9 @@ export function planPine(symbol: string, idea: TradeIdea, htf: { long: HtfPoiVie
     : `    array.push(boxes, box.new(${Math.floor(d.from)}, ${num(d.top)}, time, ${num(d.bottom)}, xloc = xloc.bar_time, extend = extend.right, border_color = color.new(${d.color}, 30), bgcolor = color.new(${d.color}, 88), text = ${str(d.text)}, text_color = color.new(${d.color}, 0), text_size = size.small, text_halign = text.align_left, text_valign = text.align_top))`).join('\n');
 
   return `//@version=6
-// Session Engine plan for ${symbol}, as of ${asOf} UTC (a snapshot: paste a new one when the plan changes).
+// Killzone plan for ${symbol}, as of ${asOf} UTC (a snapshot: paste a new one when the plan changes).
 // ${idea.biasReason.replace(/\n/g, ' ')}
-indicator(${str(`SE plan ${base} ${asOf}`)}, shorttitle = ${str(`SE plan ${base}`)}, overlay = true, max_lines_count = 100, max_labels_count = 100, max_boxes_count = 50)
+indicator(${str(`KZ plan ${base} ${asOf}`)}, shorttitle = ${str(`KZ plan ${base}`)}, overlay = true, max_lines_count = 100, max_labels_count = 100, max_boxes_count = 50)
 
 if syminfo.ticker != ${str(`${symbol}.P`)} and syminfo.ticker != ${str(symbol)}
     runtime.error(${str(`This plan is for ${symbol}; open a ${base} chart`)})

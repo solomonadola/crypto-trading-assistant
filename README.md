@@ -1,11 +1,11 @@
-# Crypto Trading Assistant
+# PerpPilot
 
 A simulated crypto futures trading engine with three strategy modes:
 
 | Mode | How it works | Config |
 |---|---|---|
 | **Institutional (HTF pullback)** | Engine scans coins, arms setups on the 1H chart, waits for a 15M CHoCH confirmation, then opens a simulated trade with a stop, target, and profit ladder. Fully automatic. | `pullback`, `exits`, `allocation` in `config.yaml` |
-| **Quant Scalp Autopilot** | Places limit orders at key levels on 5M/15M scalp setups. Automatic when enabled. | `scalp_autopilot` in `config.yaml` |
+| **Hunter (scalp autopilot)** | Killzone sweep scalps on 5M: a stop run through a liquidity level in the London or New York killzone, a 5M CHoCH back, a limit at the fair value gap. Held up to 2 hours; cut after 30 minutes if not +0.5R. Automatic while switched on from the Hunter page. | `scalp_autopilot.killzone_sweep` in `config.yaml` |
 | **Manual trades** | You open and manage trades from the dashboard or via API. Same risk rules apply. | `POST /api/positions/open` |
 
 It reads **Binance USDⓈ-M public market data** — no account, no API keys needed.
@@ -26,6 +26,8 @@ The full design is in [ENGINE_PLAN.md](ENGINE_PLAN.md).
 - [Dashboard Pages](#dashboard-pages)
 - [API Reference](#api-reference)
 - [Trade Journal (ATA Post-Mortem)](#trade-journal-ata-post-mortem)
+- [Hunter: Killzone Sweep](#hunter-killzone-sweep)
+- [Stop Ladder (manual trades)](#stop-ladder-manual-trades)
 - [BTC Circuit Breaker](#btc-circuit-breaker)
 - [4H Dealing Range Radar](#4h-dealing-range-radar)
 - [n8n Integration](#n8n-integration)
@@ -72,14 +74,14 @@ or get filtered.
 |---|---|
 | `engine/config/config.yaml` | Every setting: sessions, scanner, setup, filters, risk, costs. Validated on load; a misspelled key stops the engine. |
 | `engine/src/core/engine.ts` | The engine core. Its only clock is the close time of the candles it is given. |
-| `engine/src/main.ts` | Express server: all API routes, the scalp autopilot, live feed wiring. |
+| `engine/src/main.ts` | Express server: all API routes, Hunter (the scalp autopilot), live feed wiring. |
 | `engine/src/sessions.ts` | Session calendar (Asia, London, New York), entry windows, session-end exits. |
 | `engine/src/analysis/` | Indicators, market structure, trend states, supply/demand zones, FVGs, volume profile. |
 | `engine/src/strategy/pullback.ts` | Pullback setup: arming on 1H, 15M confirmation, trade plan. |
 | `engine/src/filters.ts`, `scoring.ts` | Filters (chop, fakeout, stagnation, etc.) and confluence scoring. |
 | `engine/src/feed/` | Binance public client, live and replay candle feeds, candle store. |
 | `engine/src/storage/` | SQLite: append-only trade log, signals, trade journal. |
-| `engine/tests/` | 29 test files, 393 tests. |
+| `engine/tests/` | 31 test files, 425 tests. |
 | `src/` | React dashboard (Vite + Tailwind). |
 | `src/pages/` | Dashboard pages: Overview, Market, Trades, Signals, Scalp, Ideas, Chart, FilterLab. |
 | `data/engine/engine.db` | SQLite database (delete it to start fresh). |
@@ -89,7 +91,7 @@ or get filtered.
 ## Running Tests
 
 ```bash
-# Run all 393 tests (engine logic, storage, indicators, backtest, etc.)
+# Run all 425 tests (engine logic, storage, indicators, backtest, etc.)
 npm test
 
 # Type check (no emit)
@@ -252,12 +254,22 @@ curl http://localhost:3009/api/market | jq '.[0].htfPoi'
 curl http://localhost:3009/api/htf/BTCUSDT | jq
 ```
 
-### 7. Test the Scalp Autopilot
+### 7. Test Hunter (the scalp autopilot)
 
-The scalp autopilot is disabled by default (see `config.yaml`). To test its logic:
+Turn Hunter on or off with **Engage Hunter** on the Hunter page. Your choice is
+saved and survives restarts; `scalp_autopilot.enabled` in `config.yaml` is only
+the default before you first use the switch. `scalp_autopilot.kinds` lists the
+setups it may take (an empty list means it never places an order).
+
+The **Hunter activity** card on that page lists what it did: orders placed, and
+setups it passed on or the engine refused, with the reason. Most scalps are
+refused as `fees too high` while `allocation.max_fee_drag_pct` is 15: tight 5m
+stops leave little room after costs.
+
+To test its logic:
 
 ```bash
-# Check autopilot status
+# Check Hunter's status
 curl http://localhost:3009/api/quant-scalp/autopilot | jq
 
 # View current scalp setups
@@ -300,7 +312,7 @@ Reports are written to `data/backtest/` with metrics: win rate, profit factor, m
 | **Market** | All scanned coins with trend, volume, key levels, HTF POI data |
 | **Trades** | Trade history table with P&L, setup type (pullback/scalp/manual), **Journal** button for each closed trade |
 | **Signals** | Every signal the engine generated with reasoning, filtering, and scoring |
-| **Scalp** | Quant scalp setups across timeframes |
+| **Hunter** | Scalp setups across timeframes, and the switch for Hunter (the scalp autopilot) |
 | **Ideas** | Trade ideas and analysis per coin |
 | **Chart** | Interactive chart with zones, FVGs, structure |
 | **FilterLab** | Experiment with filter settings |
@@ -364,7 +376,7 @@ Reports are written to `data/backtest/` with metrics: win rate, profit factor, m
 | GET | `/api/scalp/:symbol` | Scalp setups for a specific coin |
 | GET | `/api/ideas` | Trade ideas across all coins |
 | GET | `/api/ideas/:symbol` | Trade ideas for a specific coin |
-| GET | `/api/quant-scalp/autopilot` | Autopilot status and config |
+| GET | `/api/quant-scalp/autopilot` | Hunter (scalp autopilot) status |
 
 ### Trade Journal
 
@@ -388,8 +400,9 @@ Reports are written to `data/backtest/` with metrics: win rate, profit factor, m
 |---|---|---|
 | POST | `/api/control/kill` | Emergency: close all positions |
 | POST | `/api/control/pause` | Pause the engine (no new trades) |
-| POST | `/api/control/reset` | Reset the engine (`{ equity? }` to set starting equity) |
-| POST | `/api/control/quant-scalp-autopilot` | Toggle scalp autopilot (`{ enabled }`) |
+| POST | `/api/control/resume` | Resume after a pause, kill or drawdown stop |
+| POST | `/api/control/reset` | Reset the simulated balance (`{ balance? }`; only with no open positions) |
+| POST | `/api/control/quant-scalp-autopilot` | Turn Hunter on or off (`{ enabled }`) |
 
 ---
 
@@ -415,6 +428,51 @@ Every closed trade can be journaled with an **ATA Level 5 reflection**:
 Journal data is stored in SQLite (`trade_journal` table, schema version 3).
 
 ---
+
+## Hunter: Killzone Sweep
+
+Hunter's strategy (`engine/src/strategy/killzoneSweep.ts`), on each 5m close
+of the scanner's coins, while Hunter is switched on:
+
+1. **Killzone:** the close falls in the London (08:00-10:00 London) or New York
+   (09:30-11:30 New York) killzone.
+2. **Sweep:** within the last hour, a wick went through an intact liquidity level
+   (Asia high/low, London high/low, previous day's high/low, equal highs/lows, a
+   4h swing) and a close came back inside within 3 bars.
+3. **CHoCH:** this candle is the first 5m close beyond the swing of the 30
+   minutes before the sweep.
+4. **Entry:** a limit at the middle of the newest fair value gap of the reversal,
+   or at the broken swing when there is none. Cancelled after 30 minutes.
+5. **Stop:** beyond the sweep's extreme by 0.25 ATR(5m).
+6. **Target:** 2R after costs (a liquidity level instead only when one sits at
+   exactly that distance or less: `max_rr`). Further targets were tested and lost:
+   a scalp rarely reaches them within its 2 hours.
+7. **Filter:** longs only in the 4h discount, shorts only in the premium.
+8. **Exits:** closed after 2 hours; closed after 30 minutes if it has never been
+   +0.5R ("not working, get out"); plus the usual stop and target.
+
+It then goes through the engine's risk rules and scalp checks (fee drag, max
+stop width, weekend and funding windows, BTC and exhaustion filters).
+Settings: `scalp_autopilot.killzone_sweep` in `config.yaml`. Backtest it with
+`npm run backtest -- --models scalp --split <date>`.
+
+## Stop Ladder (manual trades)
+
+Once a manual trade has gone your way, its stop follows (`exits.r_ladder` in
+`config.yaml`, checked at every 1m close, in R of the trade's initial risk):
+
+| Best price reached | Stop moves to |
+|---|---|
+| +2R | break-even (entry plus the fee buffer) |
+| +3R | +1R locked |
+| +4R | +2R locked |
+| beyond +4R | trails 1.5R behind the best price |
+
+A stop set at a candle's close applies from the next candle, and is never placed
+on the wrong side of the price. The steps were chosen by replaying 43 manual
+trades minute by minute: break-even at +1R cut too many runners that dipped back
+to the entry first. `setups` lists which trades it applies to (`manual` only by
+default; Hunter and the engine's models keep their own management).
 
 ## BTC Circuit Breaker
 
@@ -476,45 +534,58 @@ docker run -d \
 
 Open **http://localhost:5678** and create an account.
 
-### Workflow 1: Trade Alert (webhook → Telegram)
+> **Sign-in:** with `ALLOWED_EMAILS` set, every API call except `/api/health`
+> needs a sign-in. Set `ENGINE_API_KEY` on the engine and add a header
+> `X-API-Key: <that key>` to each HTTP Request node. n8n's SSE Trigger node
+> cannot send headers, so Workflow 2 needs sign-in off (a local copy).
+
+### Workflow 1: Trade Alert (opened / closed → Telegram)
+
+Polls the trade log and sends only what is new since the last run.
 
 1. **Create a new workflow** in n8n
-2. Add a **Schedule Trigger** node → set to every 30 seconds
+2. Add a **Schedule Trigger** node → every 30 seconds
 3. Add an **HTTP Request** node:
    - Method: `GET`
-   - URL: `http://host.docker.internal:3009/api/trades?status=open`
-4. Add a **Function** node to format the message:
+   - URL: `http://host.docker.internal:3009/api/events?limit=50`
+   - Returns the latest trade events, newest first: `{ id, time, type, symbol, positionId, payload }`
+4. Add a **Code** node that keeps the events it has not seen yet:
    ```javascript
-   const trades = $input.all()[0].json;
-   if (!Array.isArray(trades) || trades.length === 0) {
-     return []; // no output = no message
-   }
-   const lines = trades.map(t =>
-     `${t.side.toUpperCase()} ${t.symbol} @ ${t.entryPrice} | P&L: ${t.unrealizedPnlPct?.toFixed(2)}%`
-   );
-   return [{ json: { text: `📊 Open Trades:\n${lines.join('\n')}` } }];
+   const seen = $getWorkflowStaticData('global');
+   const events = $input.all().map((i) => i.json);
+   const lastId = seen.lastId ?? Math.max(0, ...events.map((e) => e.id));
+   const fresh = events.filter((e) => e.id > lastId && ['order_filled', 'position_closed', 'liquidated'].includes(e.type));
+   seen.lastId = Math.max(lastId, ...events.map((e) => e.id));
+   return fresh.reverse().map((e) => ({ json: { text: e.type === 'order_filled'
+     ? `OPENED ${e.payload.side} ${e.symbol} @ ${e.payload.price} (stop ${e.payload.stop})`
+     : `CLOSED ${e.symbol} @ ${e.payload.price} (${e.payload.reason}), gross P&L ${Number(e.payload.pnl).toFixed(2)} USDT` } }));
    ```
+   The first run only records where the log is, so you are not sent the whole history.
 5. Add a **Telegram** node (or Discord, Slack, Email) → send `{{ $json.text }}`
 6. **Activate** the workflow
 
+For the open positions right now, use `GET /api/account` → `positions[]`
+(`symbol`, `side`, `entryPrice`, `stop`, `target`, `unrealized`, `pnlPct`).
+
 ### Workflow 2: SSE Event Stream (real-time alerts)
 
-For real-time alerts, use the engine's SSE stream:
+`GET /api/stream` is a server-sent event stream. Use n8n's **SSE Trigger** node
+(an HTTP Request node waits for the response to end, and this one never does):
 
-1. Add an **HTTP Request** node:
-   - Method: `GET`
-   - URL: `http://host.docker.internal:3009/api/stream`
-   - Response Format: Full Response
-2. Parse SSE events in a **Function** node
-3. Filter for events you care about (trade opened, closed, signal, circuit breaker)
-4. Send to your notification channel
+- URL: `http://host.docker.internal:3009/api/stream`
+- Events it sends:
+  - `signal`: the engine confirmed an entry (the dashboard's notifications)
+  - `warning`: a coin got a pump or danger warning
+  - `engine`: the engine's clock moved (every candle close; no detail)
+  - `prices`: live prices
+- Trades opening and closing are **not** on the stream; poll `/api/events` for those (Workflow 1).
 
 ### Workflow 3: Daily P&L Report
 
 1. **Schedule Trigger** → every day at 8:00 AM
-2. **HTTP Request** → `GET http://host.docker.internal:3009/api/equity?from=<yesterday>`
-3. **HTTP Request** → `GET http://host.docker.internal:3009/api/results?from=<yesterday>`
-4. **Function** → Format a summary with:
+2. **HTTP Request** → `GET http://host.docker.internal:3009/api/equity?hours=24` (equity points over the last 24 hours)
+3. **HTTP Request** → `GET http://host.docker.internal:3009/api/trades?limit=200` (closed trades, newest first; keep those with `closedAt` in the last 24 hours)
+4. **Code** → Format a summary with:
    - Starting vs ending equity
    - Number of trades taken
    - Win/loss breakdown
@@ -526,7 +597,7 @@ For real-time alerts, use the engine's SSE stream:
 1. **Schedule Trigger** → every 1 minute
 2. **HTTP Request** → `GET http://host.docker.internal:3009/api/account`
 3. **IF** node → check `{{ $json.circuitBreaker.active === true }}`
-4. **Telegram** → "🚨 BTC Circuit Breaker ACTIVE — all new longs halted for 30 min"
+4. **Telegram** → "🚨 BTC Circuit Breaker ACTIVE — new altcoin longs blocked for 30 min"
 
 ### Testing n8n workflows
 
@@ -537,7 +608,7 @@ For real-time alerts, use the engine's SSE stream:
    ```
    # From inside n8n, test the connection:
    URL: http://host.docker.internal:3009/api/health
-   Expected: { "ok": true }
+   Expected: { "status": "ok", "feed": "live", ... }
    ```
 5. If `host.docker.internal` doesn't work on your system, use your machine's local IP instead
 
@@ -583,6 +654,7 @@ Set in `.env.local` (git-ignored) or as environment variables:
 | `ENGINE_DB_PATH` | `data/engine/engine.db` | SQLite database path |
 | `ENGINE_CONFIG` | `engine/config/config.yaml` | Config file path |
 | `ALLOWED_EMAILS` | unset (no sign-in) | Comma-separated Google accounts for auth. **Set this on hosted copies.** |
+| `ENGINE_API_KEY` | unset | Key automations send in an `X-API-Key` header to call the API while sign-in is on. Keep it secret. |
 | `BACKUP_TARGET` | `firestore` (prod) / `file` (dev) | Where the trade log is backed up |
 | `ENGINE_NAMESPACE` | `hosted` (prod) / `local` (dev) | Keeps backups separate between copies |
 
@@ -633,7 +705,7 @@ npm start        # NODE_ENV=production node server.ts
 ```bash
 npm install              # Install dependencies
 npm run dev              # Dev server (engine + dashboard)
-npm test                 # Run all 393 tests
+npm test                 # Run all 425 tests
 npm run lint             # Type check
 npm run build            # Production build
 npm start                # Start production server

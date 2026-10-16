@@ -22,11 +22,12 @@ describe('engine config', () => {
     // Risk caps: no daily trade cap (null), but open trades and open risk stay capped.
     expect(c.speed.groups.wild.max_open).toBeUndefined();
     expect([c.risk.max_trades_per_day, c.scalp_autopilot.max_trades_per_day, c.allocation.max_open_trades, c.allocation.max_open_risk_pct]).toEqual([null, null, 4, 3]);
-    expect([c.risk.max_trades_per_symbol_per_day, c.risk.daily_loss_limit_pct, c.risk.max_drawdown_kill_pct]).toEqual([2, 3, 15]);
+    expect([c.risk.max_trades_per_symbol_per_day, c.risk.daily_loss_limit_pct, c.risk.max_drawdown_kill_pct]).toEqual([10, 3, 15]);
     expect(c.speed.min_history_days).toBe(14);
     expect(c.breakout.enabled).toBe(false);
     expect(c.scalp_autopilot.enabled).toBe(false);
     expect(c.scalp_autopilot.kinds).toEqual([]);
+    expect(c.scalp_autopilot.killzone_sweep.enabled).toBe(true);
     expect(c.sessions.entry_delay_min).toBe(15);
     expect(c.models).toMatchObject({ pullback: false, zone_sweep: false, session_sweep: false, htf_poi: true });
     expect(c.htf_poi.directions).toEqual(['long']);

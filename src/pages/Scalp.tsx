@@ -1,6 +1,6 @@
-// Quant Scalp suite (1m, 5m, 15m) across Binance markets: real OHLCV orderflow,
-// VWAP bounces, FVG retests, and volume climax reversals with 15m CHoCH confirmation
-// and Key Level Limit pullback execution. Includes Master Autopilot and Friction Guard.
+// The Hunter page: scalp setups (sweep reclaims, VWAP bounces, EMA pullbacks, FVG retests,
+// volume climaxes, opening-range breaks) on closed 1m, 5m and 15m candles, taken by hand as
+// limit orders at their key level; and the switch for Hunter, which takes the 5m and 15m ones itself.
 import { useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle, BarChart3, Bot, BotOff, CheckCircle2, Layers, Power,
@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import { post, usePoll, usePrices, type ScalpSetup, type ScalpStats } from '../lib/api';
 import { SCALP_LABEL, type ScalpKind } from '../../engine/src/analysis/scalp';
+import type { HunterLogEntry } from '../../shared/types';
 import { coin, duration, hhmm, pct, price } from '../lib/format';
 import { Badge, Card, Empty, SideBadge, Table, td } from '../components/ui';
 import { TakePosition } from '../components/TakePosition';
@@ -18,6 +19,10 @@ interface ScalpResponse {
   setups: ScalpSetup[];
   stats: ScalpStats[];
   autopilot?: boolean;
+  /** The setup kinds Hunter may take (config scalp_autopilot.kinds); none means it never places an order. */
+  hunterKinds?: ScalpKind[];
+  /** What Hunter did lately, newest first. */
+  hunterLog?: HunterLogEntry[];
   /** Per timeframe, minutes: the max hold and the limit-entry timeout a scalp is taken with. */
   maxHoldMin?: Record<string, number>;
   entryTimeoutMin?: Record<string, number>;
@@ -69,7 +74,9 @@ export function Scalp({ go }: { go: (page: string, symbol?: string, tf?: string)
   const live = usePrices();
 
   // Autopilot state synced with backend engine
-  const [autopilot, setAutopilot] = useState<boolean>(true);
+  // Off until the server says otherwise: the page must not show Hunter engaged before it knows.
+  const [autopilot, setAutopilot] = useState<boolean>(false);
+  const noKinds = data?.hunterKinds !== undefined && data.hunterKinds.length === 0;
   const [busyAutopilot, setBusyAutopilot] = useState(false);
 
   useEffect(() => {
@@ -105,7 +112,7 @@ export function Scalp({ go }: { go: (page: string, symbol?: string, tf?: string)
 
   return (
     <div className="space-y-5">
-      {/* Top Banner / Master Autopilot Control Panel */}
+      {/* Top Banner / Hunter Control Panel */}
       <div className="flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-line bg-card p-4 shadow-sm md:p-5">
         <div className="space-y-1">
           <div className="flex items-center gap-2.5">
@@ -114,19 +121,19 @@ export function Scalp({ go }: { go: (page: string, symbol?: string, tf?: string)
             </div>
             <div>
               <div className="flex flex-wrap items-center gap-2">
-                <h2 className="text-base font-bold text-ink">Quant Scalper Engine</h2>
+                <h2 className="text-base font-bold text-ink">Hunter</h2>
                 {autopilot ? (
                   <span className="inline-flex items-center gap-1.5 rounded-full border border-sky-400/40 bg-sky-400/15 px-2.5 py-0.5 text-[11px] font-bold text-sky-300">
                     <span className="relative flex h-2 w-2">
                       <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-sky-400 opacity-75" />
                       <span className="relative inline-flex h-2 w-2 rounded-full bg-sky-400" />
                     </span>
-                    AUTOPILOT ENGAGED
+                    HUNTER ENGAGED
                   </span>
                 ) : (
                   <span className="inline-flex items-center gap-1.5 rounded-full border border-line bg-card-2 px-2.5 py-0.5 text-[11px] font-medium text-ink-3">
                     <span className="h-2 w-2 rounded-full bg-ink-3" />
-                    AUTOPILOT OFF (Manual 1-Click)
+                    HUNTER OFF (Manual 1-Click)
                   </span>
                 )}
                 {active ? (
@@ -140,25 +147,25 @@ export function Scalp({ go }: { go: (page: string, symbol?: string, tf?: string)
                 )}
               </div>
               <p className="text-xs text-ink-3">
-                Autonomous 1m Micro, 5m Fast & 15m Macro scalps · 15m CHoCH confirmation · Resting limit order pullback execution
+                Killzone sweep on 5m · London and New York killzones · stop run, 5m CHoCH, limit at the gap · out after 2h, or 30 min if not working
               </p>
             </div>
           </div>
         </div>
 
-        {/* Master Autopilot & Scanner Action Buttons */}
+        {/* Hunter & Scanner Action Buttons */}
         <div className="flex flex-wrap items-center gap-2.5">
           <button
             onClick={toggleAutopilot}
             disabled={busyAutopilot}
-            className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-xs font-bold shadow-md transition ${
+            className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-xs font-bold shadow-md transition disabled:cursor-not-allowed disabled:opacity-50 ${
               autopilot
                 ? 'border border-sky-500/40 bg-sky-500/20 text-sky-200 hover:bg-sky-500/30'
                 : 'border border-sky-500/50 bg-sky-500 text-black hover:brightness-110 shadow-sky-500/20'
             }`}
           >
             {autopilot ? <BotOff size={14} /> : <Bot size={14} />}
-            {autopilot ? 'Disengage Autopilot' : 'Engage Autopilot'}
+            {autopilot ? 'Disengage Hunter' : 'Engage Hunter'}
           </button>
 
           <button
@@ -172,16 +179,19 @@ export function Scalp({ go }: { go: (page: string, symbol?: string, tf?: string)
         </div>
       </div>
 
-      {/* Autopilot Status Notice */}
+      {/* Hunter Status Notice */}
       {autopilot ? (
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-sky-500/30 bg-sky-500/10 p-3.5 text-xs text-sky-200">
           <div className="flex items-center gap-2.5">
             <Bot size={18} className="shrink-0 text-sky-400" />
             <div>
-              <p className="font-semibold text-ink">Autonomous Quant Autopilot is ACTIVE</p>
+              <p className="font-semibold text-ink">Hunter is ACTIVE</p>
               <p className="text-ink-2">
-                The engine autonomously monitors every closed 1m, 5m, and 15m candle. When a qualified setup appears,
-                it automatically places a resting limit order at the key level pullback, sized to 1% risk with 2R net targets. No manual click required.
+                In the London and New York killzones, Hunter watches each 5m close of the scanner's coins for a stop run: a wick through
+                the Asia or London high or low, the previous day's high or low, or equal highs or lows, that closes back inside. When a 5m
+                candle then breaks the swing before the sweep (a CHoCH), it places a limit at the middle of the fair value gap, stop beyond
+                the wick, longs only in the 4h discount and shorts only in the premium, risking at most 1%. It closes after 2 hours, or
+                after 30 minutes if the trade has not reached +0.5R. Simulated trades only: judge it by its results on the Trades page.
               </p>
             </div>
           </div>
@@ -198,7 +208,7 @@ export function Scalp({ go }: { go: (page: string, symbol?: string, tf?: string)
           <div className="flex items-center gap-2.5">
             <AlertTriangle size={18} className="shrink-0 text-warning" />
             <div>
-              <p className="font-semibold text-ink">Autopilot is OFF (Manual 1-Click Mode)</p>
+              <p className="font-semibold text-ink">Hunter is OFF (Manual 1-Click Mode)</p>
               <p className="text-ink-2">
                 The scanner identifies real-time setups, but trades will not be placed automatically. Click "Take Limit" on any setup below to place pullback limit orders.
               </p>
@@ -207,12 +217,20 @@ export function Scalp({ go }: { go: (page: string, symbol?: string, tf?: string)
           <button
             onClick={toggleAutopilot}
             disabled={busyAutopilot}
-            className="rounded-lg border border-warning/40 bg-warning/20 px-3 py-1 font-semibold text-xs text-warning hover:bg-warning/30"
+            className="rounded-lg border border-warning/40 bg-warning/20 px-3 py-1 font-semibold text-xs text-warning hover:bg-warning/30 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            Engage Autopilot
+            Engage Hunter
           </button>
         </div>
       )}
+
+      {noKinds && (
+        <div role="alert" className="rounded-xl border border-critical/40 bg-critical/10 p-3.5 text-xs text-critical">
+          No setup types are enabled for Hunter (<code>scalp_autopilot.kinds: []</code> in config.yaml), so it never places an order. List the kinds it may take there and restart.
+        </div>
+      )}
+
+      <HunterActivity log={data?.hunterLog} on={autopilot} />
 
       {/* Quant Protections / Friction Budget Bar */}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
@@ -435,7 +453,7 @@ export function Scalp({ go }: { go: (page: string, symbol?: string, tf?: string)
           </Table>
         )}
         <p className="mt-3 max-w-4xl text-xs text-ink-3">
-          Found on closed 1m, 5m, and 15m candles across listed coins. When Autopilot is engaged, qualified setups
+          Found on closed 1m, 5m, and 15m candles across listed coins. When Hunter is engaged, qualified setups
           automatically place resting limit orders at key level pullbacks, sized to 1% risk and 2R net target.
           Stops closer than 3× round-trip friction ({pct(data?.costPct ?? 0.2, 2)}) are discarded to protect against fee drag.
         </p>
@@ -478,5 +496,40 @@ export function Scalp({ go }: { go: (page: string, symbol?: string, tf?: string)
         </p>
       </Card>
     </div>
+  );
+}
+
+const OUTCOME: Record<HunterLogEntry['outcome'], { tone: 'good' | 'warning' | 'critical'; label: string }> = {
+  placed: { tone: 'good', label: 'placed' },
+  skipped: { tone: 'warning', label: 'passed on' },
+  refused: { tone: 'critical', label: 'refused' },
+};
+
+/** What Hunter did lately: orders placed, and setups it found but did not place, with why. */
+function HunterActivity({ log, on }: { log?: HunterLogEntry[]; on: boolean }) {
+  return (
+    <Card title="Hunter activity" icon={<Bot size={16} />} right={<span className="text-xs text-ink-3">since the server started · newest first</span>}>
+      {!log?.length ? (
+        <Empty>
+          {on
+            ? 'Nothing yet. Hunter looks at each 5m and 15m close of the scanner\'s coins; setups it places or passes on show here.'
+            : 'Hunter is off. Engage it to have it place limit orders on qualifying setups.'}
+        </Empty>
+      ) : (
+        <ul className="divide-y divide-line/60 text-xs">
+          {log.slice(0, 20).map((e, i) => (
+            <li key={`${e.time}-${e.symbol}-${i}`} className="flex flex-wrap items-center gap-x-3 gap-y-1 py-2">
+              <span className="tabular text-ink-3">{hhmm(e.time)}</span>
+              <Badge tone={OUTCOME[e.outcome].tone}>{OUTCOME[e.outcome].label}</Badge>
+              <span className="font-semibold text-ink">{coin(e.symbol)}</span>
+              <span className="text-ink-3">{e.tf}</span>
+              {e.side && <SideBadge side={e.side} />}
+              {e.kind && <span className="text-ink-2">{SCALP_LABEL[e.kind as ScalpKind] ?? e.kind}</span>}
+              <span className="min-w-0 basis-full text-ink-3 sm:basis-auto">{e.detail}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Card>
   );
 }

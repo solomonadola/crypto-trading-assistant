@@ -84,6 +84,26 @@ export function localToUtc(y: number, m: number, d: number, hh: number, mm: numb
 const hhmm = (s: string) => s.split(':').map(Number) as [number, number];
 const ymd = (y: number, m: number, d: number) => `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
 
+/** A named local wall-clock window, such as a killzone. */
+export interface TimeWindow {
+  name: string;
+  tz: string;
+  start: string;
+  end: string;
+}
+
+/** The window of `windows` that `t` falls in (local wall-clock time, start inclusive), or null. */
+export function windowAt(t: number, windows: readonly TimeWindow[]): string | null {
+  for (const k of windows) {
+    const p = localParts(t, k.tz);
+    const now = p.hh * 60 + p.mm;
+    const [sh, sm] = hhmm(k.start);
+    const [eh, em] = hhmm(k.end);
+    if (now >= sh * 60 + sm && now < eh * 60 + em) return k.name;
+  }
+  return null;
+}
+
 export class SessionCalendar {
   private readonly defs: SessionDef[];
 
@@ -141,14 +161,7 @@ export class SessionCalendar {
 
   /** The killzone `t` falls in (local wall-clock window, start inclusive), or null. */
   killzoneAt(t: number): string | null {
-    for (const k of this.cfg.killzones) {
-      const p = localParts(t, k.tz);
-      const now = p.hh * 60 + p.mm;
-      const [sh, sm] = hhmm(k.start);
-      const [eh, em] = hhmm(k.end);
-      if (now >= sh * 60 + sm && now < eh * 60 + em) return k.name;
-    }
-    return null;
+    return windowAt(t, this.cfg.killzones);
   }
 
   /** Killzone windows overlapping [from, to), by start (for the chart). */

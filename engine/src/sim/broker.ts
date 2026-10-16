@@ -1,11 +1,14 @@
 // Simulated fills (ENGINE_PLAN.md Section 11). Never more generous than an
-// exchange: every fill is a market or stop order, pays the taker fee, and
-// slips against the trade.
+// exchange: market, stop and take-profit fills pay the taker fee and slip
+// against the trade. A limit entry that rested on the book until price came
+// to it fills at its price, without slippage, and pays the maker fee.
 import type { Candle } from '../../../shared/types';
 import type { Side } from '../portfolio';
 
 export interface SimCosts {
   taker_fee_pct: number;
+  /** Paid by a limit order that rested on the book before it filled (Binance USDT-M, regular tier: 0.02%). */
+  maker_fee_pct: number;
   slippage_pct: number;
 }
 
@@ -37,7 +40,18 @@ export function targetFill(side: Side, target: number, c: Candle, costs: SimCost
   return reached ? marketFill(side, 'close', target, costs) : null;
 }
 
-export const fee = (notional: number, costs: SimCosts) => Math.abs(notional) * costs.taker_fee_pct / 100;
+/** The fee on a fill: the taker fee, or the maker fee for a limit order that rested on the book. */
+/**
+ * A take-profit resting on the book as a limit order (Hunter's scalps): filled at the target itself, without
+ * slippage, once a candle trades through it. Only touching it is not enough: the order may sit behind others
+ * in the queue at that price. Null if not filled.
+ */
+export function restingTargetFill(side: Side, target: number, c: Candle): number | null {
+  return (side === 'long' ? c.high > target : c.low < target) ? target : null;
+}
+
+export const fee = (notional: number, costs: SimCosts, maker = false) =>
+  Math.abs(notional) * (maker ? costs.maker_fee_pct : costs.taker_fee_pct) / 100;
 
 /** Gross profit of closing `qty` at `exit`. */
 export const grossPnl = (side: Side, entry: number, exit: number, qty: number) => (side === 'long' ? exit - entry : entry - exit) * qty;
