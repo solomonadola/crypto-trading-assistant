@@ -231,7 +231,7 @@ exits:
     # `candles` candles in a row while the best gain so far is under max_peak_pct.
     stagnation: { rvol_max: 0.5, candles: 6, max_peak_pct: 1.0 }
 
-# The Quant Scalp Autopilot (main.ts): scalp setups placed as limit orders at their key level.
+# Hunter, the scalp autopilot (main.ts): scalp setups placed as limit orders at their key level.
 # Its trades go through the engine's risk rules plus these, and are recorded as setup "scalp".
 scalp_autopilot:
   enabled: false                # disabled: zero setups survived 6-month baseline validation (see BASELINE.md)

@@ -39,7 +39,7 @@ import { TIMEFRAME_MS, type Candle, type Timeframe, type WarningNotice, type Dir
 import { PatternMemory } from './analysis/patternMemory';
 import { diagnoseVolume } from './analysis/volumeDiagnosis';
 import { analyzeVolumeSurge } from './analysis/volumeSurge';
-import { autopilotCandles, settledPrices } from './autopilot';
+import { autopilotCandles, hunterSwitchRefusal, settledPrices } from './autopilot';
 import { decideScalp } from './strategy/scalpAutopilot';
 import { costsFor, roundTripPct } from './speed';
 
@@ -936,7 +936,7 @@ function runQuantAutopilot(batch: Candle[]): void {
 
     if (!decision.order) {
       if (decision.skipped && decision.skipped !== 'no_fresh_setup') {
-        console.log(`[quant-autopilot] Skip ${c.symbol}: ${decision.skipped}`);
+        console.log(`[hunter] Skip ${c.symbol}: ${decision.skipped}`);
       }
       continue;
     }
@@ -945,7 +945,7 @@ function runQuantAutopilot(batch: Candle[]): void {
     const key = `${o.symbol}|${c.openTime}|${o.kind}|${o.side}`;
     if (autoPlacedScalps.has(key)) continue;
 
-    console.log(`[quant-autopilot] Auto-executing ${o.symbol} ${o.side} [${o.tf}] ${o.kind} limit pullback @ ${o.limitPrice}`);
+    console.log(`[hunter] Auto-executing ${o.symbol} ${o.side} [${o.tf}] ${o.kind} limit pullback @ ${o.limitPrice}`);
     try {
       const produced = command({
         type: 'open',
@@ -969,19 +969,19 @@ function runQuantAutopilot(batch: Candle[]): void {
         if (first) autoPlacedScalps.delete(first);
       }
       currentHeld.add(o.symbol);
-      for (const e of produced) console.log(`[quant-autopilot] ${e.type} ${e.symbol ?? ''} ${JSON.stringify(e.payload)}`);
+      for (const e of produced) console.log(`[hunter] ${e.type} ${e.symbol ?? ''} ${JSON.stringify(e.payload)}`);
       broadcast('warning', {
         symbol: o.symbol,
         code: 'autopilot_entry',
         level: 'caution',
         side: o.side,
-        title: `Autopilot: Limit Pullback Placed [${o.tf}]`,
+        title: `Hunter: Limit Pullback Placed [${o.tf}]`,
         detail: `${SCALP_LABEL[o.kind]} limit placed at ${o.limitPrice}. Waiting for pullback (stop ${o.stop}, target ${o.target}).`,
         time: Date.now(),
         phase: null,
       } satisfies WarningNotice);
     } catch (err) {
-      console.log(`[quant-autopilot] Order not opened for ${o.symbol}: ${message(err)}`);
+      console.log(`[hunter] Order not opened for ${o.symbol}: ${message(err)}`);
     }
   }
 }
@@ -995,8 +995,13 @@ app.post('/api/control/quant-scalp-autopilot', (req, res) => {
   const next = b.enabled !== undefined ? Boolean(b.enabled) : !quantAutopilot;
   quantAutopilot = next;
   setKv(db, QUANT_AUTOPILOT_KEY, String(quantAutopilot));
-  console.log(`[quant-autopilot] Autopilot is now ${quantAutopilot ? 'ACTIVE' : 'OFF'}`);
+  console.log(`[hunter] Hunter is now ${quantAutopilot ? 'ACTIVE' : 'OFF'}`);
   broadcast('engine', { clock: engine.now(), quantAutopilot });
+  const refusal = hunterSwitchRefusal({ configEnabled: config.scalp_autopilot.enabled, standby: backup.standby, enable: next });
+  if (refusal) {
+    res.status(409).json({ ok: false, error: refusal, enabled: quantAutopilot });
+    return;
+  }
   res.json({ ok: true, enabled: quantAutopilot });
 });
 
@@ -1005,7 +1010,7 @@ app.get('/api/scalp', (req, res) => {
   const tfs: ('1m' | '5m' | '15m')[] = reqTf === '1m' ? ['1m'] : reqTf === '5m' ? ['5m'] : reqTf === '15m' ? ['15m'] : ['1m', '5m', '15m'];
   const setups = listed().flatMap((sym) => tfs.flatMap((tf) => scalpsFor(sym, tf))).sort((a, b) => b.time - a.time);
   res.json({
-    hours: SCALP_HOURS, costPct: SCALP_COST_PCT, setups, stats: scalpStats(setups), autopilot: quantAutopilot,
+    hours: SCALP_HOURS, costPct: SCALP_COST_PCT, setups, stats: scalpStats(setups), autopilot: quantAutopilot, autopilotAllowed: config.scalp_autopilot.enabled,
     maxHoldMin: config.scalp_autopilot.max_hold_min, entryTimeoutMin: config.scalp_autopilot.entry_timeout_min,
   });
 });

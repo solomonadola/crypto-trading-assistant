@@ -8,7 +8,7 @@ import { TradeJournalModal } from '../components/TradeJournalModal';
 const STRATEGY_FILTERS = [
   { id: 'all', label: 'All Strategies' },
   { id: 'htf_poi', label: 'Institutional (4H POI)' },
-  { id: 'scalp', label: 'Quant Scalp' },
+  { id: 'scalp', label: 'Hunter' },
   { id: 'manual', label: 'Manual Trades' },
 ] as const;
 type StrategyFilterId = (typeof STRATEGY_FILTERS)[number]['id'];

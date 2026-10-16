@@ -1,11 +1,11 @@
-# Crypto Trading Assistant
+# Killzone
 
 A simulated crypto futures trading engine with three strategy modes:
 
 | Mode | How it works | Config |
 |---|---|---|
 | **Institutional (HTF pullback)** | Engine scans coins, arms setups on the 1H chart, waits for a 15M CHoCH confirmation, then opens a simulated trade with a stop, target, and profit ladder. Fully automatic. | `pullback`, `exits`, `allocation` in `config.yaml` |
-| **Quant Scalp Autopilot** | Places limit orders at key levels on 5M/15M scalp setups. Automatic when enabled. | `scalp_autopilot` in `config.yaml` |
+| **Hunter (scalp autopilot)** | Places limit orders at key levels on 5M/15M scalp setups. Automatic when enabled. | `scalp_autopilot` in `config.yaml` |
 | **Manual trades** | You open and manage trades from the dashboard or via API. Same risk rules apply. | `POST /api/positions/open` |
 
 It reads **Binance USDⓈ-M public market data** — no account, no API keys needed.
@@ -72,7 +72,7 @@ or get filtered.
 |---|---|
 | `engine/config/config.yaml` | Every setting: sessions, scanner, setup, filters, risk, costs. Validated on load; a misspelled key stops the engine. |
 | `engine/src/core/engine.ts` | The engine core. Its only clock is the close time of the candles it is given. |
-| `engine/src/main.ts` | Express server: all API routes, the scalp autopilot, live feed wiring. |
+| `engine/src/main.ts` | Express server: all API routes, Hunter (the scalp autopilot), live feed wiring. |
 | `engine/src/sessions.ts` | Session calendar (Asia, London, New York), entry windows, session-end exits. |
 | `engine/src/analysis/` | Indicators, market structure, trend states, supply/demand zones, FVGs, volume profile. |
 | `engine/src/strategy/pullback.ts` | Pullback setup: arming on 1H, 15M confirmation, trade plan. |
@@ -252,12 +252,12 @@ curl http://localhost:3009/api/market | jq '.[0].htfPoi'
 curl http://localhost:3009/api/htf/BTCUSDT | jq
 ```
 
-### 7. Test the Scalp Autopilot
+### 7. Test Hunter (the scalp autopilot)
 
-The scalp autopilot is disabled by default (see `config.yaml`). To test its logic:
+Hunter is disabled by default (see `config.yaml`). To test its logic:
 
 ```bash
-# Check autopilot status
+# Check Hunter's status
 curl http://localhost:3009/api/quant-scalp/autopilot | jq
 
 # View current scalp setups
@@ -300,7 +300,7 @@ Reports are written to `data/backtest/` with metrics: win rate, profit factor, m
 | **Market** | All scanned coins with trend, volume, key levels, HTF POI data |
 | **Trades** | Trade history table with P&L, setup type (pullback/scalp/manual), **Journal** button for each closed trade |
 | **Signals** | Every signal the engine generated with reasoning, filtering, and scoring |
-| **Scalp** | Quant scalp setups across timeframes |
+| **Hunter** | Scalp setups across timeframes, and the switch for Hunter (the scalp autopilot) |
 | **Ideas** | Trade ideas and analysis per coin |
 | **Chart** | Interactive chart with zones, FVGs, structure |
 | **FilterLab** | Experiment with filter settings |
@@ -364,7 +364,7 @@ Reports are written to `data/backtest/` with metrics: win rate, profit factor, m
 | GET | `/api/scalp/:symbol` | Scalp setups for a specific coin |
 | GET | `/api/ideas` | Trade ideas across all coins |
 | GET | `/api/ideas/:symbol` | Trade ideas for a specific coin |
-| GET | `/api/quant-scalp/autopilot` | Autopilot status and config |
+| GET | `/api/quant-scalp/autopilot` | Hunter (scalp autopilot) status |
 
 ### Trade Journal
 

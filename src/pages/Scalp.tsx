@@ -18,6 +18,8 @@ interface ScalpResponse {
   setups: ScalpSetup[];
   stats: ScalpStats[];
   autopilot?: boolean;
+  /** False when config.yaml disables Hunter: the switch cannot turn it on. */
+  autopilotAllowed?: boolean;
   /** Per timeframe, minutes: the max hold and the limit-entry timeout a scalp is taken with. */
   maxHoldMin?: Record<string, number>;
   entryTimeoutMin?: Record<string, number>;
@@ -69,7 +71,11 @@ export function Scalp({ go }: { go: (page: string, symbol?: string, tf?: string)
   const live = usePrices();
 
   // Autopilot state synced with backend engine
-  const [autopilot, setAutopilot] = useState<boolean>(true);
+  // Off until the server says otherwise: the page must not show Hunter engaged before it knows.
+  const [autopilot, setAutopilot] = useState<boolean>(false);
+  // Switching on is refused while config.yaml disables Hunter; switching off always works.
+  const cannotEngage = !autopilot && data?.autopilotAllowed === false;
+  const engageTitle = cannotEngage ? 'Disabled in config.yaml (scalp_autopilot.enabled: false)' : undefined;
   const [busyAutopilot, setBusyAutopilot] = useState(false);
 
   useEffect(() => {
@@ -105,7 +111,7 @@ export function Scalp({ go }: { go: (page: string, symbol?: string, tf?: string)
 
   return (
     <div className="space-y-5">
-      {/* Top Banner / Master Autopilot Control Panel */}
+      {/* Top Banner / Hunter Control Panel */}
       <div className="flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-line bg-card p-4 shadow-sm md:p-5">
         <div className="space-y-1">
           <div className="flex items-center gap-2.5">
@@ -114,19 +120,19 @@ export function Scalp({ go }: { go: (page: string, symbol?: string, tf?: string)
             </div>
             <div>
               <div className="flex flex-wrap items-center gap-2">
-                <h2 className="text-base font-bold text-ink">Quant Scalper Engine</h2>
+                <h2 className="text-base font-bold text-ink">Hunter</h2>
                 {autopilot ? (
                   <span className="inline-flex items-center gap-1.5 rounded-full border border-sky-400/40 bg-sky-400/15 px-2.5 py-0.5 text-[11px] font-bold text-sky-300">
                     <span className="relative flex h-2 w-2">
                       <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-sky-400 opacity-75" />
                       <span className="relative inline-flex h-2 w-2 rounded-full bg-sky-400" />
                     </span>
-                    AUTOPILOT ENGAGED
+                    HUNTER ENGAGED
                   </span>
                 ) : (
                   <span className="inline-flex items-center gap-1.5 rounded-full border border-line bg-card-2 px-2.5 py-0.5 text-[11px] font-medium text-ink-3">
                     <span className="h-2 w-2 rounded-full bg-ink-3" />
-                    AUTOPILOT OFF (Manual 1-Click)
+                    HUNTER OFF (Manual 1-Click)
                   </span>
                 )}
                 {active ? (
@@ -146,19 +152,20 @@ export function Scalp({ go }: { go: (page: string, symbol?: string, tf?: string)
           </div>
         </div>
 
-        {/* Master Autopilot & Scanner Action Buttons */}
+        {/* Hunter & Scanner Action Buttons */}
         <div className="flex flex-wrap items-center gap-2.5">
           <button
             onClick={toggleAutopilot}
-            disabled={busyAutopilot}
-            className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-xs font-bold shadow-md transition ${
+            disabled={busyAutopilot || cannotEngage}
+            title={engageTitle}
+            className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-xs font-bold shadow-md transition disabled:cursor-not-allowed disabled:opacity-50 ${
               autopilot
                 ? 'border border-sky-500/40 bg-sky-500/20 text-sky-200 hover:bg-sky-500/30'
                 : 'border border-sky-500/50 bg-sky-500 text-black hover:brightness-110 shadow-sky-500/20'
             }`}
           >
             {autopilot ? <BotOff size={14} /> : <Bot size={14} />}
-            {autopilot ? 'Disengage Autopilot' : 'Engage Autopilot'}
+            {autopilot ? 'Disengage Hunter' : 'Engage Hunter'}
           </button>
 
           <button
@@ -172,13 +179,13 @@ export function Scalp({ go }: { go: (page: string, symbol?: string, tf?: string)
         </div>
       </div>
 
-      {/* Autopilot Status Notice */}
+      {/* Hunter Status Notice */}
       {autopilot ? (
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-sky-500/30 bg-sky-500/10 p-3.5 text-xs text-sky-200">
           <div className="flex items-center gap-2.5">
             <Bot size={18} className="shrink-0 text-sky-400" />
             <div>
-              <p className="font-semibold text-ink">Autonomous Quant Autopilot is ACTIVE</p>
+              <p className="font-semibold text-ink">Hunter is ACTIVE</p>
               <p className="text-ink-2">
                 The engine autonomously monitors every closed 1m, 5m, and 15m candle. When a qualified setup appears,
                 it automatically places a resting limit order at the key level pullback, sized to 1% risk with 2R net targets. No manual click required.
@@ -198,18 +205,20 @@ export function Scalp({ go }: { go: (page: string, symbol?: string, tf?: string)
           <div className="flex items-center gap-2.5">
             <AlertTriangle size={18} className="shrink-0 text-warning" />
             <div>
-              <p className="font-semibold text-ink">Autopilot is OFF (Manual 1-Click Mode)</p>
+              <p className="font-semibold text-ink">Hunter is OFF (Manual 1-Click Mode)</p>
               <p className="text-ink-2">
                 The scanner identifies real-time setups, but trades will not be placed automatically. Click "Take Limit" on any setup below to place pullback limit orders.
+                {data?.autopilotAllowed === false && ' Hunter is disabled in config.yaml: it lost money in the 6-month baseline backtest.'}
               </p>
             </div>
           </div>
           <button
             onClick={toggleAutopilot}
-            disabled={busyAutopilot}
-            className="rounded-lg border border-warning/40 bg-warning/20 px-3 py-1 font-semibold text-xs text-warning hover:bg-warning/30"
+            disabled={busyAutopilot || cannotEngage}
+            title={engageTitle}
+            className="rounded-lg border border-warning/40 bg-warning/20 px-3 py-1 font-semibold text-xs text-warning hover:bg-warning/30 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            Engage Autopilot
+            Engage Hunter
           </button>
         </div>
       )}
@@ -435,7 +444,7 @@ export function Scalp({ go }: { go: (page: string, symbol?: string, tf?: string)
           </Table>
         )}
         <p className="mt-3 max-w-4xl text-xs text-ink-3">
-          Found on closed 1m, 5m, and 15m candles across listed coins. When Autopilot is engaged, qualified setups
+          Found on closed 1m, 5m, and 15m candles across listed coins. When Hunter is engaged, qualified setups
           automatically place resting limit orders at key level pullbacks, sized to 1% risk and 2R net target.
           Stops closer than 3× round-trip friction ({pct(data?.costPct ?? 0.2, 2)}) are discarded to protect against fee drag.
         </p>

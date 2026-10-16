@@ -38,3 +38,15 @@ export function settledPrices(
     return t !== null && t <= o.engineClock && o.now - t <= LIVE_PRICE_MAX_LAG_MS;
   }));
 }
+
+/**
+ * Why Hunter (the scalp autopilot) may not be switched as asked from the dashboard, or null when it may.
+ * With `scalp_autopilot.enabled: false` in the config it stays off: the switch used to turn it on anyway
+ * until the next restart. Switching it off is always allowed. A standby copy changes nothing: the copy
+ * holding the lock is the one that trades.
+ */
+export function hunterSwitchRefusal(o: { configEnabled: boolean; standby: boolean; enable: boolean }): string | null {
+  if (o.standby) return 'This copy is on standby; switch Hunter on the copy that holds the lock';
+  if (o.enable && !o.configEnabled) return 'Hunter is disabled in config.yaml (scalp_autopilot.enabled: false); enable it there and restart to switch it on';
+  return null;
+}

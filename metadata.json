@@ -1,5 +1,5 @@
 {
-  "name": "Session Engine",
+  "name": "Killzone",
   "description": "Simulated crypto futures engine: session-based trend pullback setups on Binance public data, no exchange account.",
   "requestFramePermissions": []
 }
