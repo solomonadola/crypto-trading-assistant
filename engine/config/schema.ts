@@ -230,6 +230,16 @@ export const configSchema = z.object({
     /** A setup whose target is closer than this (percent from entry) is not signalled. */
     min_target_pct: z.number().min(0),
     breakeven_fee_buffer_pct: z.number().min(0),
+    /**
+     * Once a trade's best price since entry reaches at_r (in R of its initial risk), its stop moves to lock_r
+     * (0: break-even plus breakeven_fee_buffer_pct). Checked at every 1m close, for the setups listed.
+     */
+    r_ladder: z.object({
+      setups: z.array(z.enum(['pullback', 'breakout', 'session_sweep', 'zone_sweep', 'htf_poi', 'manual', 'scalp'])),
+      steps: z.array(z.object({ at_r: positive, lock_r: z.number().min(0) }).strict()),
+      /** Beyond the last step, the stop trails this many R behind the best price; null: it stays at the last step. */
+      trail_r: positive.nullable(),
+    }).strict(),
     ladder: z.array(z.object({ trigger_pct: positive, lock_pct: z.number() }).strict()).min(1),
     beyond_last_step: z.object({ lock_fraction_of_peak: z.number().min(0).max(1), or_swing_15m: z.boolean() }).strict(),
     step_on: z.literal('close_15m'),

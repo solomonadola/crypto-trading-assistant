@@ -211,6 +211,18 @@ exits:
   min_rr: 2.0                   # reward:risk to the take-profit, at least 1:2
   min_target_pct: 3.0           # the take-profit must be at least 3% from the entry
   breakeven_fee_buffer_pct: 0.2
+  # Protect a trade that has gone our way, checked at every 1m close: once its best price reaches at_r
+  # (R of the initial risk), the stop moves to lock_r (0 = break-even plus the fee buffer); beyond the last
+  # step it trails trail_r behind the best price. Only for the setups listed: Hunter (scalp) and the models
+  # keep their own management until a backtest says otherwise. Chosen by replaying 43 manual trades
+  # (Oct 8-16): break-even at +1R cut too many runners that dipped back to entry first.
+  r_ladder:
+    setups: [manual]
+    steps:
+      - { at_r: 2.0, lock_r: 0 }     # +2R reached: stop to break-even
+      - { at_r: 3.0, lock_r: 1.0 }   # +3R: lock +1R
+      - { at_r: 4.0, lock_r: 2.0 }   # +4R: lock +2R
+    trail_r: 1.5                     # beyond +4R: the stop trails 1.5R behind the best price
   ladder:
     - { trigger_pct: 3,  lock_pct: 0.2 }
     - { trigger_pct: 5,  lock_pct: 2 }

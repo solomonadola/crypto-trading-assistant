@@ -546,6 +546,38 @@ export class Engine {
     return (sign(p.side) * (best - p.entryPrice)) / risk;
   }
 
+  /**
+   * The stop the R ladder (exits.r_ladder) asks for, if it is tighter than the current one; else null. Read
+   * from the candles closed before the one at `t`: a stop set at a candle's close applies from the next
+   * candle, never to the candle whose high (long) set it, since its low may have come first.
+   */
+  private ladderStop(p: Position, t: number): { stop: number; reason: string } | null {
+    const lad = this.cfg.exits.r_ladder;
+    if (!p.setup || !lad.setups.includes(p.setup) || !lad.steps.length) return null;
+    const asOf = t - TIMEFRAME_MS[this.cfg.timeframes.exits];
+    const best = this.bestR(p, asOf);
+    if (best === null) return null;
+    const step = [...lad.steps].filter((x) => best >= x.at_r).sort((a, b) => b.at_r - a.at_r)[0];
+    if (!step) return null;
+    const s = sign(p.side);
+    const risk = Math.abs(p.entryPrice - p.initialStop);
+    // Beyond the last step, trail: trail_r behind the best price, when that is tighter than the step's lock.
+    const last = Math.max(...lad.steps.map((x) => x.at_r));
+    const trailing = lad.trail_r !== null && best > last && best - lad.trail_r > step.lock_r;
+    const lockR = trailing ? best - lad.trail_r! : step.lock_r;
+    const stop = lockR > 0
+      ? p.entryPrice + s * lockR * risk
+      : p.entryPrice * (1 + (s * this.cfg.exits.breakeven_fee_buffer_pct) / 100);
+    if (s * (stop - p.stop) <= 1e-12) return null;       // already there or better
+    // A stop must sit on the losing side of the price when it is placed: after a spike that closed back past
+    // the level, wait.
+    const placedAt = this.market.recent(p.symbol, this.cfg.timeframes.exits).filter((c) => c.closeTime <= asOf).at(-1);
+    if (!placedAt || s * (placedAt.close - stop) <= 0) return null;
+    const reason = trailing ? `trailing ${lad.trail_r}R behind the best (+${best.toFixed(2)}R): +${lockR.toFixed(2)}R locked`
+      : step.lock_r > 0 ? `+${step.at_r}R reached: +${step.lock_r}R locked` : `+${step.at_r}R reached: break-even`;
+    return { stop, reason };
+  }
+
   /** Stops and take-profits reached by a live price: closed at once (a stop at that price plus slippage, a take-profit at the target). */
   private liveExits(prices: Record<string, number>, time: number): TradeEvent[] {
     const out: TradeEvent[] = [];
@@ -735,6 +767,10 @@ export class Engine {
       const maxHoldMin = p.maxHoldMin ?? legacyScalp(p.note)?.holdMin;
       if (!p.pendingClose && maxHoldMin && t - p.openedAt >= maxHoldMin * 60_000) out.push(this.closeOrder(p, 'max_hold'));
       else if (!p.pendingClose && this.noProgress(p, t)) out.push(this.closeOrder(p, 'no_progress'));
+      else if (!p.pendingClose) {
+        const moved = this.ladderStop(p, t);
+        if (moved) out.push(this.emit('stop_moved', p.id, p.symbol, moved));
+      }
     }
 
     // Entries with no price to fill at, or limits the price never came back to, are cancelled.

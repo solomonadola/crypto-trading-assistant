@@ -27,6 +27,7 @@ The full design is in [ENGINE_PLAN.md](ENGINE_PLAN.md).
 - [API Reference](#api-reference)
 - [Trade Journal (ATA Post-Mortem)](#trade-journal-ata-post-mortem)
 - [Hunter: Killzone Sweep](#hunter-killzone-sweep)
+- [Stop Ladder (manual trades)](#stop-ladder-manual-trades)
 - [BTC Circuit Breaker](#btc-circuit-breaker)
 - [4H Dealing Range Radar](#4h-dealing-range-radar)
 - [n8n Integration](#n8n-integration)
@@ -80,7 +81,7 @@ or get filtered.
 | `engine/src/filters.ts`, `scoring.ts` | Filters (chop, fakeout, stagnation, etc.) and confluence scoring. |
 | `engine/src/feed/` | Binance public client, live and replay candle feeds, candle store. |
 | `engine/src/storage/` | SQLite: append-only trade log, signals, trade journal. |
-| `engine/tests/` | 30 test files, 408 tests. |
+| `engine/tests/` | 31 test files, 425 tests. |
 | `src/` | React dashboard (Vite + Tailwind). |
 | `src/pages/` | Dashboard pages: Overview, Market, Trades, Signals, Scalp, Ideas, Chart, FilterLab. |
 | `data/engine/engine.db` | SQLite database (delete it to start fresh). |
@@ -90,7 +91,7 @@ or get filtered.
 ## Running Tests
 
 ```bash
-# Run all 408 tests (engine logic, storage, indicators, backtest, etc.)
+# Run all 425 tests (engine logic, storage, indicators, backtest, etc.)
 npm test
 
 # Type check (no emit)
@@ -455,6 +456,24 @@ stop width, weekend and funding windows, BTC and exhaustion filters).
 Settings: `scalp_autopilot.killzone_sweep` in `config.yaml`. Backtest it with
 `npm run backtest -- --models scalp --split <date>`.
 
+## Stop Ladder (manual trades)
+
+Once a manual trade has gone your way, its stop follows (`exits.r_ladder` in
+`config.yaml`, checked at every 1m close, in R of the trade's initial risk):
+
+| Best price reached | Stop moves to |
+|---|---|
+| +2R | break-even (entry plus the fee buffer) |
+| +3R | +1R locked |
+| +4R | +2R locked |
+| beyond +4R | trails 1.5R behind the best price |
+
+A stop set at a candle's close applies from the next candle, and is never placed
+on the wrong side of the price. The steps were chosen by replaying 43 manual
+trades minute by minute: break-even at +1R cut too many runners that dipped back
+to the entry first. `setups` lists which trades it applies to (`manual` only by
+default; Hunter and the engine's models keep their own management).
+
 ## BTC Circuit Breaker
 
 Protects your positions when BTC flash-crashes:
@@ -686,7 +705,7 @@ npm start        # NODE_ENV=production node server.ts
 ```bash
 npm install              # Install dependencies
 npm run dev              # Dev server (engine + dashboard)
-npm test                 # Run all 408 tests
+npm test                 # Run all 425 tests
 npm run lint             # Type check
 npm run build            # Production build
 npm start                # Start production server

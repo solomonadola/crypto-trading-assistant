@@ -439,6 +439,55 @@ describe('limit pullback orders', () => {
     expect((fee / (qty * price)) * 100).toBeCloseTo(0.02, 9);     // the maker fee
   });
 
+  it('the R ladder: a manual trade at +1R has its stop moved to break-even, at +2R to +1R locked', () => {
+    const ladder = { setups: ['manual' as const], steps: [{ at_r: 1, lock_r: 0 }, { at_r: 2, lock_r: 1 }, { at_r: 3, lock_r: 2 }], trail_r: null };
+    const open = (setup?: 'scalp') => {
+      const e = engine((c) => { c.exits.r_ladder = ladder; });
+      e.onCandles([minute(at - 60_000, 104, 105.5, 103.8, 105)]);
+      e.onCommand({ type: 'open', symbol: 'BTCUSDT', side: 'long', price: 100, time: at, stop: 98, target: 110, orderType: 'limit', ...(setup ? { setup } : {}) });
+      e.onCandles([minute(at, 103, 103, 99.8, 100.2)]);   // fills at 100; risk 2: +1R is 102, +2R is 104
+      return e;
+    };
+    const step = (e: ReturnType<typeof open>, k: number, o: number, h: number, l: number, c: number) => e.onCandles([minute(at + k * 60_000, o, h, l, c)]);
+    const stopMoves = (evs: TradeEvent[]) => evs.filter((x) => x.type === 'stop_moved').map((x) => [Number(x.payload.stop), x.payload.reason]);
+
+    const e = open();
+    expect(stopMoves(step(e, 1, 100.2, 102.4, 100, 102.2))).toEqual([]);   // +1.2R reached in this candle...
+    // ...so the stop moves at its close, for the next candle (never for the candle that set it: its low may have come first).
+    expect(stopMoves(step(e, 2, 102.2, 104.5, 102, 104.2))).toEqual([[100 * 1.002, '+1R reached: break-even']]);
+    expect(stopMoves(step(e, 3, 104.2, 104.4, 103.5, 104))).toEqual([[102, '+2R reached: +1R locked']]);
+    // The reversal now stops out near +1R instead of the original -1R.
+    const [closed] = step(e, 4, 104, 104, 97, 97.5).filter((x) => x.type === 'position_closed');
+    expect(closed.payload.reason).toBe('stop');
+    expect(Number(closed.payload.price)).toBeGreaterThan(101.9);
+
+    // A spike to +1R that closed back under entry: the stop waits rather than sit above the price.
+    const spike = open();
+    step(spike, 1, 100.2, 102.5, 99.5, 99.8);
+    expect(stopMoves(step(spike, 2, 99.8, 100, 99.4, 99.6))).toEqual([]);
+
+    // Hunter's scalps are not on the ladder (setups: [manual]).
+    const scalp = open('scalp');
+    step(scalp, 1, 100.2, 102.5, 100, 102.2);
+    expect(stopMoves(step(scalp, 2, 102.2, 102.6, 102, 102.4))).toEqual([]);
+  });
+
+  it('the R ladder trails beyond its last step: the stop follows trail_r behind the best price', () => {
+    const e = engine((c) => { c.exits.r_ladder = { setups: ['manual'], steps: [{ at_r: 2, lock_r: 0 }], trail_r: 1.5 }; });
+    e.onCandles([minute(at - 60_000, 104, 105.5, 103.8, 105)]);
+    e.onCommand({ type: 'open', symbol: 'BTCUSDT', side: 'long', price: 100, time: at, stop: 98, target: 130, orderType: 'limit' });
+    e.onCandles([minute(at, 103, 103, 99.8, 100.2)]);   // fills at 100; risk 2
+    const step = (k: number, o: number, h: number, l: number, c: number) =>
+      e.onCandles([minute(at + k * 60_000, o, h, l, c)]).filter((x) => x.type === 'stop_moved').map((x) => Number(x.payload.stop));
+    step(1, 100.2, 104.4, 100, 104);                       // +2.2R, past the last step: the trail (+0.7R) beats break-even
+    const [first] = step(2, 104, 104.2, 103.5, 104);
+    expect(first).toBeCloseTo(101.4, 9);
+    step(3, 104, 110.2, 104, 110);                         // +5.1R reached
+    // Trailing 1.5R (3.0) behind the best (110.2): the stop goes to 107.2, i.e. +3.6R locked.
+    const [trail] = step(4, 110, 110.1, 109.5, 109.8);
+    expect(trail).toBeCloseTo(107.2, 9);
+  });
+
   it('a candle that opens beyond the stop never fills the limit', () => {
     const e = engine();
     e.onCandles([minute(at - 60_000, 104, 105.5, 103.8, 105)]);
