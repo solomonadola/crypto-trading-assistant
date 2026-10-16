@@ -23,7 +23,7 @@ import { btc, exhaustion, funding, runFilters } from '../filters';
 import { scoreSignal } from '../scoring';
 import { decideEntry, equityOf, riskAtStop, unrealized, type SymbolRules } from '../risk';
 import { manage } from '../exits';
-import { fee, grossPnl, liquidationPrice, marketFill, roundQty, stopFill, targetFill } from '../sim/broker';
+import { fee, grossPnl, liquidationPrice, marketFill, restingTargetFill, roundQty, stopFill, targetFill } from '../sim/broker';
 import { tradeIdea } from '../analysis/levels';
 import { sessionSweep } from '../strategy/sessionSweep';
 import { armZoneSweep, confirmZoneSweep, zoneSweepStillValid, type ZoneSweepConfirmation } from '../strategy/zoneSweep';
@@ -519,6 +519,9 @@ export class Engine {
       if (s * (price - p.stop) <= 0) {
         // A live price can skip past the stop (a gap): the fill is that price, never better than the stop.
         out.push(this.closePosition(p, marketFill(p.side, 'close', s > 0 ? Math.min(price, p.stop) : Math.max(price, p.stop), costs), 'stop', at));
+      } else if (p.target !== null && this.cfg.exits.mode === 'fixed' && p.setup === 'scalp' && s * (price - p.target) > 0) {
+        // A scalp's take-profit rests on the book: it fills at the target, maker, once price is through it.
+        out.push(this.closePosition(p, p.target, 'target', at, true));
       } else if (p.target !== null && this.cfg.exits.mode === 'fixed' && s * (price - p.target) >= 0) {
         out.push(this.closePosition(p, marketFill(p.side, 'close', p.target, costs), 'target', at));
       }
@@ -741,8 +744,10 @@ export class Engine {
         continue;
       }
       if (p.target !== null && !(this.cfg.exits.mode === 'partial_ladder' && p.partialDone)) {
-        const tp = targetFill(p.side, p.target, c, costs);
-        if (tp !== null) out.push(...this.takeTarget(p, tp, at));
+        // A scalp's take-profit rests on the book as a limit (maker, no slippage); others fill as a market order.
+        const resting = p.setup === 'scalp' && this.cfg.exits.mode === 'fixed';
+        const tp = resting ? restingTargetFill(p.side, p.target, c) : targetFill(p.side, p.target, c, costs);
+        if (tp !== null) out.push(...this.takeTarget(p, tp, at, resting));
       }
     }
     this.resolveShadows(c);
@@ -805,9 +810,9 @@ export class Engine {
     return pos && stopPrice !== null ? [filled, this.closePosition(pos, stopPrice, 'stop', at)] : [filled];
   }
 
-  private takeTarget(p: Position, price: number, at = this.clock): TradeEvent[] {
+  private takeTarget(p: Position, price: number, at = this.clock, maker = false): TradeEvent[] {
     const cfg = this.cfg;
-    if (cfg.exits.mode === 'fixed') return [this.closePosition(p, price, 'target', at)];
+    if (cfg.exits.mode === 'fixed') return [this.closePosition(p, price, 'target', at, maker)];
     // partial_ladder: close part at the first objective, protect the rest at breakeven plus fees.
     const rules = this.rules.get(p.symbol);
     const qty = roundQty(p.qty * (cfg.exits.partial_close_pct / 100), rules?.stepSize ?? 0);
@@ -820,9 +825,10 @@ export class Engine {
     return out;
   }
 
-  private closePosition(p: Position, price: number, reason: CloseReason, time = this.clock): TradeEvent {
+  /** `maker`: filled by a limit order resting on the book (a scalp's take-profit), which pays the maker fee. */
+  private closePosition(p: Position, price: number, reason: CloseReason, time = this.clock, maker = false): TradeEvent {
     return this.emit('position_closed', p.id, p.symbol, {
-      qty: p.qty, price, pnl: grossPnl(p.side, p.entryPrice, price, p.qty), fee: fee(p.qty * price, this.cfg.sim), reason,
+      qty: p.qty, price, pnl: grossPnl(p.side, p.entryPrice, price, p.qty), fee: fee(p.qty * price, this.cfg.sim, maker), reason,
       holdMinutes: Math.round((time - p.openedAt) / 60_000),
     }, time);
   }

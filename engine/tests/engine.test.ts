@@ -404,6 +404,21 @@ describe('limit pullback orders', () => {
     expect(filledFee(99.5, 99.2)).toEqual({ price: 99.5, ratePct: expect.closeTo(0.05, 9) });
   });
 
+  it("a scalp's take-profit rests on the book: filled at the target, maker, only once price trades through it", () => {
+    const e = engine();
+    e.onCandles([minute(at - 60_000, 104, 105.5, 103.8, 105)]);
+    e.onCommand({ type: 'open', symbol: 'BTCUSDT', side: 'long', price: 100, time: at, stop: 98, target: 106, orderType: 'limit', setup: 'scalp' });
+    e.onCandles([minute(at, 103, 103, 99.8, 100.2)]);   // fills at 100
+    expect(e.positions()).toHaveLength(1);
+    // Touching 106 is not enough: the order may sit behind others at that price.
+    expect(e.onCandles([minute(at + 60_000, 100.2, 106, 100, 105.5)]).filter((x) => x.type === 'position_closed')).toHaveLength(0);
+    const [closed] = e.onCandles([minute(at + 120_000, 105.5, 106.4, 105, 106.2)]).filter((x) => x.type === 'position_closed');
+    const { price, qty, fee, reason } = closed.payload as { price: number; qty: number; fee: number; reason: string };
+    expect(reason).toBe('target');
+    expect(price).toBe(106);                                      // no slippage
+    expect((fee / (qty * price)) * 100).toBeCloseTo(0.02, 9);     // the maker fee
+  });
+
   it('a candle that opens beyond the stop never fills the limit', () => {
     const e = engine();
     e.onCandles([minute(at - 60_000, 104, 105.5, 103.8, 105)]);

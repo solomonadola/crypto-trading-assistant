@@ -41,6 +41,15 @@ export function targetFill(side: Side, target: number, c: Candle, costs: SimCost
 }
 
 /** The fee on a fill: the taker fee, or the maker fee for a limit order that rested on the book. */
+/**
+ * A take-profit resting on the book as a limit order (Hunter's scalps): filled at the target itself, without
+ * slippage, once a candle trades through it. Only touching it is not enough: the order may sit behind others
+ * in the queue at that price. Null if not filled.
+ */
+export function restingTargetFill(side: Side, target: number, c: Candle): number | null {
+  return (side === 'long' ? c.high > target : c.low < target) ? target : null;
+}
+
 export const fee = (notional: number, costs: SimCosts, maker = false) =>
   Math.abs(notional) * (maker ? costs.maker_fee_pct : costs.taker_fee_pct) / 100;
 
