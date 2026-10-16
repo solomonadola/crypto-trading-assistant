@@ -404,6 +404,26 @@ describe('limit pullback orders', () => {
     expect(filledFee(99.5, 99.2)).toEqual({ price: 99.5, ratePct: expect.closeTo(0.05, 9) });
   });
 
+  it('a scalp with a progress check is cut at the market when it has not been 0.5R our way by then', () => {
+    const run = (peak: number) => {
+      const e = engine();
+      e.onCandles([minute(at - 60_000, 104, 105.5, 103.8, 105)]);
+      e.onCommand({ type: 'open', symbol: 'BTCUSDT', side: 'long', price: 100, time: at, stop: 98, target: 110, orderType: 'limit', progressCheckMin: 30, progressMinR: 0.5 });
+      e.onCandles([minute(at, 103, 103, 99.8, 100.2)]);   // fills at 100; risk 2, so 0.5R is 101
+      expect(e.positions()).toHaveLength(1);
+      const reasons: unknown[] = [];
+      for (let k = 1; k <= 32; k++) {
+        const high = k === 5 ? peak : 100.5;
+        for (const ev of e.onCandles([minute(at + k * 60_000, 100.2, high, 99.9, 100.2)])) if (ev.type === 'order_placed' || ev.type === 'position_closed') reasons.push(ev.payload.reason);
+      }
+      return reasons;
+    };
+    // Never above 100.5 (0.25R): closed for no progress once 30 minutes have passed.
+    expect(run(100.5)).toContain('no_progress');
+    // Reached 101.2 (0.6R) at minute 5: it is working, so it is left alone.
+    expect(run(101.2)).not.toContain('no_progress');
+  });
+
   it("a scalp's take-profit rests on the book: filled at the target, maker, only once price trades through it", () => {
     const e = engine();
     e.onCandles([minute(at - 60_000, 104, 105.5, 103.8, 105)]);

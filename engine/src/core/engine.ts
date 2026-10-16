@@ -81,10 +81,13 @@ export type EngineCommand =
    * `time` (the wall clock), sized and limited by the same risk rules as the engine's own trades.
    * `setup: 'scalp'` is the scalp autopilot's: it must also pass scalpFailures. `maxHoldMin` closes the
    * position at the market after that long; `entryTimeoutMin` cancels a limit not filled by then.
+   * `progressCheckMin` / `progressMinR`: closed at the market if, that long after the fill, price has never
+   * been `progressMinR` R in the trade's favour (a scalp that is not working is cut, not waited out).
    */
   | {
     type: 'open'; symbol: string; side: Direction; price: number; time: number; stop: number; target: number | null;
     orderType?: 'market' | 'limit'; note?: string; setup?: 'manual' | 'scalp'; maxHoldMin?: number; entryTimeoutMin?: number;
+    progressCheckMin?: number; progressMinR?: number;
   }
   /**
    * Edit an open position's stop and/or take-profit (null removes the take-profit). `price` is the
@@ -507,6 +510,32 @@ export class Engine {
     return out;
   }
 
+  /**
+   * A position with a progress check that, by then, has never been progressMinR in its favour: the best
+   * price of the 1m candles after the one it filled in (that one's extreme may have come before the fill),
+   * against the risk to its initial stop. Read from the candles,
+   * not kept as state, so a restart rebuilding from the trade log decides the same.
+   */
+  private noProgress(p: Position, t: number): boolean {
+    if (!p.progressCheckMin || !p.progressMinR || t - p.openedAt < p.progressCheckMin * 60_000) return false;
+    const best = this.bestR(p, t);
+    return best !== null && best < p.progressMinR;
+  }
+
+  /**
+   * How far the trade has been in its favour, in R of its initial risk: the best price of the 1m candles after
+   * the one it filled in (that one's extreme may have come before the fill), up to `t`. Null without candles.
+   * Read from the candles, not kept as state, so a restart rebuilding from the trade log decides the same.
+   */
+  private bestR(p: Position, t: number): number | null {
+    const risk = Math.abs(p.entryPrice - p.initialStop);
+    if (!(risk > 0)) return null;
+    const since = this.market.recent(p.symbol, this.cfg.timeframes.exits).filter((c) => c.openTime > p.openedAt && c.closeTime <= t);
+    if (!since.length) return null;
+    const best = p.side === 'long' ? Math.max(...since.map((c) => c.high)) : Math.min(...since.map((c) => c.low));
+    return (sign(p.side) * (best - p.entryPrice)) / risk;
+  }
+
   /** Stops and take-profits reached by a live price: closed at once (a stop at that price plus slippage, a take-profit at the target). */
   private liveExits(prices: Record<string, number>, time: number): TradeEvent[] {
     const out: TradeEvent[] = [];
@@ -570,6 +599,7 @@ export class Engine {
       action: 'open', orderType, side, notional: risk.notional, stop, target,
       chochLevel: null, signalId: null, refPrice: price, speed, setup, ...(cmd.note ? { note: cmd.note.slice(0, 200) } : {}),
       ...(cmd.maxHoldMin ? { maxHoldMin: cmd.maxHoldMin } : {}), ...(cmd.entryTimeoutMin ? { entryTimeoutMin: cmd.entryTimeoutMin } : {}),
+      ...(cmd.progressCheckMin && cmd.progressMinR ? { progressCheckMin: cmd.progressCheckMin, progressMinR: cmd.progressMinR } : {}),
     };
     const placed = this.emit('order_placed', id, symbol, { ...order }, cmd.time);
     const pending = this.portfolio.pendingEntries().find((e) => e.positionId === id)!;
@@ -694,6 +724,7 @@ export class Engine {
     for (const p of this.portfolio.positions()) {
       const maxHoldMin = p.maxHoldMin ?? legacyScalp(p.note)?.holdMin;
       if (!p.pendingClose && maxHoldMin && t - p.openedAt >= maxHoldMin * 60_000) out.push(this.closeOrder(p, 'max_hold'));
+      else if (!p.pendingClose && this.noProgress(p, t)) out.push(this.closeOrder(p, 'no_progress'));
     }
 
     // Entries with no price to fill at, or limits the price never came back to, are cancelled.
@@ -799,6 +830,7 @@ export class Engine {
       fee: fee(qty * price, cfg.sim, maker), session: this.sessions.ownerAt(e.placedAt),
       leverage: cfg.leverage, liqPrice, chochLevel: e.chochLevel, signalId: e.signalId, speed: e.speed ?? 'normal', setup: e.setup,
       ...(e.note ? { note: e.note } : {}), ...(e.maxHoldMin ? { maxHoldMin: e.maxHoldMin } : {}),
+      ...(e.progressCheckMin && e.progressMinR ? { progressCheckMin: e.progressCheckMin, progressMinR: e.progressMinR } : {}),
     };
     // Recorded at the candle's open: the moment the fill happened.
     const filled = this.emit('order_filled', e.positionId, e.symbol, { ...fill, notional: qty * price, margin: (qty * price) / cfg.leverage }, c.openTime);

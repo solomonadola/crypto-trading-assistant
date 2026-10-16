@@ -10,7 +10,9 @@ export type Side = Direction;
 
 export type CloseReason =
   | 'session_end' | 'max_hold' | 'manual' | 'kill' | 'stop' | 'target' | 'time_stop'
-  | 'early_exit_4h' | 'early_exit_1h' | 'failed_breakout' | 'stagnation' | 'btc_move' | 'liquidation';
+  | 'early_exit_4h' | 'early_exit_1h' | 'failed_breakout' | 'stagnation' | 'btc_move' | 'liquidation'
+  /** A scalp that had not gone its minimum distance our way by its progress check. */
+  | 'no_progress';
 
 /** Payload of the `order_filled` event that opens a position. */
 export interface EntryFill {
@@ -37,6 +39,9 @@ export interface EntryFill {
   note?: string;
   /** Closed at the market once held this long (scalp autopilot trades). */
   maxHoldMin?: number;
+  /** Closed at the market if, this long after the fill, it has not yet been progressMinR in our favour. */
+  progressCheckMin?: number;
+  progressMinR?: number;
 }
 
 
@@ -66,6 +71,9 @@ export interface OpenOrder {
   maxHoldMin?: number;
   /** A limit entry not filled by then is cancelled; absent: the default for its order type. */
   entryTimeoutMin?: number;
+  /** "If it is not working, get out": see EntryFill. */
+  progressCheckMin?: number;
+  progressMinR?: number;
 }
 
 export interface Position {
@@ -90,6 +98,9 @@ export interface Position {
   note?: string | null;
   /** Closed at the market once held this long; null: the speed group's max hold. */
   maxHoldMin?: number | null;
+  /** Closed at the market if, this long after opening, the best price so far was never progressMinR in our favour. */
+  progressCheckMin?: number | null;
+  progressMinR?: number | null;
   /** Index of the highest ladder step reached; -1 before the first. */
   ladderStep: number;
   partialDone: boolean;
@@ -177,7 +188,7 @@ export class Portfolio {
           id, symbol: e.symbol, side: f.side, qty: f.qty, initialQty: f.qty, entryPrice: f.price,
           stop: f.stop, initialStop: f.stop, target: f.target ?? null, openedAt: e.time, session: f.session,
           leverage: f.leverage ?? 1, liqPrice: f.liqPrice ?? null, chochLevel: f.chochLevel ?? null, signalId: f.signalId ?? null, speed: f.speed ?? 'normal', setup: f.setup ?? null, note: f.note ?? null,
-          maxHoldMin: f.maxHoldMin ?? null,
+          maxHoldMin: f.maxHoldMin ?? null, progressCheckMin: f.progressCheckMin ?? null, progressMinR: f.progressMinR ?? null,
           ladderStep: -1, partialDone: false, fees: fee, funding: 0, realized: 0, pendingClose: null,
         });
         const key = `${e.symbol}|${day(e.time)}`;
