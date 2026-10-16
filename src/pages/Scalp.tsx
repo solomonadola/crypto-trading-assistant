@@ -1,6 +1,6 @@
-// Quant Scalp suite (1m, 5m, 15m) across Binance markets: real OHLCV orderflow,
-// VWAP bounces, FVG retests, and volume climax reversals with 15m CHoCH confirmation
-// and Key Level Limit pullback execution. Includes Master Autopilot and Friction Guard.
+// The Hunter page: scalp setups (sweep reclaims, VWAP bounces, EMA pullbacks, FVG retests,
+// volume climaxes, opening-range breaks) on closed 1m, 5m and 15m candles, taken by hand as
+// limit orders at their key level; and the switch for Hunter, which takes the 5m and 15m ones itself.
 import { useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle, BarChart3, Bot, BotOff, CheckCircle2, Layers, Power,
@@ -146,7 +146,7 @@ export function Scalp({ go }: { go: (page: string, symbol?: string, tf?: string)
                 )}
               </div>
               <p className="text-xs text-ink-3">
-                Autonomous 1m Micro, 5m Fast & 15m Macro scalps · 15m CHoCH confirmation · Resting limit order pullback execution
+                Scalp setups on 5m and 15m closes · limit order at the setup's key level · same risk rules as every trade
               </p>
             </div>
           </div>
@@ -187,8 +187,8 @@ export function Scalp({ go }: { go: (page: string, symbol?: string, tf?: string)
             <div>
               <p className="font-semibold text-ink">Hunter is ACTIVE</p>
               <p className="text-ink-2">
-                The engine autonomously monitors every closed 1m, 5m, and 15m candle. When a qualified setup appears,
-                it automatically places a resting limit order at the key level pullback, sized to 1% risk with 2R net targets. No manual click required.
+                Hunter checks every closed 5m and 15m candle of the scanner's coins. When a setup qualifies, it places a
+                limit order at the setup's key level, risking at most 1% (0.5% on wild coins) with a target of at least 2R after costs.
               </p>
             </div>
           </div>

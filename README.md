@@ -79,7 +79,7 @@ or get filtered.
 | `engine/src/filters.ts`, `scoring.ts` | Filters (chop, fakeout, stagnation, etc.) and confluence scoring. |
 | `engine/src/feed/` | Binance public client, live and replay candle feeds, candle store. |
 | `engine/src/storage/` | SQLite: append-only trade log, signals, trade journal. |
-| `engine/tests/` | 29 test files, 406 tests. |
+| `engine/tests/` | 30 test files, 410 tests. |
 | `src/` | React dashboard (Vite + Tailwind). |
 | `src/pages/` | Dashboard pages: Overview, Market, Trades, Signals, Scalp, Ideas, Chart, FilterLab. |
 | `data/engine/engine.db` | SQLite database (delete it to start fresh). |
@@ -89,7 +89,7 @@ or get filtered.
 ## Running Tests
 
 ```bash
-# Run all 406 tests (engine logic, storage, indicators, backtest, etc.)
+# Run all 410 tests (engine logic, storage, indicators, backtest, etc.)
 npm test
 
 # Type check (no emit)
@@ -477,9 +477,10 @@ docker run -d \
 
 Open **http://localhost:5678** and create an account.
 
-> **Sign-in:** these workflows call the API without a token, so they only work
-> while `ALLOWED_EMAILS` is unset (a local copy). With sign-in on, every API call
-> except `/api/health` needs a Firebase ID token, which n8n cannot get.
+> **Sign-in:** with `ALLOWED_EMAILS` set, every API call except `/api/health`
+> needs a sign-in. Set `ENGINE_API_KEY` on the engine and add a header
+> `X-API-Key: <that key>` to each HTTP Request node. n8n's SSE Trigger node
+> cannot send headers, so Workflow 2 needs sign-in off (a local copy).
 
 ### Workflow 1: Trade Alert (opened / closed → Telegram)
 
@@ -596,6 +597,7 @@ Set in `.env.local` (git-ignored) or as environment variables:
 | `ENGINE_DB_PATH` | `data/engine/engine.db` | SQLite database path |
 | `ENGINE_CONFIG` | `engine/config/config.yaml` | Config file path |
 | `ALLOWED_EMAILS` | unset (no sign-in) | Comma-separated Google accounts for auth. **Set this on hosted copies.** |
+| `ENGINE_API_KEY` | unset | Key automations send in an `X-API-Key` header to call the API while sign-in is on. Keep it secret. |
 | `BACKUP_TARGET` | `firestore` (prod) / `file` (dev) | Where the trade log is backed up |
 | `ENGINE_NAMESPACE` | `hosted` (prod) / `local` (dev) | Keeps backups separate between copies |
 
@@ -646,7 +648,7 @@ npm start        # NODE_ENV=production node server.ts
 ```bash
 npm install              # Install dependencies
 npm run dev              # Dev server (engine + dashboard)
-npm test                 # Run all 406 tests
+npm test                 # Run all 410 tests
 npm run lint             # Type check
 npm run build            # Production build
 npm start                # Start production server

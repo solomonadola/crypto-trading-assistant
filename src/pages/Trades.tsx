@@ -392,9 +392,9 @@ export function Trades({ go }: { go: (page: string, symbol?: string) => void }) 
         <Kpi label="Profit factor" value={stats.pf === null ? '–' : stats.pf.toFixed(2)} accent="var(--color-newyork)" sub="gross won ÷ gross lost" />
       </div>
 
-      {/* ---------------- Learned Machine Pattern Memory Card ---------------- */}
+      {/* ---------------- Pattern Memory Card ---------------- */}
       <Card
-        title="Learned Pattern Memory & Statistical Edge"
+        title="Pattern memory: how each condition has traded"
         icon={<Brain size={16} />}
         right={
           <div className="flex overflow-hidden rounded-lg border border-line">
