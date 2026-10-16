@@ -147,7 +147,7 @@ export function Scalp({ go }: { go: (page: string, symbol?: string, tf?: string)
                 )}
               </div>
               <p className="text-xs text-ink-3">
-                Scalp setups on 5m and 15m closes · limit order at the setup's key level · same risk rules as every trade
+                Killzone sweep on 5m · London and New York killzones · stop run, 5m CHoCH, limit at the gap · out after 2h, or 30 min if not working
               </p>
             </div>
           </div>
@@ -187,9 +187,11 @@ export function Scalp({ go }: { go: (page: string, symbol?: string, tf?: string)
             <div>
               <p className="font-semibold text-ink">Hunter is ACTIVE</p>
               <p className="text-ink-2">
-                Hunter checks every closed 5m and 15m candle of the scanner's coins. When a setup qualifies, it places a
-                limit order at the setup's key level, risking at most 1% (0.5% on wild coins) with a target of at least 2R after costs.
-                Simulated trades only. The 6-month baseline found no setup with an edge after costs, so judge it by its results on the Trades page.
+                In the London and New York killzones, Hunter watches each 5m close of the scanner's coins for a stop run: a wick through
+                the Asia or London high or low, the previous day's high or low, or equal highs or lows, that closes back inside. When a 5m
+                candle then breaks the swing before the sweep (a CHoCH), it places a limit at the middle of the fair value gap, stop beyond
+                the wick, longs only in the 4h discount and shorts only in the premium, risking at most 1%. It closes after 2 hours, or
+                after 30 minutes if the trade has not reached +0.5R. Simulated trades only: judge it by its results on the Trades page.
               </p>
             </div>
           </div>

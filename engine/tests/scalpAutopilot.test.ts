@@ -13,6 +13,10 @@ function mockConfig(): EngineConfig['scalp_autopilot'] {
     max_trades_per_day: null,
     max_hold_min: { '1m': 45, '5m': 120, '15m': 240 },
     entry_timeout_min: { '1m': 15, '5m': 35, '15m': 60 },
+    killzone_sweep: {
+      enabled: false, windows: [{ name: 'london', tz: 'Europe/London', start: '08:00', end: '10:00' }], sweep_bars: 3, confirm_bars: 12, choch_lookback: 6, stop_buffer_atr: 0.25, trend_filter: 'off', max_rr: 4,
+      max_hold_min: 120, entry_timeout_min: 30, progress_check_min: 30, progress_min_r: 0.5,
+    },
   };
 }
 

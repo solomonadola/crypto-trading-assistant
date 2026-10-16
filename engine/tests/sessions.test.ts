@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { SessionCalendar, localToUtc } from '../src/sessions';
+import { SessionCalendar, localToUtc, windowAt } from '../src/sessions';
 import { loadConfig, type EngineConfig } from '../src/config';
 
 // The calendar tests use whole sessions, no weekend rule, no entry delay and no killzones; each case switches on what it tests.
@@ -162,5 +162,22 @@ describe('sessions in a period', () => {
     expect(day.map((s) => `${s.name} ${iso(s.openTime)}`)).toEqual([
       'late 2026-07-14T22:00Z', 'asian 2026-07-15T00:00Z', 'london 2026-07-15T07:00Z', 'newyork 2026-07-15T12:00Z', 'late 2026-07-15T22:00Z',
     ]);
+  });
+});
+
+describe('windowAt', () => {
+  const windows = [
+    { name: 'asia', tz: 'Asia/Tokyo', start: '09:00', end: '11:00' },
+    { name: 'london', tz: 'Europe/London', start: '08:00', end: '10:00' },
+  ];
+  it('finds the local window a time falls in, following summer time', () => {
+    expect(windowAt(Date.parse('2026-07-15T07:30Z'), windows)).toBe('london');   // 08:30 BST
+    expect(windowAt(Date.parse('2026-01-15T07:30Z'), windows)).toBeNull();       // 07:30 GMT: before the open
+    expect(windowAt(Date.parse('2026-01-15T08:30Z'), windows)).toBe('london');
+    expect(windowAt(Date.parse('2026-07-15T00:30Z'), windows)).toBe('asia');     // 09:30 in Tokyo
+  });
+  it('the start is inside, the end is not', () => {
+    expect(windowAt(Date.parse('2026-07-15T00:00Z'), windows)).toBe('asia');
+    expect(windowAt(Date.parse('2026-07-15T02:00Z'), windows)).toBeNull();
   });
 });

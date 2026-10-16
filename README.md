@@ -5,7 +5,7 @@ A simulated crypto futures trading engine with three strategy modes:
 | Mode | How it works | Config |
 |---|---|---|
 | **Institutional (HTF pullback)** | Engine scans coins, arms setups on the 1H chart, waits for a 15M CHoCH confirmation, then opens a simulated trade with a stop, target, and profit ladder. Fully automatic. | `pullback`, `exits`, `allocation` in `config.yaml` |
-| **Hunter (scalp autopilot)** | Places limit orders at key levels on 5M/15M scalp setups. Automatic while switched on from the Hunter page. | `scalp_autopilot` in `config.yaml` |
+| **Hunter (scalp autopilot)** | Killzone sweep scalps on 5M: a stop run through a liquidity level in the London or New York killzone, a 5M CHoCH back, a limit at the fair value gap. Held up to 2 hours; cut after 30 minutes if not +0.5R. Automatic while switched on from the Hunter page. | `scalp_autopilot.killzone_sweep` in `config.yaml` |
 | **Manual trades** | You open and manage trades from the dashboard or via API. Same risk rules apply. | `POST /api/positions/open` |
 
 It reads **Binance USDⓈ-M public market data** — no account, no API keys needed.
@@ -26,6 +26,7 @@ The full design is in [ENGINE_PLAN.md](ENGINE_PLAN.md).
 - [Dashboard Pages](#dashboard-pages)
 - [API Reference](#api-reference)
 - [Trade Journal (ATA Post-Mortem)](#trade-journal-ata-post-mortem)
+- [Hunter: Killzone Sweep](#hunter-killzone-sweep)
 - [BTC Circuit Breaker](#btc-circuit-breaker)
 - [4H Dealing Range Radar](#4h-dealing-range-radar)
 - [n8n Integration](#n8n-integration)
@@ -426,6 +427,33 @@ Every closed trade can be journaled with an **ATA Level 5 reflection**:
 Journal data is stored in SQLite (`trade_journal` table, schema version 3).
 
 ---
+
+## Hunter: Killzone Sweep
+
+Hunter's strategy (`engine/src/strategy/killzoneSweep.ts`), on each 5m close
+of the scanner's coins, while Hunter is switched on:
+
+1. **Killzone:** the close falls in the London (08:00-10:00 London) or New York
+   (09:30-11:30 New York) killzone.
+2. **Sweep:** within the last hour, a wick went through an intact liquidity level
+   (Asia high/low, London high/low, previous day's high/low, equal highs/lows, a
+   4h swing) and a close came back inside within 3 bars.
+3. **CHoCH:** this candle is the first 5m close beyond the swing of the 30
+   minutes before the sweep.
+4. **Entry:** a limit at the middle of the newest fair value gap of the reversal,
+   or at the broken swing when there is none. Cancelled after 30 minutes.
+5. **Stop:** beyond the sweep's extreme by 0.25 ATR(5m).
+6. **Target:** 2R after costs (a liquidity level instead only when one sits at
+   exactly that distance or less: `max_rr`). Further targets were tested and lost:
+   a scalp rarely reaches them within its 2 hours.
+7. **Filter:** longs only in the 4h discount, shorts only in the premium.
+8. **Exits:** closed after 2 hours; closed after 30 minutes if it has never been
+   +0.5R ("not working, get out"); plus the usual stop and target.
+
+It then goes through the engine's risk rules and scalp checks (fee drag, max
+stop width, weekend and funding windows, BTC and exhaustion filters).
+Settings: `scalp_autopilot.killzone_sweep` in `config.yaml`. Backtest it with
+`npm run backtest -- --models scalp --split <date>`.
 
 ## BTC Circuit Breaker
 

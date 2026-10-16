@@ -237,12 +237,29 @@ scalp_autopilot:
   enabled: false                # the default before the dashboard's switch is first used; after that the saved choice wins
                                 # (the 6-month baseline found no setup with an edge after costs: see BASELINE.md)
   timeframes: [5m, 15m]         # setups on these timeframes are taken (1m is left for trades by hand)
-  kinds: [sweep_reclaim, vwap_bounce, ema_pullback, orb, fvg_retest, volume_climax]   # setups Hunter may take; [] takes none
+  kinds: []                     # the classic scalp setups Hunter may also take; all lost in backtests (BASELINE.md), so none
   max_stop_pct: 2.2             # wider stops are skipped
   max_signal_age_sec: 90        # only a candle that has just closed: never one replayed after a restart or a feed gap
   max_trades_per_day: null      # no daily cap on scalps; a number sets one (UTC day), apart from risk.max_trades_per_day
   max_hold_min: { 1m: 45, 5m: 120, 15m: 240 }        # closed at the market after this
   entry_timeout_min: { 1m: 15, 5m: 35, 15m: 60 }     # a limit not filled by then is cancelled
+  # Hunter's main strategy: a stop run beyond a liquidity level in the London or New York killzone,
+  # a 5m CHoCH back the other way, a limit at the reversal's fair value gap (strategy/killzoneSweep.ts).
+  killzone_sweep:
+    enabled: true
+    windows:                    # when Hunter looks for sweeps (local time); the engine's models use sessions.killzones
+      - { name: london,  tz: Europe/London,    start: "08:00", end: "10:00" }
+      - { name: newyork, tz: America/New_York, start: "09:30", end: "11:30" }
+    sweep_bars: 3               # the sweep bar or the next 2 close back beyond the level (a wick, not a breakout)
+    confirm_bars: 12            # the CHoCH within an hour of the sweep's extreme
+    choch_lookback: 6           # the swing of the 30 minutes before the sweep
+    stop_buffer_atr: 0.25       # stop this many ATR(5m) beyond the sweep's extreme
+    trend_filter: off           # off | bias (1h EMAs agree, 4h structure not against) | strict (and 4h structure with us)
+    max_rr: 2.0                 # target: a liquidity level only if within 2R, else a fixed exits.min_rr (2R): a scalp must reach it within 2h
+    max_hold_min: 120           # a scalp: closed at the market after 2 hours
+    entry_timeout_min: 30       # the limit is cancelled if price has not come back within 30 minutes
+    progress_check_min: 30      # not working, get out: after 30 minutes held...
+    progress_min_r: 0.5         # ...it must have been at least 0.5R in our favour, else closed at the market
 
 risk:
   max_trades_per_day: null      # no daily cap on new trades; a number sets one (all models and manual trades, UTC day; scalps have their own)

@@ -257,6 +257,29 @@ export const configSchema = z.object({
     max_trades_per_day: posInt.nullable(),
     max_hold_min: z.object({ '1m': posInt, '5m': posInt, '15m': posInt }).strict(),
     entry_timeout_min: z.object({ '1m': posInt, '5m': posInt, '15m': posInt }).strict(),
+    /** Hunter's killzone sweep scalp on 5m (strategy/killzoneSweep.ts). */
+    killzone_sweep: z.object({
+      enabled: z.boolean(),
+      /** Hunter's own trading windows (local wall-clock time); separate from sessions.killzones, which the engine's models use. */
+      windows: z.array(z.object({ name: z.string().min(1), tz: tzName, start: hhmm, end: hhmm }).strict()).min(1),
+      /** The sweep bar, or one of this many after it, must close back beyond the level. */
+      sweep_bars: posInt,
+      /** The CHoCH must come within this many 5m bars of the sweep's extreme. */
+      confirm_bars: posInt,
+      /** Bars before the sweep whose swing the CHoCH must close beyond. */
+      choch_lookback: posInt,
+      /** Stop beyond the sweep's extreme by this many ATR(5m). */
+      stop_buffer_atr: z.number().min(0).max(5),
+      /** off | bias: the 1h trend agrees and the 4h structure is not against | strict: and the 4h structure is with us. */
+      trend_filter: z.enum(['off', 'bias', 'strict']),
+      /** A liquidity target further than this (R after costs) is passed over for a fixed exits.min_rr target. */
+      max_rr: positive,
+      max_hold_min: posInt,
+      entry_timeout_min: posInt,
+      /** "Not working, get out": closed at the market if, this long after the fill, it never reached progress_min_r. */
+      progress_check_min: posInt,
+      progress_min_r: positive,
+    }).strict(),
   }).strict(),
 
   risk: z.object({

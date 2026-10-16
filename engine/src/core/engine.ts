@@ -230,6 +230,16 @@ export class Engine {
     return [...this.universe];
   }
 
+  /**
+   * A coin's market context as of its last 15m close (liquidity levels, the 4h dealing range and the rest),
+   * for strategies that run between 15m closes, such as Hunter's killzone sweep on 5m. Null before there is
+   * enough history.
+   */
+  latestContext(symbol: string): Context | null {
+    const last15 = this.market.recent(symbol, this.cfg.timeframes.trigger, 1)[0];
+    return last15 ? buildContext(this.market, symbol, last15.closeTime, this.cfg, this.funding.get(symbol) ?? null) : null;
+  }
+
   /** Model 4's 4h points of interest for a coin, as of its last 15m close: where it would arm, both ways. */
   htfPoints(symbol: string): { long: HtfPoi[]; short: HtfPoi[] } | null {
     const last15 = this.market.recent(symbol, this.cfg.timeframes.trigger, 1)[0];
