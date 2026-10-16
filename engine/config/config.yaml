@@ -246,7 +246,7 @@ scalp_autopilot:
 
 risk:
   max_trades_per_day: null      # no daily cap on new trades; a number sets one (all models and manual trades, UTC day; scalps have their own)
-  max_trades_per_symbol_per_day: 2
+  max_trades_per_symbol_per_day: 10
   daily_loss_limit_pct: 3.0
   max_drawdown_kill_pct: 15.0
   cooldown_after_loss_min: 30
