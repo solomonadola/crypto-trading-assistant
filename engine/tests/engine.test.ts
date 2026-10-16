@@ -719,5 +719,27 @@ describe('BTC flash crash circuit breaker', () => {
     ]);
     expect(e.isCircuitBreakerActive()).toBe(false);
   });
+
+  it('blocks only altcoin longs among scalps, like every other entry path', () => {
+    const e = engine((c) => {
+      c.risk.btc_circuit_breaker = { enabled: true, drop_5m_pct: -1.5, cooldown_min: 30, cancel_pending_limits: true };
+    });
+    const start = u('2026-07-15T12:00Z');
+    const bar = (symbol: string, close: number, price: number, low = price): Candle =>
+      ({ symbol, tf: '1m', openTime: close - 60_000, closeTime: close, open: price, high: price, low, close: price, volume: 1, quoteVolume: price, trades: 1 });
+    for (let i = 0; i < 5; i++) e.onCandles([bar('BTCUSDT', start + i * 60_000, 100), bar('ETHUSDT', start + i * 60_000, 10)]);
+    const dropClose = start + 5 * 60_000;
+    e.onCandles([bar('BTCUSDT', dropClose, 98, 97.9), bar('ETHUSDT', dropClose, 10)]);
+    expect(e.isCircuitBreakerActive()).toBe(true);
+
+    const scalp = (symbol: string, side: 'long' | 'short', price: number) => () => e.onCommand({
+      type: 'open', symbol, side, price, time: dropClose, orderType: 'market', setup: 'scalp',
+      stop: side === 'long' ? price * 0.99 : price * 1.01, target: side === 'long' ? price * 1.03 : price * 0.97,
+    });
+    // Other scalp checks may still refuse these; the circuit breaker must not be among the reasons.
+    expect(scalp('ETHUSDT', 'long', 10)).toThrow(/circuit[ _]breaker/i);
+    expect(scalp('ETHUSDT', 'short', 10)).not.toThrow(/circuit[ _]breaker/i);
+    expect(scalp('BTCUSDT', 'short', 98)).not.toThrow(/circuit[ _]breaker/i);
+  });
 });
 

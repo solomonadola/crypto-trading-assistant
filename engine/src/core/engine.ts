@@ -587,7 +587,7 @@ export class Engine {
   private scalpFailures(symbol: string, side: Direction, entry: number, stop: number, speed: SpeedGroup): string[] {
     const cfg = this.cfg;
     const failures: string[] = [];
-    if (this.isCircuitBreakerActive() && (symbol !== 'BTCUSDT' || side === 'long')) failures.push('filter_btc_circuit_breaker');
+    if (this.isCircuitBreakerActive() && symbol !== 'BTCUSDT' && side === 'long') failures.push('filter_btc_circuit_breaker');
     const block = this.sessions.entryBlock(this.clock);
     if (block === 'weekend' || block === 'funding_window') failures.push(`session_${block}`);
     const stopPct = (Math.abs(entry - stop) / entry) * 100;

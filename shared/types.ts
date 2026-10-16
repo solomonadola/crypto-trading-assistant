@@ -372,6 +372,8 @@ export interface PatternFeatureStat {
   expectancyR: number;
   verdict: PatternVerdict;
   advice: string;
+  /** How much of the estimate (0 to 100) comes from the built-in starting assumptions rather than these trades. */
+  assumedPct: number;
 }
 
 export interface PatternProfile {
@@ -390,6 +392,8 @@ export interface PatternMatch {
   winRatePct: number;
   expectancyR: number;
   sampleSize: number;
+  /** How much of the estimate (0 to 100) comes from the built-in starting assumptions rather than real trades. */
+  assumedPct: number;
   warnings: string[];
   strengths: string[];
   summary: string;

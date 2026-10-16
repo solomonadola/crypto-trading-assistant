@@ -553,6 +553,9 @@ function Dialog({ symbol, defaults, onClose }: { symbol: string; defaults: TakeD
                   )}
                 </div>
                 <p className="mt-1.5 text-[11px] text-ink-3 leading-snug">{pattern.summary}</p>
+                <p className={`mt-1 text-[10px] ${pattern.assumedPct >= 50 ? 'text-warning' : 'text-ink-3'}`}>
+                  {100 - pattern.assumedPct}% from your closed trades · {pattern.assumedPct}% built-in assumptions
+                </p>
                 {pattern.volumeDiagnosis && (
                   <div className="mt-2 rounded-lg bg-black/30 p-2 text-[11px] text-ink-2 border border-line/40">
                     <span className="font-semibold text-accent flex items-center gap-1 mb-0.5">

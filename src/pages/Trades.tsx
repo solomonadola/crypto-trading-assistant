@@ -264,7 +264,8 @@ function PatternBars({ stats }: { stats: PatternFeatureStat[] }) {
                 : 'bg-critical'
             }`} />
             <span className="truncate font-medium">{s.label}</span>
-            <span className="text-xs text-ink-3">×{s.tradesCount}</span>
+            <span className="text-xs text-ink-3" title={`${s.tradesCount} of your trades; ${s.assumedPct}% of this estimate is the built-in starting assumption`}>×{s.tradesCount}</span>
+            {s.assumedPct >= 50 && <span className="text-[10px] uppercase text-warning" title="Few real trades yet: this is mostly the built-in starting assumption">assumed</span>}
           </span>
           <div className="relative h-4 rounded bg-card-2">
             <div className="absolute inset-y-0 left-1/2 w-px bg-line" />
@@ -410,9 +411,10 @@ export function Trades({ go }: { go: (page: string, symbol?: string) => void }) 
         }
       >
         <p className="mb-4 max-w-3xl text-sm text-ink-2">
-          Empirical Bayesian Matrix: continuously learns from historical trades and market structure characteristics.
-          Positive EV patterns (<span className="text-good font-semibold">green</span>) produce long-term mathematical edge;
-          negative EV patterns (<span className="text-critical font-semibold">red</span>) represent high-probability failure traps.
+          Each condition starts from a built-in assumption about how it trades and moves toward your own results as
+          closed trades come in. Rows marked <span className="font-semibold text-warning">assumed</span> are still mostly that
+          starting assumption, not evidence. Positive EV (<span className="text-good font-semibold">green</span>) or
+          negative EV (<span className="text-critical font-semibold">red</span>) only becomes meaningful with dozens of trades per row.
         </p>
         {!patternStats.length ? (
           <Empty>Loading pattern memory matrix…</Empty>

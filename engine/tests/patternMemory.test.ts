@@ -19,6 +19,12 @@ describe('PatternMemory', () => {
     expect(counterTrend.verdict).toMatch(/negative_edge|severe_hazard/);
   });
 
+  it('says when an estimate is still all assumption', () => {
+    const report = new PatternMemory([]).report();
+    // No trades: every number shown is the built-in starting assumption.
+    for (const s of report.stats) expect(s.assumedPct).toBe(100);
+  });
+
   it('updates posterior distributions with closed trades', () => {
     const mockTrades: ClosedTradeView[] = [
       {
@@ -61,6 +67,9 @@ describe('PatternMemory', () => {
     expect(poiStat.tradesCount).toBe(2);
     expect(poiStat.totalPnlUsd).toBe(110);
     expect(poiStat.winRatePct).toBeGreaterThan(60);
+    // Two real trades barely move a starting assumption worth several trades: still mostly assumed, but less than all.
+    expect(poiStat.assumedPct).toBeGreaterThan(50);
+    expect(poiStat.assumedPct).toBeLessThan(100);
 
     const expansionStat = report.stats.find((s) => s.tag === 'expansion')!;
     expect(expansionStat.category).toBe('volume');

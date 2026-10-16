@@ -5,7 +5,7 @@ import path from 'node:path';
 import { getKv, openDb, setKv } from '../src/storage/db';
 import { EventLog } from '../src/storage/eventLog';
 import { SignalLog } from '../src/storage/signals';
-import { TradeJournalStore } from '../src/storage/journal';
+import { journalEntryFrom, TradeJournalStore } from '../src/storage/journal';
 import { formingCandle } from '../src/feed/candleStore';
 import type { SignalRecord, TradeEvent } from '../../shared/types';
 
@@ -143,3 +143,30 @@ describe('trade journal store', () => {
   });
 });
 
+
+describe('journalEntryFrom', () => {
+  it('keeps a valid entry, trimming and de-duplicating tags', () => {
+    const e = journalEntryFrom('t1', { rating: 4, tags: [' FOMO ', 'FOMO', 'Followed Rules', 7], notes: 'ok', ata: { pdAlignment: 'discount', keyPoi: 'fvg' } }, 1000);
+    expect(e).toEqual({ tradeId: 't1', rating: 4, tags: ['FOMO', 'Followed Rules'], notes: 'ok', ata: { pdAlignment: 'discount', keyPoi: 'fvg' }, updatedAt: 1000 });
+  });
+
+  it('treats a missing rating as unrated and refuses one outside 0 to 5 stars', () => {
+    expect(journalEntryFrom('t1', {}, 1)).toMatchObject({ rating: 0, tags: [], notes: '' });
+    expect(journalEntryFrom('t1', { rating: 6 }, 1)).toMatch(/0 to 5/);
+    expect(journalEntryFrom('t1', { rating: 2.5 }, 1)).toMatch(/0 to 5/);
+    expect(journalEntryFrom('t1', { rating: 'lots' }, 1)).toMatch(/0 to 5/);
+  });
+
+  it('refuses tags that are not a list, notes that are not text, and oversized input', () => {
+    expect(journalEntryFrom('t1', { tags: 'FOMO' }, 1)).toMatch(/list/);
+    expect(journalEntryFrom('t1', { notes: { x: 1 } }, 1)).toMatch(/text/);
+    expect(journalEntryFrom('t1', { notes: 'x'.repeat(10_001) }, 1)).toMatch(/limited/);
+    expect(journalEntryFrom('t1', { tags: Array.from({ length: 21 }, (_, i) => `t${i}`) }, 1)).toMatch(/At most/);
+  });
+
+  it('keeps only the known reflection fields with values of the right type', () => {
+    const e = journalEntryFrom('t1', { ata: { pdAlignment: 'nowhere', htfTrendAligned: true, shiftReason: '  ', invalidation: 'below 4h low', injected: '<script>' } }, 1);
+    expect(typeof e !== 'string' && e.ata).toEqual({ htfTrendAligned: true, invalidation: 'below 4h low' });
+    expect(typeof e !== 'string' && journalEntryFrom('t1', { ata: { injected: 1 } }, 1)).toMatchObject({ ata: undefined });
+  });
+});

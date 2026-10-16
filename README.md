@@ -79,7 +79,7 @@ or get filtered.
 | `engine/src/filters.ts`, `scoring.ts` | Filters (chop, fakeout, stagnation, etc.) and confluence scoring. |
 | `engine/src/feed/` | Binance public client, live and replay candle feeds, candle store. |
 | `engine/src/storage/` | SQLite: append-only trade log, signals, trade journal. |
-| `engine/tests/` | 29 test files, 393 tests. |
+| `engine/tests/` | 29 test files, 406 tests. |
 | `src/` | React dashboard (Vite + Tailwind). |
 | `src/pages/` | Dashboard pages: Overview, Market, Trades, Signals, Scalp, Ideas, Chart, FilterLab. |
 | `data/engine/engine.db` | SQLite database (delete it to start fresh). |
@@ -89,7 +89,7 @@ or get filtered.
 ## Running Tests
 
 ```bash
-# Run all 393 tests (engine logic, storage, indicators, backtest, etc.)
+# Run all 406 tests (engine logic, storage, indicators, backtest, etc.)
 npm test
 
 # Type check (no emit)
@@ -388,8 +388,9 @@ Reports are written to `data/backtest/` with metrics: win rate, profit factor, m
 |---|---|---|
 | POST | `/api/control/kill` | Emergency: close all positions |
 | POST | `/api/control/pause` | Pause the engine (no new trades) |
-| POST | `/api/control/reset` | Reset the engine (`{ equity? }` to set starting equity) |
-| POST | `/api/control/quant-scalp-autopilot` | Toggle scalp autopilot (`{ enabled }`) |
+| POST | `/api/control/resume` | Resume after a pause, kill or drawdown stop |
+| POST | `/api/control/reset` | Reset the simulated balance (`{ balance? }`; only with no open positions) |
+| POST | `/api/control/quant-scalp-autopilot` | Turn Hunter on or off (`{ enabled }`) |
 
 ---
 
@@ -476,45 +477,57 @@ docker run -d \
 
 Open **http://localhost:5678** and create an account.
 
-### Workflow 1: Trade Alert (webhook → Telegram)
+> **Sign-in:** these workflows call the API without a token, so they only work
+> while `ALLOWED_EMAILS` is unset (a local copy). With sign-in on, every API call
+> except `/api/health` needs a Firebase ID token, which n8n cannot get.
+
+### Workflow 1: Trade Alert (opened / closed → Telegram)
+
+Polls the trade log and sends only what is new since the last run.
 
 1. **Create a new workflow** in n8n
-2. Add a **Schedule Trigger** node → set to every 30 seconds
+2. Add a **Schedule Trigger** node → every 30 seconds
 3. Add an **HTTP Request** node:
    - Method: `GET`
-   - URL: `http://host.docker.internal:3009/api/trades?status=open`
-4. Add a **Function** node to format the message:
+   - URL: `http://host.docker.internal:3009/api/events?limit=50`
+   - Returns the latest trade events, newest first: `{ id, time, type, symbol, positionId, payload }`
+4. Add a **Code** node that keeps the events it has not seen yet:
    ```javascript
-   const trades = $input.all()[0].json;
-   if (!Array.isArray(trades) || trades.length === 0) {
-     return []; // no output = no message
-   }
-   const lines = trades.map(t =>
-     `${t.side.toUpperCase()} ${t.symbol} @ ${t.entryPrice} | P&L: ${t.unrealizedPnlPct?.toFixed(2)}%`
-   );
-   return [{ json: { text: `📊 Open Trades:\n${lines.join('\n')}` } }];
+   const seen = $getWorkflowStaticData('global');
+   const events = $input.all().map((i) => i.json);
+   const lastId = seen.lastId ?? Math.max(0, ...events.map((e) => e.id));
+   const fresh = events.filter((e) => e.id > lastId && ['order_filled', 'position_closed', 'liquidated'].includes(e.type));
+   seen.lastId = Math.max(lastId, ...events.map((e) => e.id));
+   return fresh.reverse().map((e) => ({ json: { text: e.type === 'order_filled'
+     ? `OPENED ${e.payload.side} ${e.symbol} @ ${e.payload.price} (stop ${e.payload.stop})`
+     : `CLOSED ${e.symbol} @ ${e.payload.price} (${e.payload.reason}), gross P&L ${Number(e.payload.pnl).toFixed(2)} USDT` } }));
    ```
+   The first run only records where the log is, so you are not sent the whole history.
 5. Add a **Telegram** node (or Discord, Slack, Email) → send `{{ $json.text }}`
 6. **Activate** the workflow
 
+For the open positions right now, use `GET /api/account` → `positions[]`
+(`symbol`, `side`, `entryPrice`, `stop`, `target`, `unrealized`, `pnlPct`).
+
 ### Workflow 2: SSE Event Stream (real-time alerts)
 
-For real-time alerts, use the engine's SSE stream:
+`GET /api/stream` is a server-sent event stream. Use n8n's **SSE Trigger** node
+(an HTTP Request node waits for the response to end, and this one never does):
 
-1. Add an **HTTP Request** node:
-   - Method: `GET`
-   - URL: `http://host.docker.internal:3009/api/stream`
-   - Response Format: Full Response
-2. Parse SSE events in a **Function** node
-3. Filter for events you care about (trade opened, closed, signal, circuit breaker)
-4. Send to your notification channel
+- URL: `http://host.docker.internal:3009/api/stream`
+- Events it sends:
+  - `signal`: the engine confirmed an entry (the dashboard's notifications)
+  - `warning`: a coin got a pump or danger warning
+  - `engine`: the engine's clock moved (every candle close; no detail)
+  - `prices`: live prices
+- Trades opening and closing are **not** on the stream; poll `/api/events` for those (Workflow 1).
 
 ### Workflow 3: Daily P&L Report
 
 1. **Schedule Trigger** → every day at 8:00 AM
-2. **HTTP Request** → `GET http://host.docker.internal:3009/api/equity?from=<yesterday>`
-3. **HTTP Request** → `GET http://host.docker.internal:3009/api/results?from=<yesterday>`
-4. **Function** → Format a summary with:
+2. **HTTP Request** → `GET http://host.docker.internal:3009/api/equity?hours=24` (equity points over the last 24 hours)
+3. **HTTP Request** → `GET http://host.docker.internal:3009/api/trades?limit=200` (closed trades, newest first; keep those with `closedAt` in the last 24 hours)
+4. **Code** → Format a summary with:
    - Starting vs ending equity
    - Number of trades taken
    - Win/loss breakdown
@@ -526,7 +539,7 @@ For real-time alerts, use the engine's SSE stream:
 1. **Schedule Trigger** → every 1 minute
 2. **HTTP Request** → `GET http://host.docker.internal:3009/api/account`
 3. **IF** node → check `{{ $json.circuitBreaker.active === true }}`
-4. **Telegram** → "🚨 BTC Circuit Breaker ACTIVE — all new longs halted for 30 min"
+4. **Telegram** → "🚨 BTC Circuit Breaker ACTIVE — new altcoin longs blocked for 30 min"
 
 ### Testing n8n workflows
 
@@ -537,7 +550,7 @@ For real-time alerts, use the engine's SSE stream:
    ```
    # From inside n8n, test the connection:
    URL: http://host.docker.internal:3009/api/health
-   Expected: { "ok": true }
+   Expected: { "status": "ok", "feed": "live", ... }
    ```
 5. If `host.docker.internal` doesn't work on your system, use your machine's local IP instead
 
@@ -633,7 +646,7 @@ npm start        # NODE_ENV=production node server.ts
 ```bash
 npm install              # Install dependencies
 npm run dev              # Dev server (engine + dashboard)
-npm test                 # Run all 393 tests
+npm test                 # Run all 406 tests
 npm run lint             # Type check
 npm run build            # Production build
 npm start                # Start production server

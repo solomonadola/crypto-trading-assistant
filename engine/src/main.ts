@@ -17,8 +17,7 @@ import { replayCandles } from './feed/replayFeed';
 import { CommandError, Engine, type EngineCommand } from './core/engine';
 import { Results } from './storage/results';
 import { SignalLog } from './storage/signals';
-import { TradeJournalStore } from './storage/journal';
-import type { JournalEntry } from '../../shared/types';
+import { journalEntryFrom, TradeJournalStore } from './storage/journal';
 import { FirestoreBackup, type BackupState } from './storage/firestoreBackup';
 import { backupToFile } from './storage/fileBackup';
 import { HISTORY_TABLES, insertRows, lastKey, rowsAfter } from './storage/history';
@@ -492,16 +491,20 @@ app.get('/api/journal/:id', (req, res) => {
   res.json(entry);
 });
 app.post('/api/journal/:id', (req, res) => {
-  const tradeId = req.params.id;
-  const { rating, tags, notes, ata } = req.body || {};
-  const entry: JournalEntry = {
-    tradeId,
-    rating: Number(rating) || 0,
-    tags: Array.isArray(tags) ? tags : [],
-    notes: String(notes || ''),
-    ata: ata && typeof ata === 'object' ? ata : undefined,
-    updatedAt: Date.now(),
-  };
+  if (backup.standby) {
+    res.status(409).json({ ok: false, error: STANDBY_MESSAGE });
+    return;
+  }
+  const tradeId = String(req.params.id);
+  if (!engine.closedTrades().some((t) => t.id === tradeId)) {
+    res.status(404).json({ ok: false, error: `No closed trade ${tradeId}` });
+    return;
+  }
+  const entry = journalEntryFrom(tradeId, req.body, Date.now());
+  if (typeof entry === 'string') {
+    res.status(400).json({ ok: false, error: entry });
+    return;
+  }
   journalStore.save(entry);
   res.json({ ok: true, entry });
 });
@@ -650,6 +653,7 @@ app.post('/api/control/kill', async (req, res) => {
   control(() => ({ type: 'kill', reason: 'manual kill', prices, time: Date.now() }))(req, res);
 });
 app.post('/api/control/pause', control(() => ({ type: 'pause', reason: 'paused from the dashboard' })));
+app.post('/api/control/resume', control(() => ({ type: 'resume' })));
 app.post('/api/control/reset', control((req) => {
   const b = Number(req.body?.balance);
   return { type: 'reset_balance', balance: b > 0 ? b : undefined };
@@ -993,15 +997,15 @@ app.get('/api/quant-scalp/autopilot', (_req, res) => {
 app.post('/api/control/quant-scalp-autopilot', (req, res) => {
   const b = req.body ?? {};
   const next = b.enabled !== undefined ? Boolean(b.enabled) : !quantAutopilot;
-  quantAutopilot = next;
-  setKv(db, QUANT_AUTOPILOT_KEY, String(quantAutopilot));
-  console.log(`[hunter] Hunter is now ${quantAutopilot ? 'ACTIVE' : 'OFF'}`);
-  broadcast('engine', { clock: engine.now(), quantAutopilot });
   const refusal = hunterSwitchRefusal({ configEnabled: config.scalp_autopilot.enabled, standby: backup.standby, enable: next });
   if (refusal) {
     res.status(409).json({ ok: false, error: refusal, enabled: quantAutopilot });
     return;
   }
+  quantAutopilot = next;
+  setKv(db, QUANT_AUTOPILOT_KEY, String(quantAutopilot));
+  console.log(`[hunter] Hunter is now ${quantAutopilot ? 'ACTIVE' : 'OFF'}`);
+  broadcast('engine', { clock: engine.now(), quantAutopilot });
   res.json({ ok: true, enabled: quantAutopilot });
 });
 

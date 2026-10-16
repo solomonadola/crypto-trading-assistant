@@ -303,15 +303,6 @@ export class Portfolio {
     return p && { ...p };
   }
 
-  /** Mutate a pending entry's stop, target or refPrice in place (after an edit-pending command). */
-  modifyPending(id: string, patch: { stop?: number; target?: number | null; refPrice?: number }): void {
-    const p = this.pending.get(id);
-    if (!p) return;
-    if (patch.stop !== undefined) p.stop = patch.stop;
-    if (patch.target !== undefined) p.target = patch.target;
-    if (patch.refPrice !== undefined) p.refPrice = patch.refPrice;
-  }
-
   closedTrades(): ClosedTrade[] {
     return [...this.closed];
   }

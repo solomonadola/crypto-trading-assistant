@@ -128,6 +128,7 @@ export class PatternMemory {
       expectancyR: Number(expectancyR.toFixed(2)),
       verdict: verdictFromExpectancy(expectancyR),
       advice: meta.advice,
+      assumedPct: Math.round((wPrior / totalW) * 100),
     };
   }
 
@@ -214,12 +215,19 @@ export class PatternMemory {
     const weights = [0.30, 0.25, 0.20, 0.15, 0.10];
     let winRatePct = 0;
     let expectancyR = 0;
+    let assumed = 0;
+    let weightSum = 0;
 
     for (let i = 0; i < relevant.length; i++) {
       const w = weights[i] ?? 0.20;
       winRatePct += relevant[i].winRatePct * w;
       expectancyR += relevant[i].expectancyR * w;
+      assumed += relevant[i].assumedPct * w;
+      weightSum += w;
     }
+    // Until real trades outweigh the starting assumptions, the numbers are those assumptions, not a track record.
+    const assumedPct = weightSum ? Math.round(assumed / weightSum) : 100;
+    const basis = assumedPct >= 50 ? 'mostly built-in assumptions, few real trades yet' : 'mostly from your trades';
 
     winRatePct = Math.round(winRatePct);
     expectancyR = Number(expectancyR.toFixed(2));
@@ -278,15 +286,15 @@ export class PatternMemory {
 
     let summary = '';
     if (compositeVerdict === 'strong_edge') {
-      summary = `High-Probability Setup (${winRatePct}% historical win rate, +${expectancyR}R EV). Aligns with favorable structural edges.`;
+      summary = `High-Probability Setup (${winRatePct}% win rate, +${expectancyR}R EV; ${basis}). Aligns with favorable structural edges.`;
     } else if (compositeVerdict === 'positive_edge') {
-      summary = `Positive Expectancy Setup (${winRatePct}% historical win rate, +${expectancyR}R EV). Favorable conditions.`;
+      summary = `Positive Expectancy Setup (${winRatePct}% win rate, +${expectancyR}R EV; ${basis}). Favorable conditions.`;
     } else if (compositeVerdict === 'neutral') {
-      summary = `Neutral Edge (${winRatePct}% win rate, ${expectancyR}R EV). Mixed market context; exercise discipline.`;
+      summary = `Neutral Edge (${winRatePct}% win rate, ${expectancyR}R EV; ${basis}). Mixed market context; exercise discipline.`;
     } else if (compositeVerdict === 'negative_edge') {
-      summary = `Negative Expectancy Warning (${winRatePct}% win rate, ${expectancyR}R EV). Fights market conditions; advise waiting.`;
+      summary = `Negative Expectancy Warning (${winRatePct}% win rate, ${expectancyR}R EV; ${basis}). Fights market conditions; advise waiting.`;
     } else {
-      summary = `Severe Hazard Warning (${winRatePct}% win rate, ${expectancyR}R EV). Severe structural headwinds or exhausted range. Highly unrecommended.`;
+      summary = `Severe Hazard Warning (${winRatePct}% win rate, ${expectancyR}R EV; ${basis}). Severe structural headwinds or exhausted range. Highly unrecommended.`;
     }
 
     const sampleSize = relevant.reduce((s, r) => s + r.tradesCount, 0);
@@ -299,6 +307,7 @@ export class PatternMemory {
       winRatePct,
       expectancyR,
       sampleSize,
+      assumedPct,
       warnings,
       strengths,
       summary,
