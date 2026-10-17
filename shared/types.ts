@@ -277,8 +277,10 @@ export interface TradeIdea {
   /** Where stops sit (Section 18.3), nearest first; `intact` while no 15m candle has traded through. */
   liquidity: { name: string; side: 'buy' | 'sell'; price: number; distancePct: number; intact: boolean }[];
   /**
-   * Setup quality, 0 to 100: share of the checklist met (50), reward:risk to
-   * the first target up to 3R (25), stage (15), fits the stop and R rules (10).
+   * Setup quality, 0 to 100: share of the whole checklist met, a pending check
+   * counting as not met (50), reward:risk to the first target up to 2R (25),
+   * stage (15), fits the stop and R rules (10). At most 69 until the 15m
+   * confirmation: only a confirmed setup reaches the green band (70+).
    * A ranking of how close the coin is to a clean setup, not a win probability.
    * 0 without a clear direction: there is no setup to rank.
    */

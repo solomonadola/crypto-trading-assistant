@@ -108,7 +108,7 @@ export function Market({ go }: { go: (page: string, symbol?: string) => void }) 
       profit: (r) => (r.setup?.meetsRules ? -1000 : 0) - (r.setup?.targetPct ?? -1),
       quality: (r) => -(r.setup?.quality ?? -1),
       rr: (r) => -(r.setup?.rr ?? -99),
-      checks: (r) => -(r.setup && r.setup.checksDecided ? r.setup.checksMet / r.setup.checksDecided : -1),
+      checks: (r) => -(r.setup && r.setup.checksTotal ? r.setup.checksMet / r.setup.checksTotal : -1),
       change: (r) => -(r.changePct ?? 0), atr: (r) => -(r.atrPct1h ?? 0), volume: (r) => -(r.quoteVolume ?? 0),
     };
     return sort === 'rank' ? list : [...list].sort((a, b) => by[sort](a) - by[sort](b));
@@ -260,7 +260,7 @@ export function Market({ go }: { go: (page: string, symbol?: string) => void }) 
                   ) : r.setup ? <ConditionBadge kind={r.setup.condition} title="No clear direction: no long or short until one side is clear" /> : <span className="text-xs text-ink-3">–</span>}
                 </td>
                 <td className={td}>{r.setup && r.setup.bias !== 'none' ? <Quality q={r.setup.quality} /> : <span className="text-ink-3" title="No clear direction: no setup to rate">–</span>}</td>
-                <td className={`${td} tabular text-ink-2`}>{r.setup && r.setup.bias !== 'none' ? `${r.setup.checksMet}/${r.setup.checksDecided}` : '–'}</td>
+                <td className={`${td} tabular text-ink-2`}>{r.setup && r.setup.bias !== 'none' ? `${r.setup.checksMet}/${r.setup.checksTotal}` : '–'}</td>
                 <td className={`${td} tabular`}>{price(live?.prices[r.symbol] ?? r.price)}</td>
                 <td className={`${td} tabular ${r.changePct == null ? 'text-ink-3' : r.changePct >= 0 ? 'text-good' : 'text-critical'}`}>{r.changePct == null ? '–' : `${r.changePct >= 0 ? '▲' : '▼'} ${pct(r.changePct, 1, true)}`}</td>
                 <td className={`${td} tabular text-ink-2`}>{pct(r.atrPct1h, 2)}</td>
@@ -281,8 +281,9 @@ export function Market({ go }: { go: (page: string, symbol?: string) => void }) 
         <p className="mt-3 text-xs text-ink-3">
           Coins need $50M of volume over 24h and a current pace of $50M a day (the last 4 hours scaled to a day).
           A signal needs its one take-profit at least 3% from the entry and at least 2R. Signals come first, from the largest profit down.
-          Quality (0–100) ranks how close a coin is to a clean setup: share of the checklist met, reward:risk to the first target, how far the setup has got, and whether it fits the stop and R rules.
-          It is not a win probability.
+          Quality (0–100) ranks how close a coin is to a clean setup: share of the checklist met (a check still waiting counts as not met), reward:risk to the first target up to 2R,
+          how far the setup has got, and whether it fits the stop and R rules. It stays under 70 until the 15m confirmation: only a confirmed setup turns green.
+          It is not a win probability: the Filter lab shows how each quality band has actually done.
         </p>
         {scanner?.lastScan && (
           <p className="mt-3 text-xs text-ink-3">

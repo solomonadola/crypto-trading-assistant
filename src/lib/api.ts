@@ -67,7 +67,7 @@ export interface MarketRow {
     condition: 'trend_up' | 'trend_down' | 'consolidating' | 'choppy';
     stage: string | null; skipped: boolean;
     rr: number | null; meetsRules: boolean; targetPct: number | null;
-    speed: 'calm' | 'normal' | 'wild'; movingFast: boolean; pdPosition: number | null; checksMet: number; checksDecided: number; quality: number;
+    speed: 'calm' | 'normal' | 'wild'; movingFast: boolean; pdPosition: number | null; checksMet: number; checksTotal: number; quality: number;
   };
   runner?: {
     stage: RunnerStage;

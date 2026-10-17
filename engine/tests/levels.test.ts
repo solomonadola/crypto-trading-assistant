@@ -149,6 +149,8 @@ describe('trade plan (the models\' rules)', () => {
     const ok = Object.fromEntries(idea.checklist.map((i) => [i.label, i.ok]));
     expect(ok['1h trend up: close above EMA200, EMA50 rising']).toBe(true);
     expect(ok['4h structure not down']).toBeNull();                    // unknown in this fixture
+    expect(ok['1h structure not down']).toBeNull();
+    expect(ok['15m structure not down']).toBeNull();
     expect(ok['In discount (4h range)']).toBe(true);
     expect(ok['Entries open now (killzone, weekday)']).toBe(false);
     expect(ok['Retest: price in the demand zone / order block']).toBe(false);
@@ -176,6 +178,25 @@ describe('trade plan (the models\' rules)', () => {
     for (const i of [confirmed, skipped]) { expect(i.quality).toBeGreaterThanOrEqual(0); expect(i.quality).toBeLessThanOrEqual(100); }
     expect(confirmed.quality).toBeGreaterThan(skipped.quality);
     expect(tradeIdea(ctx(), { armed: [], entryBlock: null }).quality).toBeLessThanOrEqual(50);   // no plan: checklist only
+  });
+
+  it('a falling 15m structure fails the checklist: the lagging EMAs and 4h structure are not enough after a pump', () => {
+    const c = v3Ctx('long');
+    c.analysis.structure['15m'] = { trend: 'down', broken: null, protectedLow: null, protectedHigh: 101, highs: [], lows: [] };
+    const ok = Object.fromEntries(tradeIdea(c, { armed: [], entryBlock: null }).checklist.map((i) => [i.label, i.ok]));
+    expect(ok['1h trend up: close above EMA200, EMA50 rising']).toBe(true);
+    expect(ok['15m structure not down']).toBe(false);
+  });
+
+  it('quality stays under 70 until the 15m confirmation, and a waiting check counts as not met', () => {
+    const c = v3Ctx();
+    c.price = 96.8;
+    const waiting = tradeIdea(c, { armed: ['long'], entryBlock: null });
+    expect(waiting.plan?.confirmation).toBeFalsy();
+    expect(waiting.checklist.some((i) => i.ok === null)).toBe(true);
+    expect(waiting.quality).toBeLessThanOrEqual(69);
+    const confirmed = tradeIdea(c, { armed: [], entryBlock: null, confirmed: [{ direction: 'long', time: c.t, taken: true, reason: null }] });
+    expect(confirmed.quality).toBeGreaterThan(waiting.quality);
   });
 });
 

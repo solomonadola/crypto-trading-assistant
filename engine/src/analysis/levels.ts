@@ -194,14 +194,21 @@ type Planned = Omit<TradeIdea, 'checklist' | 'watch' | 'quality' | 'speed' | 'mo
 
 const STAGE_POINTS: Record<NonNullable<TradeIdea['plan']>['status'], number> = { in_trade: 15, confirmed: 15, armed: 15, in_zone: 12, wait: 5, no_level: 0 };
 
-/** See TradeIdea.quality. Without a trend there is no plan, so only the checklist counts. */
+/** Highest quality before the 15m confirmation: under the green band (70+) until the coin has confirmed. */
+export const UNCONFIRMED_MAX_QUALITY = 69;
+
+/**
+ * See TradeIdea.quality. Every check counts, a pending one as not met: a setup is not "all checks met"
+ * while it still waits for its confirmation. Reward:risk earns full points at 2R, not more for a further
+ * target (a further target is less likely to be reached). Without the confirmation it stays under 70.
+ */
 export function quality(idea: Planned, list: ChecklistItem[]): number {
-  const decided = list.filter((c) => c.ok !== null);
-  const checks = decided.length ? decided.filter((c) => c.ok).length / decided.length : 0;
+  const checks = list.length ? list.filter((c) => c.ok === true).length / list.length : 0;
   const plan = idea.plan;
   const r = plan?.targets[0]?.r ?? 0;
   const stage = plan ? (plan.status === 'confirmed' && plan.confirmation && !plan.confirmation.taken ? 5 : STAGE_POINTS[plan.status]) : 0;
-  return Math.round(50 * checks + 25 * Math.min(Math.max(r, 0), 3) / 3 + stage + (plan?.meetsRules ? 10 : 0));
+  const q = Math.round(50 * checks + 25 * Math.min(Math.max(r, 0), 2) / 2 + stage + (plan?.meetsRules ? 10 : 0));
+  return plan?.confirmation ? q : Math.min(q, UNCONFIRMED_MAX_QUALITY);
 }
 
 function planIdea(ctx: Context, inputs: IdeaInputs): Planned {
@@ -301,11 +308,17 @@ function checklist(ctx: Context, idea: Planned, entryBlock: string | null): Chec
   const s = sign(dir);
   const plan = idea.plan && idea.plan.direction === dir && idea.plan.entry !== null ? idea.plan : null;
   const st4h = ctx.analysis.structure['4h']?.trend ?? null;
+  const st1h = ctx.analysis.structure['1h']?.trend ?? null;
+  const st15m = ctx.analysis.structure['15m']?.trend ?? null;
   const range = dealingRange(ctx);
   const tp = plan?.targets[0];
   return [
     { label: `1h trend ${long ? 'up' : 'down'}: close ${long ? 'above' : 'below'} EMA200, EMA50 ${long ? 'rising' : 'falling'}`, ok: biasAllows(ctx, dir), detail: idea.biasReason },
     { label: `4h structure not ${long ? 'down' : 'up'}`, ok: st4h === null ? null : st4h !== (long ? 'down' : 'up'), detail: `4h structure: ${st4h ?? 'unknown'}` },
+    // The EMAs and the 4h structure lag: after a pump they stay "up" for a day while price makes lower highs and
+    // lower lows. The 1h and 15m structure turn first.
+    { label: `1h structure not ${long ? 'down' : 'up'}`, ok: st1h === null ? null : st1h !== (long ? 'down' : 'up'), detail: `1h structure: ${st1h ?? 'unknown'}` },
+    { label: `15m structure not ${long ? 'down' : 'up'}`, ok: st15m === null ? null : st15m !== (long ? 'down' : 'up'), detail: `15m structure: ${st15m ?? 'unknown'}` },
     { label: `In ${long ? 'discount' : 'premium'} (4h range)`, ok: range ? zoneAllows(range, dir) : null, detail: range ? `${Math.round(range.position * 100)}% of ${fmt(range.low)} - ${fmt(range.high)}` : 'no 4h range yet' },
     { label: 'Entries open now (killzone, weekday)', ok: entryBlock === null, detail: entryBlock === null ? 'inside a killzone' : entryBlock.replace(/_/g, ' ') },
     { label: `Retest: price in the ${long ? 'demand zone / order block' : 'supply zone / order block'}`, ok: plan ? plan.status !== 'wait' : null, detail: plan ? `area ${fmt(plan.entryLow)} - ${fmt(plan.entryHigh)}, price ${fmt(ctx.price)}` : 'no zone in reach' },

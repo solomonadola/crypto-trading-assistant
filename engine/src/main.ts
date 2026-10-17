@@ -1170,11 +1170,10 @@ app.get('/api/market', (_req, res) => {
       setup: (() => {
         const idea = ideaFor(symbol);
         if (!idea) return null;
-        const decided = idea.checklist.filter((c) => c.ok !== null);
         return {
           bias: idea.bias, condition: idea.condition.kind, stage: idea.plan?.status ?? null, skipped: !!idea.plan?.confirmation && !idea.plan.confirmation.taken,
           rr: idea.plan?.targets[0]?.r ?? null, meetsRules: idea.plan?.meetsRules ?? false, targetPct: idea.plan?.targetPct ?? null,
-          checksMet: decided.filter((c) => c.ok).length, checksDecided: decided.length, quality: idea.quality,
+          checksMet: idea.checklist.filter((c) => c.ok === true).length, checksTotal: idea.checklist.length, quality: idea.quality,
           speed: idea.speed, movingFast: idea.movingFast, pdPosition: idea.dealingRange?.position ?? null,
         };
       })(),

@@ -173,13 +173,15 @@ function ChecklistCard({ idea }: { idea: TradeIdea }) {
       </Card>
     );
   }
+  // Every check counts; one still waiting is not met: "all met" only once the coin has confirmed.
   const met = idea.checklist.filter((i) => i.ok === true).length;
-  const decided = idea.checklist.filter((i) => i.ok !== null).length;
+  const total = idea.checklist.length;
+  const waiting = idea.checklist.filter((i) => i.ok === null).length;
   return (
     <Card
       title={`Checklist for a ${idea.checklistFor}`}
       icon={<CheckCircle2 size={16} />}
-      right={<Badge tone={met === decided ? 'good' : met >= decided - 2 ? 'warning' : 'muted'}>{met}/{decided} met</Badge>}
+      right={<Badge tone={met === total ? 'good' : met >= total - 2 ? 'warning' : 'muted'} title={waiting ? `${waiting} still waiting (counted as not met)` : undefined}>{met}/{total} met{waiting ? ` · ${waiting} waiting` : ''}</Badge>}
       className="h-full"
     >
       <ul className="space-y-1.5">
@@ -337,7 +339,10 @@ function TradeSummary({ idea, watch }: { idea: TradeIdea; watch: CoinWatch | nul
         </Tile>
         <Tile label="Setup quality">
           {dir === 'none' ? <span className={`${pill} ${tone.muted}`}>–</span>
-            : <span className={`${pill} ${idea.quality >= 70 ? tone.good : idea.quality >= 50 ? tone.warning : tone.muted}`}>{idea.quality}/100</span>}
+            : <span className={`${pill} ${idea.quality >= 70 ? tone.good : idea.quality >= 50 ? tone.warning : tone.muted}`}
+                title={idea.plan?.confirmation ? undefined : 'Not confirmed yet: quality stays under 70 until the 15m CHoCH confirms'}>
+                {idea.quality}/100{idea.plan?.confirmation ? '' : ' · unconfirmed'}
+              </span>}
         </Tile>
         <Tile label="Risk">
           <span className={`${pill} ${tone[riskTone]}`}>{riskTone !== 'good' && <AlertTriangle size={14} />}{riskText}{coinWarnings ? ` · ${coinWarnings} warning${coinWarnings > 1 ? 's' : ''}` : ''}</span>

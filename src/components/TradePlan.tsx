@@ -71,9 +71,10 @@ export function TradePlanCard({ idea, compact = false }: { idea: TradeIdea; comp
           <MovingFastBadge on={idea.movingFast} />
           {compact && <PlanStatus idea={idea} />}
           {compact && idea.bias !== 'none' && idea.checklist && (() => {
+            // Every check counts; one still waiting is not met: "all met" only once the coin has confirmed.
             const met = idea.checklist.filter((c) => c.ok === true).length;
-            const decided = idea.checklist.filter((c) => c.ok !== null).length;
-            return <Badge tone={met === decided ? 'good' : met >= decided - 2 ? 'warning' : 'muted'} title={`checklist for a ${idea.checklistFor}`}>{met}/{decided} checks</Badge>;
+            const total = idea.checklist.length;
+            return <Badge tone={met === total ? 'good' : met >= total - 2 ? 'warning' : 'muted'} title={`checklist for a ${idea.checklistFor}`}>{met}/{total} checks</Badge>;
           })()}
         </div>
         <p className="text-ink-2">{idea.biasReason}.</p>
