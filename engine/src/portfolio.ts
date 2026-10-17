@@ -74,6 +74,8 @@ export interface OpenOrder {
   /** "If it is not working, get out": see EntryFill. */
   progressCheckMin?: number;
   progressMinR?: number;
+  /** A size chosen by hand: the most it may lose at its stop, percent of equity, when the fill re-checks it. */
+  maxRiskPct?: number;
 }
 
 export interface Position {

@@ -27,6 +27,7 @@ The full design is in [ENGINE_PLAN.md](ENGINE_PLAN.md).
 - [API Reference](#api-reference)
 - [Trade Journal (ATA Post-Mortem)](#trade-journal-ata-post-mortem)
 - [Hunter: Killzone Sweep](#hunter-killzone-sweep)
+- [Position Sizing](#position-sizing)
 - [Stop Ladder (manual trades)](#stop-ladder-manual-trades)
 - [BTC Circuit Breaker](#btc-circuit-breaker)
 - [4H Dealing Range Radar](#4h-dealing-range-radar)
@@ -81,7 +82,7 @@ or get filtered.
 | `engine/src/filters.ts`, `scoring.ts` | Filters (chop, fakeout, stagnation, etc.) and confluence scoring. |
 | `engine/src/feed/` | Binance public client, live and replay candle feeds, candle store. |
 | `engine/src/storage/` | SQLite: append-only trade log, signals, trade journal. |
-| `engine/tests/` | 31 test files, 425 tests. |
+| `engine/tests/` | 32 test files, 435 tests. |
 | `src/` | React dashboard (Vite + Tailwind). |
 | `src/pages/` | Dashboard pages: Overview, Market, Trades, Signals, Scalp, Ideas, Chart, FilterLab. |
 | `data/engine/engine.db` | SQLite database (delete it to start fresh). |
@@ -91,7 +92,7 @@ or get filtered.
 ## Running Tests
 
 ```bash
-# Run all 425 tests (engine logic, storage, indicators, backtest, etc.)
+# Run all 435 tests (engine logic, storage, indicators, backtest, etc.)
 npm test
 
 # Type check (no emit)
@@ -456,6 +457,29 @@ stop width, weekend and funding windows, BTC and exhaustion filters).
 Settings: `scalp_autopilot.killzone_sweep` in `config.yaml`. Backtest it with
 `npm run backtest -- --models scalp --split <date>`.
 
+## Position Sizing
+
+Every trade is sized from its stop: by default so that a stop-out loses about
+**1% of equity** (0.5% on wild coins), fees and slippage included
+(`allocation.sizing: risk`). A tight stop gives a large position, a wide stop a
+small one; the loss at the stop stays the same. Caps can only make it smaller:
+3% open risk across trades, 4 open trades, 300% exposure, 1% of the coin's last
+hour of volume, and half size after 3 losses in a row.
+
+For a manual trade, the **Take position** dialog offers three choices:
+
+| Choice | You set | The engine |
+|---|---|---|
+| Auto | nothing | sizes for about 1% at the stop, as above |
+| Risk % | the share of equity to lose at the stop, e.g. 0.5 or 2 | sizes the position for it |
+| USDT | the position value, e.g. 200 | uses it as given |
+
+A size chosen by hand may lose at most `allocation.manual_max_risk_pct` (3%) at
+its stop, and is **refused, never quietly cut**, when a cap would change it; the
+message says what size the cap allows. The dialog shows the dollar loss at the
+stop as you type. The fill re-checks the size against the risk you chose, not
+the default 1%.
+
 ## Stop Ladder (manual trades)
 
 Once a manual trade has gone your way, its stop follows (`exits.r_ladder` in
@@ -705,7 +729,7 @@ npm start        # NODE_ENV=production node server.ts
 ```bash
 npm install              # Install dependencies
 npm run dev              # Dev server (engine + dashboard)
-npm test                 # Run all 425 tests
+npm test                 # Run all 435 tests
 npm run lint             # Type check
 npm run build            # Production build
 npm start                # Start production server

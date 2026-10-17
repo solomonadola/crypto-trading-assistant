@@ -488,6 +488,23 @@ describe('limit pullback orders', () => {
     expect(trail).toBeCloseTo(107.2, 9);
   });
 
+  it('a limit sized by hand keeps its size at the fill instead of shrinking to the default 1% risk', () => {
+    const fillValue = (size?: { kind: 'usdt'; value: number }) => {
+      const e = engine();
+      e.onCandles([minute(at - 60_000, 104, 105.5, 103.8, 105)]);
+      e.onCommand({ type: 'open', symbol: 'BTCUSDT', side: 'long', price: 100, time: at, stop: 98, target: 110, orderType: 'limit', ...(size ? { size } : {}) });
+      const fill = e.onCandles([minute(at, 103, 103, 99.8, 100.2)]).find((x) => x.type === 'order_filled')!;
+      return Number(fill.payload.qty) * Number(fill.payload.price);
+    };
+    expect(fillValue({ kind: 'usdt', value: 800 })).toBeCloseTo(800, 6);   // risks about 1.8%: kept
+    expect(fillValue()).toBeLessThan(500);                                 // auto: about 1% at the stop
+    expect(() => {
+      const e = engine();
+      e.onCandles([minute(at - 60_000, 104, 105.5, 103.8, 105)]);
+      e.onCommand({ type: 'open', symbol: 'BTCUSDT', side: 'long', price: 100, time: at, stop: 98, target: 110, orderType: 'limit', size: { kind: 'risk_pct', value: 5 } });
+    }).toThrow(/manual trades may risk at most 3%/);
+  });
+
   it('a candle that opens beyond the stop never fills the limit', () => {
     const e = engine();
     e.onCandles([minute(at - 60_000, 104, 105.5, 103.8, 105)]);

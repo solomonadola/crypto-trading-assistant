@@ -69,6 +69,26 @@ describe('risk', () => {
     expect(d.detail.caps).toBe('loss_cap');
   });
 
+  it('a size chosen by hand: a risk % or USDT, up to manual_max_risk_pct at the stop, refused rather than cut', () => {
+    // Equity 1000, a 2% stop plus 0.2% costs: a stop-out loses 2.2% of the position.
+    const byRisk = decideEntry(base({ size: { kind: 'risk_pct', value: 2 } }));
+    expect(byRisk).toMatchObject({ ok: true, maxRiskPct: 2 });
+    expect(byRisk.notional).toBeCloseTo((2 / 2.2) * 1000, 6);         // loses $20 = 2% at the stop
+    const byUsdt = decideEntry(base({ size: { kind: 'usdt', value: 500 } }));
+    expect(byUsdt.notional).toBeCloseTo(500, 9);
+    expect(byUsdt.maxRiskPct).toBeCloseTo(1.1, 9);                     // $11 at the stop
+    // Over the 3% ceiling, either way: refused, with the loss it would have meant.
+    expect(decideEntry(base({ size: { kind: 'risk_pct', value: 3.5 } }))).toMatchObject({ ok: false, reason: 'risk_size_over_ceiling' });
+    const tooBig = decideEntry(base({ size: { kind: 'usdt', value: 2000 } }));   // $44 = 4.4%
+    expect(tooBig).toMatchObject({ ok: false, reason: 'risk_size_over_ceiling' });
+    expect(tooBig.detail.wantedRiskPct).toBeCloseTo(4.4, 2);
+    // A cap that would cut a chosen size refuses it and says what it allows.
+    const capped = decideEntry(base({ size: { kind: 'usdt', value: 500 }, lastHourVolume: 5000 }));
+    expect(capped).toMatchObject({ ok: false, reason: 'risk_size_capped' });
+    expect(capped.detail).toMatchObject({ caps: 'volume', allowedNotional: 50 });
+    expect(decideEntry(base({ size: { kind: 'usdt', value: -5 } })).reason).toBe('risk_size_invalid');
+  });
+
   it('caps by 1h volume, and refuses when too small', () => {
     expect(decideEntry(base({ lastHourVolume: 5000 })).notional).toBeCloseTo(50, 9);
     expect(decideEntry(base({ lastHourVolume: 1000 }))).toMatchObject({ ok: false, reason: 'risk_size_too_small' });

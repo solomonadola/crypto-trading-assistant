@@ -23,7 +23,7 @@ import { FirestoreBackup, type BackupState } from './storage/firestoreBackup';
 import { backupToFile } from './storage/fileBackup';
 import { HISTORY_TABLES, insertRows, lastKey, rowsAfter } from './storage/history';
 import { authSettings, requireSignIn } from './api/auth';
-import { unrealized } from './risk';
+import { unrealized, type ManualSize } from './risk';
 import { forwardTestStats, summarize } from './stats';
 import { noticesFor } from './notices';
 import { scan, scanVolumeSurgeRunners, type ScanResult } from './scanner';
@@ -493,6 +493,7 @@ app.get('/api/status', (_req, res) => {
     backup: { ...backup, pushedUpTo: cloud?.lastPushed() ?? null },
     signInRequired: auth.allowed.length > 0,
     quantAutopilot,
+    manualMaxRiskPct: config.allocation.manual_max_risk_pct,
   });
 });
 
@@ -604,6 +605,7 @@ app.post('/api/positions/open', async (req, res) => {
     const produced = command({
       type: 'open', symbol, side, price: entryPrice, time: Date.now(), stop, target, orderType, note: b.note ? String(b.note) : undefined,
       maxHoldMin: minutes(b.maxHoldMin), entryTimeoutMin: minutes(b.entryTimeoutMin),
+      ...(manualSize(b.size) ? { size: manualSize(b.size)! } : {}),
     });
     for (const e of produced) console.log(`[manual] ${e.type} ${e.symbol ?? ''} ${JSON.stringify(e.payload)}`);
     void pushToCloud();
@@ -625,6 +627,13 @@ app.post('/api/positions/open', async (req, res) => {
     res.status(err instanceof CommandError ? 400 : 500).json({ ok: false, error: message(err), mark });
   }
 });
+/** A size chosen in the dialog: { kind: 'risk_pct' | 'usdt', value }; null for auto or anything else. */
+function manualSize(x: unknown): ManualSize | null {
+  if (!x || typeof x !== 'object') return null;
+  const { kind, value } = x as { kind?: unknown; value?: unknown };
+  const v = Number(value);
+  return (kind === 'risk_pct' || kind === 'usdt') && Number.isFinite(v) ? { kind, value: v } : null;
+}
 /** Binance's mark prices of the open positions' coins; empty when Binance cannot be reached (closes then wait for the next 1m candle). */
 async function markPrices(): Promise<Record<string, number>> {
   const held = new Set(engine.positions().map((p) => p.symbol));

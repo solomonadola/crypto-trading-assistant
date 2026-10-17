@@ -21,7 +21,7 @@ import { buildContext, lastOf, sign, type Context } from '../strategy/context';
 import { armedStillValid, planTrade, tryArm, tryConfirm, type Armed, type Confirmation, type TradePlan } from '../strategy/pullback';
 import { btc, exhaustion, funding, runFilters } from '../filters';
 import { scoreSignal } from '../scoring';
-import { decideEntry, equityOf, riskAtStop, unrealized, type SymbolRules } from '../risk';
+import { decideEntry, equityOf, riskAtStop, unrealized, type ManualSize, type RiskDecision, type SymbolRules } from '../risk';
 import { manage } from '../exits';
 import { fee, grossPnl, liquidationPrice, marketFill, restingTargetFill, roundQty, stopFill, targetFill } from '../sim/broker';
 import { tradeIdea } from '../analysis/levels';
@@ -88,6 +88,8 @@ export type EngineCommand =
     type: 'open'; symbol: string; side: Direction; price: number; time: number; stop: number; target: number | null;
     orderType?: 'market' | 'limit'; note?: string; setup?: 'manual' | 'scalp'; maxHoldMin?: number; entryTimeoutMin?: number;
     progressCheckMin?: number; progressMinR?: number;
+    /** A size chosen by hand (see ManualSize); absent: sized by the risk rules. */
+    size?: ManualSize;
   }
   /**
    * Edit an open position's stop and/or take-profit (null removes the take-profit). `price` is the
@@ -634,14 +636,16 @@ export class Engine {
       config: this.cfg, t: cmd.time, symbol, side, entry: price, stop,
       portfolio: this.portfolio, priceOf: (x) => this.priceOf(x), dayStartEquity: this.dayStart.equity || this.portfolio.balance,
       lastHourVolume: lastHour ? lastHour.quoteVolume : null, rules: this.rules.get(symbol) ?? null, score: Number.POSITIVE_INFINITY, speed, setup,
+      ...(cmd.size ? { size: cmd.size } : {}),
     });
-    if (!risk.ok) throw new CommandError(`Not taken: ${risk.reason!.replace(/^risk_/, '').replace(/_/g, ' ')}`);
+    if (!risk.ok) throw new CommandError(sizeRefusal(risk) ?? `Not taken: ${risk.reason!.replace(/^risk_/, '').replace(/_/g, ' ')}`);
     const id = `${setup}-${symbol}-${cmd.time}`;
     const order: OpenOrder = {
       action: 'open', orderType, side, notional: risk.notional, stop, target,
       chochLevel: null, signalId: null, refPrice: price, speed, setup, ...(cmd.note ? { note: cmd.note.slice(0, 200) } : {}),
       ...(cmd.maxHoldMin ? { maxHoldMin: cmd.maxHoldMin } : {}), ...(cmd.entryTimeoutMin ? { entryTimeoutMin: cmd.entryTimeoutMin } : {}),
       ...(cmd.progressCheckMin && cmd.progressMinR ? { progressCheckMin: cmd.progressCheckMin, progressMinR: cmd.progressMinR } : {}),
+      ...(cmd.size && risk.maxRiskPct !== undefined ? { maxRiskPct: risk.maxRiskPct } : {}),
     };
     const placed = this.emit('order_placed', id, symbol, { ...order }, cmd.time);
     const pending = this.portfolio.pendingEntries().find((e) => e.positionId === id)!;
@@ -862,7 +866,8 @@ export class Engine {
     // Size from the fill: the loss at the stop must still fit the cap.
     const equity = equityOf(this.portfolio, (x) => this.priceOf(x));
     const lossPct = (Math.abs(price - e.stop) / price) * 100 + (maker ? limitRoundTripPct(costs) : roundTripPct(costs));
-    const riskPct = Math.min(cfg.allocation.max_loss_per_trade_pct, speedSettings(cfg, e.speed).risk_pct);
+    // A size chosen by hand carries its own ceiling; otherwise the rules' risk per trade.
+    const riskPct = e.maxRiskPct ?? Math.min(cfg.allocation.max_loss_per_trade_pct, speedSettings(cfg, e.speed).risk_pct);
     const maxNotional = ((riskPct / 100) * equity / lossPct) * 100;
     const rules = this.rules.get(e.symbol);
     const qty = roundQty(Math.min(e.notional, maxNotional) / price, rules?.stepSize ?? 0);
@@ -1382,6 +1387,23 @@ export class Engine {
  * Scalp trades logged before the max hold and entry timeout were fields of the order: read from the
  * note the dashboard and the autopilot wrote then ("Quant Autopilot [5m]: …", "Quant Scalp (5m): …").
  */
+/** A readable refusal for a size chosen by hand; null for any other reason. */
+function sizeRefusal(r: RiskDecision): string | null {
+  const d = r.detail;
+  const usd = (x: unknown) => `$${Number(x).toFixed(2)}`;
+  switch (r.reason) {
+    case 'risk_size_invalid': return 'The size must be a positive number';
+    case 'risk_size_over_ceiling':
+      return `That size would lose ${Number(d.wantedRiskPct).toFixed(2)}% of the account at the stop (${Number(d.stopPct).toFixed(2)}% away); manual trades may risk at most ${d.ceilingPct}%`;
+    case 'risk_size_capped': {
+      const why: Record<string, string> = { exposure: 'total exposure (leverage) limit', open_risk: 'open risk limit across your trades', volume: "coin's 1h volume limit" };
+      const caps = String(d.caps).split(',').map((x) => why[x] ?? x).join(' and ');
+      return `Not placed: ${usd(d.allowedNotional)} is the most the ${caps} allows here; choose that size or less`;
+    }
+    default: return null;
+  }
+}
+
 function legacyScalp(note: string | null | undefined): { holdMin: number; timeoutMin: number } | null {
   const tf = /^Quant (?:Autopilot|Scalp) [[(](1m|5m|15m)[\])]/.exec(note ?? '')?.[1];
   if (!tf) return null;

@@ -7,7 +7,7 @@ import {
   AlertTriangle, CheckCircle2, ChevronDown, ChevronUp, Clock,
   Hourglass, PauseCircle, PlayCircle, ShieldAlert, ShieldCheck, Sparkles, X, XCircle, Zap
 } from 'lucide-react';
-import { post, usePoll, usePrices, type CoinWatch, type PatternMatch, type TradeIdea } from '../lib/api';
+import { post, usePoll, usePrices, type AccountSummary, type CoinWatch, type PatternMatch, type Status, type TradeIdea } from '../lib/api';
 import { coin, pct, price as fmtPrice } from '../lib/format';
 import { chime } from './Notifier';
 
@@ -65,6 +65,11 @@ function Dialog({ symbol, defaults, onClose }: { symbol: string; defaults: TakeD
   const { data: idea } = usePoll<TradeIdea | null>(`/api/ideas/${symbol}`, 15_000);
   const [side, setSide] = useState(defaults.side);
   const { data: pattern } = usePoll<PatternMatch | null>(`/api/pattern-memory/${symbol}?side=${side}`, 15_000);
+  // Sizing: auto (the risk rules), a chosen risk at the stop, or a chosen value in USDT.
+  const { data: account } = usePoll<AccountSummary>('/api/account', 15_000);
+  const { data: status } = usePoll<Status>('/api/status', 30_000);
+  const [sizeMode, setSizeMode] = useState<'auto' | 'risk' | 'usdt'>('auto');
+  const [sizeValue, setSizeValue] = useState('');
 
   const [entry, setEntry] = useState(short(defaults.entry ?? null));
   const [stop, setStop] = useState(short(defaults.stop));
@@ -111,6 +116,20 @@ function Dialog({ symbol, defaults, onClose }: { symbol: string; defaults: TakeD
   const costFraction = idea?.speed === 'wild' ? 0.004 : 0.002;
   const rr = stopOk && targetSide && effectiveEntry !== null ? (Math.abs(t! - effectiveEntry) - costFraction * effectiveEntry) / Math.abs(effectiveEntry - s) : null;
   const targetOk = rr !== null && rr >= MIN_RR;
+
+  // What the size means at the stop, as the engine works it out (auto: before its caps, which can only shrink it).
+  const ceilingPct = status?.manualMaxRiskPct ?? 3;
+  const autoRiskPct = idea?.speed === 'wild' ? 0.5 : 1;
+  const equity = account?.equity ?? null;
+  const lossPct = stopPct !== null ? stopPct + costFraction * 100 : null;
+  const sizeNum = sizeValue.trim() ? Number(sizeValue) : Number.NaN;
+  const sizeValid = sizeMode === 'auto' || (Number.isFinite(sizeNum) && sizeNum > 0);
+  const preview = equity && lossPct && sizeValid ? (() => {
+    const notional = sizeMode === 'usdt' ? sizeNum : (equity * (sizeMode === 'risk' ? sizeNum : autoRiskPct)) / lossPct;
+    const lossUsd = (notional * lossPct) / 100;
+    return { notional, qty: effectiveEntry ? notional / effectiveEntry : null, lossUsd, lossPctOfEquity: (lossUsd / equity) * 100 };
+  })() : null;
+  const overCeiling = sizeMode !== 'auto' && preview !== null && preview.lossPctOfEquity > ceilingPct + 1e-9;
 
   // ---------------- Patience Enforcer (Wait for Level / Wait for Confirmation) ----------------
   const patience = useMemo<PatienceStatus>(() => {
@@ -388,6 +407,7 @@ function Dialog({ symbol, defaults, onClose }: { symbol: string; defaults: TakeD
         note: note.trim() || undefined,
         maxHoldMin: defaults.maxHoldMin,
         entryTimeoutMin: defaults.entryTimeoutMin,
+        size: sizeMode === 'auto' ? undefined : { kind: sizeMode === 'risk' ? 'risk_pct' : 'usdt', value: sizeNum },
       });
       if (r.pending) {
         setPendingOrder({ entryPrice: r.entryPrice ?? effectiveEntry!, stop: s, target: t, positionId: r.positionId });
@@ -656,6 +676,31 @@ function Dialog({ symbol, defaults, onClose }: { symbol: string; defaults: TakeD
             <label className="block text-xs text-ink-3">Target (required: at least {MIN_RR}R after costs)
               <input value={target} onChange={(e) => setTarget(e.target.value)} inputMode="decimal" className={`${input} ${target && !targetOk ? 'border-critical' : ''}`} />
             </label>
+            <div className="space-y-1.5">
+              <span className="block text-xs text-ink-3">Position size</span>
+              <div className="flex gap-1" role="radiogroup" aria-label="Position size">
+                {([['auto', `Auto (${autoRiskPct}% risk)`], ['risk', 'Risk %'], ['usdt', 'USDT']] as const).map(([m, label]) => (
+                  <button key={m} type="button" role="radio" aria-checked={sizeMode === m} onClick={() => { setSizeMode(m); setSizeValue(''); }}
+                    className={`flex-1 rounded-lg px-2 py-1.5 text-xs font-medium ring-1 transition ${sizeMode === m ? 'bg-accent/15 text-ink ring-accent/50' : 'bg-card-2 text-ink-3 ring-line hover:text-ink'}`}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+              {sizeMode !== 'auto' && (
+                <input value={sizeValue} onChange={(e) => setSizeValue(e.target.value)} inputMode="decimal" autoFocus
+                  placeholder={sizeMode === 'risk' ? `Share of the account to lose at the stop, e.g. 0.5 (max ${ceilingPct})` : 'Position value in USDT, e.g. 200'}
+                  aria-label={sizeMode === 'risk' ? 'Risk percent' : 'Position value in USDT'}
+                  className={`${input} ${sizeValue && (!sizeValid || overCeiling) ? 'border-critical' : ''}`} />
+              )}
+              {preview && (
+                <p className={`text-xs tabular ${overCeiling ? 'text-critical' : 'text-ink-2'}`}>
+                  ≈ ${preview.notional.toFixed(2)}{preview.qty !== null ? ` (${Number(preview.qty.toPrecision(6))} ${coin(symbol)})` : ''} ·
+                  loses ${preview.lossUsd.toFixed(2)} = {preview.lossPctOfEquity.toFixed(2)}% of the account at the stop
+                  {overCeiling ? ` · over the ${ceilingPct}% limit for a manual trade` : sizeMode === 'auto' ? ' (the risk caps can only make it smaller)' : ''}
+                </p>
+              )}
+              {!preview && sizeMode !== 'auto' && <p className="text-xs text-ink-3">Set the stop and a size to see what it risks.</p>}
+            </div>
             <label className="block text-xs text-ink-3">Note
               <input value={note} onChange={(e) => setNote(e.target.value)} maxLength={200} className={input} />
             </label>
@@ -663,14 +708,14 @@ function Dialog({ symbol, defaults, onClose }: { symbol: string; defaults: TakeD
               {stopPct !== null ? <>Stop {pct(stopPct, 2)} away{rr !== null ? <> · reward:risk {rr.toFixed(2)}R</> : null}. </> : stop ? <span className="text-critical">The stop must be {side === 'long' ? 'below' : 'above'} the entry price. </span> : null}
               {target && !targetSide && <span className="text-critical">The target must be {side === 'long' ? 'above' : 'below'} the entry price. </span>}
               {targetSide && rr !== null && rr < MIN_RR && <span className="text-critical">Only {rr.toFixed(2)}R: move the target to at least {MIN_RR}R, or the stop closer. </span>}
-              {`Executing as a Key Level limit order at ${fmtPrice(effectiveEntry)}, waiting for pullback, sized so the stop loses about 1% of the account (0.5% on wild coins).`}
+              {`Executing as a Key Level limit order at ${fmtPrice(effectiveEntry)}, waiting for pullback, ${sizeMode === 'auto' ? 'sized so the stop loses about 1% of the account (0.5% on wild coins)' : 'at the size you chose'}.`}
             </p>
 
             {error && <p className="rounded-lg bg-critical/10 px-3 py-2 text-sm text-critical">{error}</p>}
 
             <button
               onClick={() => void submit()}
-              disabled={busy || !stopOk || !targetOk || (isBadTrade && !acknowledged)}
+              disabled={busy || !stopOk || !targetOk || !sizeValid || overCeiling || (isBadTrade && !acknowledged)}
               className={`w-full rounded-xl px-4 py-2.5 text-sm font-semibold text-white transition hover:brightness-110 disabled:opacity-40 disabled:cursor-not-allowed ${
                 isBadTrade
                   ? 'bg-critical'

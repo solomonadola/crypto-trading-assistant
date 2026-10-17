@@ -37,6 +37,8 @@ export interface Status {
   backup: { target: string; namespace: string; ok: boolean; error: string | null; standby: boolean; lastPush: number };
   signInRequired: boolean;
   quantAutopilot?: boolean;
+  /** A manual trade sized by hand may lose at most this share of equity at its stop (config allocation.manual_max_risk_pct). */
+  manualMaxRiskPct?: number;
 }
 
 export interface Direction { state: string; emaAligned: boolean; tradable: boolean }

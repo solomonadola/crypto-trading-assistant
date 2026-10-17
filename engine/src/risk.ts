@@ -34,13 +34,24 @@ export interface RiskInput {
   speed?: SpeedGroup;
   /** The model asking: the scalp autopilot's trades have their own daily cap. */
   setup?: SignalRecord['setup'];
+  /** A size chosen by hand (manual trades); absent: sized by the rules. */
+  size?: ManualSize;
 }
+
+/**
+ * A manual trade's size, chosen in the dialog: the share of equity it may lose at its stop, or its value in
+ * USDT. Either way the loss at the stop may not exceed allocation.manual_max_risk_pct, and the size is
+ * refused, never quietly cut, when a cap would change it: the trader asked for this size.
+ */
+export type ManualSize = { kind: 'risk_pct'; value: number } | { kind: 'usdt'; value: number };
 
 export interface RiskDecision {
   ok: boolean;
   reason: string | null;
   notional: number;
   detail: Record<string, number | string | boolean | null>;
+  /** The most the trade may lose at its stop, percent of equity: what the fill re-checks the size against. */
+  maxRiskPct?: number;
 }
 
 
@@ -102,16 +113,27 @@ export function decideEntry(i: RiskInput): RiskDecision {
   // Size: by risk (the loss at the stop is the group's risk), flat, or the score's tier; then every cap in order.
   const stopPct = (Math.abs(i.entry - i.stop) / i.entry) * 100;
   const lossPct = stopPct + roundTripPct(costsFor(c, i.speed));
-  const riskPct = Math.min(a.max_loss_per_trade_pct, speed.risk_pct);
+  const manual = i.size;
+  const ceiling = a.manual_max_risk_pct;
+  let riskPct = Math.min(a.max_loss_per_trade_pct, speed.risk_pct);
   let capitalPct = a.sizing === 'risk' ? (riskPct / lossPct) * 100 : a.flat_capital_pct;
-  if (a.sizing === 'tiers') {
+  if (a.sizing === 'tiers' && !manual) {
     const tier = [...a.tiers].reverse().find((x) => i.score >= x.min_score);
     if (!tier) return no('risk_score_below_tiers', { score: i.score });
     capitalPct = tier.capital_pct;
   }
+  if (manual) {
+    if (!(manual.value > 0) || !Number.isFinite(manual.value)) return no('risk_size_invalid', { value: manual.value });
+    // The loss at the stop the chosen size means, percent of equity.
+    const wantedRiskPct = manual.kind === 'risk_pct' ? manual.value : (manual.value * lossPct) / equity;
+    if (wantedRiskPct > ceiling + 1e-9) return no('risk_size_over_ceiling', { wantedRiskPct: round(wantedRiskPct), ceilingPct: ceiling, stopPct: round(stopPct) });
+    riskPct = wantedRiskPct;
+    capitalPct = manual.kind === 'risk_pct' ? (riskPct / lossPct) * 100 : (manual.value / equity) * 100;
+  }
   let notional = (capitalPct / 100) * equity;
   const caps: string[] = [];
-  if (pf.sizeCutActive) { notional *= c.risk.losing_streak_size_cut.size_mult; caps.push('losing_streak'); }
+  // A losing streak halves the rules' size; a size chosen by hand is the trader's call.
+  if (pf.sizeCutActive && !manual) { notional *= c.risk.losing_streak_size_cut.size_mult; caps.push('losing_streak'); }
 
   const maxLoss = (riskPct / 100) * equity;
   if ((notional * lossPct) / 100 > maxLoss) { notional = (maxLoss / lossPct) * 100; caps.push('loss_cap'); }
@@ -131,8 +153,12 @@ export function decideEntry(i: RiskInput): RiskDecision {
 
   const minNotional = Math.max(i.rules?.minNotional ?? 5, 0.05 * equity);
   const detail = { equity: round(equity), stopPct: round(stopPct), capitalPct, notional: round(notional), caps: caps.join(',') || null, lossAtStop: round((notional * lossPct) / 100) };
+  // A chosen size that a cap would change is refused, with the cap and the size it allows, not placed smaller.
+  // (The loss cap is the chosen risk itself: only rounding can trip it.)
+  const cut = caps.filter((x) => x !== 'loss_cap');
+  if (manual && cut.length) return { ok: false, reason: 'risk_size_capped', notional: 0, detail: { ...detail, caps: cut.join(','), allowedNotional: round(notional) } };
   if (notional < minNotional) return { ok: false, reason: 'risk_size_too_small', notional: 0, detail: { ...detail, minNotional: round(minNotional) } };
-  return { ok: true, reason: null, notional, detail };
+  return { ok: true, reason: null, notional, detail, maxRiskPct: riskPct };
 }
 
 const round = (x: number) => Math.round(x * 100) / 100;

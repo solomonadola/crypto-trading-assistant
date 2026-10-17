@@ -203,6 +203,8 @@ export const configSchema = z.object({
     max_open_trades: posInt.nullable(),
     max_total_exposure_pct: z.number().positive().max(1000),
     max_loss_per_trade_pct: pct,
+    /** A manual trade's size chosen by hand may lose at most this much at its stop, percent of equity. */
+    manual_max_risk_pct: pct,
     /** null: no limit. */
     max_open_risk_pct: pct.nullable(),
     max_correlated_trades: posInt,
