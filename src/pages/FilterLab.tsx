@@ -1,5 +1,5 @@
 import { FlaskConical } from 'lucide-react';
-import { usePoll, type ShadowResult, type ShadowStats } from '../lib/api';
+import { usePoll, type IdeaQualityBand, type ShadowResult, type ShadowStats } from '../lib/api';
 import { coin, dateTime, price, words } from '../lib/format';
 import { Badge, Card, Empty, SideBadge, Table, td } from '../components/ui';
 
@@ -12,6 +12,7 @@ export function FilterLab({ go }: { go: (page: string, symbol?: string) => void 
   const { data } = usePoll<{ stats: ShadowStats[]; recent: ShadowResult[] }>('/api/shadows?hours=720&limit=200', 60_000);
   const stats = data?.stats ?? [];
   const max = Math.max(0.5, ...stats.map((s) => Math.abs(s.avgR)));
+  const { data: ideas } = usePoll<{ days: number; logged: number; bands: IdeaQualityBand[] }>('/api/idea-quality?days=30', 60_000);
 
   return (
     <div className="space-y-5">
@@ -44,6 +45,30 @@ export function FilterLab({ go }: { go: (page: string, symbol?: string) => void 
             ))}
             <div className="grid grid-cols-[12rem_1fr_11rem] text-[11px] text-ink-3"><span /><span className="flex justify-between"><span>−{max.toFixed(1)}R</span><span>0</span><span>+{max.toFixed(1)}R</span></span><span /></div>
           </div>
+        )}
+      </Card>
+
+      <Card title="Does setup quality predict the outcome?" icon={<FlaskConical size={16} />} right={<span className="text-xs text-ink-3">last 30 days · {ideas?.logged ?? 0} snapshots</span>}>
+        <p className="mb-4 max-w-3xl text-sm text-ink-2">
+          Every trade idea the dashboard shows is logged at each 15m close with its quality, and followed for 48 hours from its price:
+          did it reach the take-profit or the stop first? Each idea counts once. If higher bands do not win more often, the score
+          is not telling you anything yet. Confirmed means the 15m CHoCH had happened when the idea was shown. Small counts mean little.
+        </p>
+        {!ideas?.bands.some((b) => b.ideas) ? <Empty>Nothing to measure yet: ideas are logged from now on, and need up to 48 hours to play out.</Empty> : (
+          <Table head={['Quality', 'Confirmed', 'Ideas', 'Target first', 'Stop first', 'Still open', 'Win rate', 'Avg R']}>
+            {ideas.bands.filter((b) => b.ideas).map((b) => (
+              <tr key={`${b.band}-${b.confirmed}`}>
+                <td className={`${td} font-semibold tabular`}>{b.band}</td>
+                <td className={td}>{b.confirmed ? <Badge tone="good">confirmed</Badge> : <Badge tone="muted">waiting</Badge>}</td>
+                <td className={`${td} tabular`}>{b.ideas}</td>
+                <td className={`${td} tabular text-good`}>{b.target}</td>
+                <td className={`${td} tabular text-critical`}>{b.stop}</td>
+                <td className={`${td} tabular text-ink-3`}>{b.open}</td>
+                <td className={`${td} tabular font-medium`}>{b.hitRatePct === null ? '–' : `${b.hitRatePct.toFixed(0)}%`}</td>
+                <td className={`${td} tabular font-medium ${(b.avgR ?? 0) >= 0 ? 'text-good' : 'text-critical'}`}>{b.avgR === null ? '–' : `${b.avgR >= 0 ? '+' : '−'}${Math.abs(b.avgR).toFixed(2)}R`}</td>
+              </tr>
+            ))}
+          </Table>
         )}
       </Card>
 

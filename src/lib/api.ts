@@ -1,9 +1,9 @@
 // Talking to the engine: typed GETs, control POSTs, and a polling hook.
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { AccountSummary, AtaReflection, Candle, ClosedTradeView, FeedStatus, JournalEntry, PatternFeatureStat, PatternMatch, PatternMemoryReport, PatternVerdict, RunnerStage, ShadowResult, SignalRecord, TradeIdea, VolumeSurgeReport, VolumeSurgeRunner } from '../../shared/types';
+import type { AccountSummary, AtaReflection, Candle, ClosedTradeView, FeedStatus, IdeaQualityBand, JournalEntry, PatternFeatureStat, PatternMatch, PatternMemoryReport, PatternVerdict, RunnerStage, ShadowResult, SignalRecord, TradeIdea, VolumeSurgeReport, VolumeSurgeRunner } from '../../shared/types';
 import { idToken } from './auth';
 
-export type { AccountSummary, AtaReflection, Candle, ClosedTradeView, JournalEntry, PatternFeatureStat, PatternMatch, PatternMemoryReport, PatternVerdict, RunnerStage, ShadowResult, SignalRecord, TradeIdea, VolumeSurgeReport, VolumeSurgeRunner };
+export type { AccountSummary, AtaReflection, Candle, ClosedTradeView, IdeaQualityBand, JournalEntry, PatternFeatureStat, PatternMatch, PatternMemoryReport, PatternVerdict, RunnerStage, ShadowResult, SignalRecord, TradeIdea, VolumeSurgeReport, VolumeSurgeRunner };
 export type { ChartPattern, ChartReading, TrendRead, WyckoffRange } from '../../engine/src/analysis/patterns';
 export type { ScalpSetup, ScalpStats } from '../../engine/src/analysis/scalp';
 export type { StructureBreak, SwingPoint, SwingStructure } from '../../engine/src/analysis/swingStructure';

@@ -104,6 +104,21 @@ const MIGRATIONS: string[] = [
   );
   CREATE INDEX trade_journal_updated ON trade_journal (updated_at);
   `,
+  // 4: the trade ideas shown, at each 15m close, to measure whether setup quality predicts the outcome
+  `
+  CREATE TABLE idea_log (
+    symbol TEXT NOT NULL,
+    time INTEGER NOT NULL,
+    direction TEXT NOT NULL,
+    quality INTEGER NOT NULL,
+    confirmed INTEGER NOT NULL,
+    price REAL NOT NULL,
+    stop REAL NOT NULL,
+    target REAL NOT NULL,
+    PRIMARY KEY (symbol, time)
+  );
+  CREATE INDEX idea_log_time ON idea_log (time);
+  `,
 ];
 
 export function openDb(file: string): DB {

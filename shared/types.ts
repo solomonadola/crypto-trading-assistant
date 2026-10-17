@@ -224,6 +224,22 @@ export interface TradeIdeaTarget {
   r: number;
 }
 
+/** How the dashboard's ideas in one quality band played out (storage/ideaLog.ts). */
+export interface IdeaQualityBand {
+  band: string;
+  /** Whether the ideas had their 15m confirmation when shown. */
+  confirmed: boolean;
+  ideas: number;
+  /** Reached the take-profit first, the stop first, or neither within the horizon. */
+  target: number;
+  stop: number;
+  open: number;
+  /** target / (target + stop), percent; null with none decided. */
+  hitRatePct: number | null;
+  /** Average result in R (the target's R, -1, or where price was at the horizon). */
+  avgR: number | null;
+}
+
 export interface ChecklistItem {
   label: string;
   /** true met, false not met, null not decidable yet (e.g. waiting for a candle). */

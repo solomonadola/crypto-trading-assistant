@@ -18,6 +18,7 @@ import { CommandError, Engine, type EngineCommand } from './core/engine';
 import { Results } from './storage/results';
 import { SignalLog } from './storage/signals';
 import { journalEntryFrom, TradeJournalStore } from './storage/journal';
+import { IDEA_HORIZON_MS, IdeaLog, ideaQualityStats } from './storage/ideaLog';
 import { FirestoreBackup, type BackupState } from './storage/firestoreBackup';
 import { backupToFile } from './storage/fileBackup';
 import { HISTORY_TABLES, insertRows, lastKey, rowsAfter } from './storage/history';
@@ -68,6 +69,7 @@ const events = new EventLog(db);
 const signals = new SignalLog(db);
 const results = new Results(db);
 const journalStore = new TradeJournalStore(db);
+const ideaLog = new IdeaLog(db);
 const client = new BinancePublic({
   restBase: config.feed.rest_base,
   timeoutMs: config.feed.request_timeout_ms,
@@ -215,11 +217,39 @@ function process_(batch: Candle[]): void {
   for (const e of produced) console.log(`[engine] ${iso(e.time)} ${e.type} ${e.symbol ?? ''} ${JSON.stringify(e.payload)}`);
   for (const s of sigs) console.log(`[signal] ${iso(s.time)} ${s.symbol} ${s.direction} ${s.status}${s.reason ? ` (${s.reason})` : ''}`);
   ideaCache.clear();
+  logIdeas();
   broadcast('engine', { clock: engine.now() });
   // Confirmations for the dashboard's notifications: only fresh ones, not those replayed after a restart.
   for (const n of noticesFor(sigs, Date.now())) broadcast('signal', n);
   announceWarnings();
   runQuantAutopilot(batch);
+}
+
+/** The 15m close the ideas were last logged at. */
+let ideasLoggedAt = 0;
+/**
+ * At each new 15m close, logs the scanner coins' trade ideas that have a plan (direction, quality, whether
+ * confirmed, price, stop, take-profit), so the Filter lab can show how each quality band actually did.
+ * A failure here is only logged: it must never stop the engine processing candles.
+ */
+function logIdeas(): void {
+  const t15 = Math.floor(engine.now() / 900_000) * 900_000;
+  if (!t15 || t15 <= ideasLoggedAt) return;
+  ideasLoggedAt = t15;
+  for (const symbol of universe) {
+    try {
+      const idea = ideaFor(symbol);
+      const plan = idea?.plan;
+      const tp = plan?.targets[0];
+      if (!idea || idea.bias === 'none' || !plan || plan.stop === null || !tp) continue;
+      ideaLog.record({
+        symbol, time: idea.asOf, direction: plan.direction, quality: idea.quality, confirmed: !!plan.confirmation,
+        price: idea.price, stop: plan.stop, target: tp.price,
+      });
+    } catch (err) {
+      console.log(`[ideas] could not log ${symbol}: ${message(err)}`);
+    }
+  }
 }
 
 // ---------------------------------------------------------------- live updates
@@ -1355,6 +1385,12 @@ app.get('/api/results', (req, res) => {
     followed: summarize(followed),
     skipped: summarize(followed.filter((x) => !x.taken)),
   });
+});
+// Does setup quality predict the outcome? The ideas shown, by quality band, followed to their target or stop.
+app.get('/api/idea-quality', (req, res) => {
+  const days = Math.min(Number(req.query.days) || 30, 365);
+  const rows = ideaLog.since(engine.now() - days * 86_400_000);
+  res.json({ days, logged: rows.length, bands: ideaQualityStats(rows, (r) => store.range(r.symbol, '15m', r.time, r.time + IDEA_HORIZON_MS)) });
 });
 // Forward-testing benchmark vs live paper monitor (ROADMAP.md Step 4).
 app.get('/api/forward-test', (_req, res) => {
